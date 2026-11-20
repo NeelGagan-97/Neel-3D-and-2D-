@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { CATALOG_MAP, findRoomAtPoint, FT_TO_M, siteToMeters } from '../data/presets';
 import {
+  ArchitecturalOpening,
   CanvasTool,
   CircuitId,
   ElectricalItemType,
@@ -13,14 +14,18 @@ import {
   extractMergedWalls,
   findNearestWallAttachment,
   formatArea,
+  formatFloorLabel,
   formatLength,
   isPointInsideRoom,
+  sliceProjectForFloor,
   snapCoordinate,
+  snapCoordinateFree,
   validateRoomPlacement,
 } from '../utils/geometry';
 
 interface FloorPlan2DProps {
   project: ProjectData;
+  activeFloor?: number;
   selectedEntity?: SelectedEntity;
   selectedPointId?: string | null;
   allSelected?: boolean;
@@ -49,6 +54,11 @@ interface FloorPlan2DProps {
   onEraseEntity?: (entity: NonNullable<SelectedEntity> | { kind: 'dimension'; id: string }) => void;
   onRotateEntity?: (entity: NonNullable<SelectedEntity>) => void;
   onMovePoint?: (pointId: string, x: number, y: number, roomId: string) => void;
+  onMoveOpening?: (openingId: string, x: number, y: number) => void;
+  onDuplicatePoint?: (pointId: string) => ElectricalPoint | null;
+  onDuplicateRoom?: (roomId: string) => RoomZone | null;
+  onDuplicateOpening?: (openingId: string) => ArchitecturalOpening | null;
+  onDuplicateWall?: (wallId: string) => void;
   onPlacePointAt?: (itemType: ElectricalItemType, x: number, y: number, roomId: string) => void;
   onValidationWarning?: (message: string) => void;
 }
@@ -98,7 +108,8 @@ interface GroupDragState {
 }
 
 export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
-  project,
+  project: fullProject,
+  activeFloor = 1,
   selectedEntity = null,
   selectedPointId = null,
   allSelected = false,
@@ -123,11 +134,36 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   onEraseEntity,
   onRotateEntity,
   onMovePoint,
+  onMoveOpening,
+  onDuplicatePoint,
+  onDuplicateRoom,
+  onDuplicateOpening,
+  onDuplicateWall,
   onPlacePointAt,
   onValidationWarning,
 }) => {
+  const project = useMemo(
+    () => sliceProjectForFloor(fullProject, activeFloor),
+    [fullProject, activeFloor]
+  );
+  const underlayRooms = useMemo(
+    () => (activeFloor > 1 ? sliceProjectForFloor(fullProject, activeFloor - 1).rooms : []),
+    [fullProject, activeFloor]
+  );
+
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const [draggingPointId, setDraggingPointId] = useState<string | null>(null);
+  const [draggingPoint, setDraggingPoint] = useState<{
+    id: string;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
+  const [draggingOpening, setDraggingOpening] = useState<{
+    id: string;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
   const [roomDrag, setRoomDrag] = useState<RoomDragState | null>(null);
   const [groupDrag, setGroupDrag] = useState<GroupDragState | null>(null);
   const [lineStart, setLineStart] = useState<{ x: number; y: number } | null>(null);
@@ -146,7 +182,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     pointerId: number;
   } | null>(null);
 
-  const { lengthM, widthM } = useMemo(() => siteToMeters(project.site), [project.site]);
+  const { lengthM, widthM, ceilingM } = useMemo(() => siteToMeters(project.site), [project.site]);
   const mergedWalls = useMemo(() => extractMergedWalls(project), [project]);
   const units = project.site.units;
 
@@ -263,16 +299,20 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     const raw = clientToRawMeters(e.clientX, e.clientY);
     const snapped = snapCoordinate(raw.x, raw.y, project, snapEnabled);
 
-    // If all objects are selected (Ctrl+A) and user drags inside the site, drag the whole model together
+    // If all objects are selected (Ctrl+A) and user drags anywhere on the canvas, drag the whole model together
     if (
       allSelected &&
       (activeTool === 'select' || activeTool === 'move') &&
-      raw.inside &&
       (project.rooms.length > 0 ||
         project.customWalls.length > 0 ||
         project.openings.length > 0 ||
         project.points.length > 0)
     ) {
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // Ignore
+      }
       setGroupDrag({
         startPointerX: raw.x,
         startPointerY: raw.y,
@@ -354,40 +394,20 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
 
     const raw = clientToRawMeters(e.clientX, e.clientY);
 
-    // Dragging all selected items together (after Ctrl+A)
+    // Dragging all selected items together freely anywhere on canvas (after Ctrl+A)
     if (groupDrag) {
       const step = snapEnabled ? (units === 'ft' ? 0.5 * FT_TO_M : 0.1) : 0.01;
       const rawDx = raw.x - groupDrag.startPointerX;
       const rawDy = raw.y - groupDrag.startPointerY;
       const dx = Number((Math.round(rawDx / step) * step).toFixed(3));
       const dy = Number((Math.round(rawDy / step) * step).toFixed(3));
-      const moved = groupDrag.moved || Math.hypot(rawDx, rawDy) > 0.08;
-
-      const eps = 0.015;
-      const roomsValid = project.rooms.every(
-        (r) =>
-          r.x + dx >= -eps &&
-          r.y + dy >= -eps &&
-          r.x + r.width + dx <= lengthM + eps &&
-          r.y + r.height + dy <= widthM + eps
-      );
-      const wallsValid = project.customWalls.every(
-        (w) =>
-          w.x1 + dx >= -eps &&
-          w.y1 + dy >= -eps &&
-          w.x1 + dx <= lengthM + eps &&
-          w.y1 + dy <= widthM + eps &&
-          w.x2 + dx >= -eps &&
-          w.y2 + dy >= -eps &&
-          w.x2 + dx <= lengthM + eps &&
-          w.y2 + dy <= widthM + eps
-      );
+      const moved = groupDrag.moved || Math.hypot(rawDx, rawDy) > 0.06;
 
       setGroupDrag({
         ...groupDrag,
         dx,
         dy,
-        valid: roomsValid && wallsValid,
+        valid: true,
         moved,
       });
       return;
@@ -407,19 +427,36 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       setHoverOpening(null);
     }
 
-    // Dragging an electrical point
-    if (draggingPointId && onMovePoint) {
-      const snapped = snapCoordinate(raw.x, raw.y, project, snapEnabled);
+    // Dragging an electrical point freely
+    if (draggingPoint && onMovePoint) {
+      const dist = Math.hypot(raw.x - draggingPoint.startX, raw.y - draggingPoint.startY);
+      if (!draggingPoint.moved && dist < 0.06) return;
+      if (!draggingPoint.moved) {
+        setDraggingPoint((prev) => (prev ? { ...prev, moved: true } : null));
+      }
+      const snapped = snapCoordinateFree(raw.x, raw.y, project, snapEnabled);
       const room = findRoomAtPoint(project.rooms, snapped.x, snapped.y) ?? project.rooms[0];
-      onMovePoint(draggingPointId, snapped.x, snapped.y, room?.id ?? '');
+      onMovePoint(draggingPoint.id, snapped.x, snapped.y, room?.id ?? '');
       return;
     }
 
-    // Dragging or Resizing a room with live geometric validation
+    // Dragging a door/window opening freely
+    if (draggingOpening && onMoveOpening) {
+      const dist = Math.hypot(raw.x - draggingOpening.startX, raw.y - draggingOpening.startY);
+      if (!draggingOpening.moved && dist < 0.06) return;
+      if (!draggingOpening.moved) {
+        setDraggingOpening((prev) => (prev ? { ...prev, moved: true } : null));
+      }
+      const snapped = snapCoordinateFree(raw.x, raw.y, project, snapEnabled);
+      onMoveOpening(draggingOpening.id, snapped.x, snapped.y);
+      return;
+    }
+
+    // Dragging (freely dismantling/placing) or Resizing a room
     if (roomDrag) {
       const dx = raw.x - roomDrag.startPointerX;
       const dy = raw.y - roomDrag.startPointerY;
-      const moved = roomDrag.moved || Math.hypot(dx, dy) > 0.08;
+      const moved = roomDrag.moved || Math.hypot(dx, dy) > 0.06;
 
       let nextX = roomDrag.origX;
       let nextY = roomDrag.origY;
@@ -428,15 +465,33 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       const minSize = units === 'ft' ? 3 * FT_TO_M : 0.9;
 
       if (roomDrag.mode === 'move') {
-        const target = snapCoordinate(roomDrag.origX + dx, roomDrag.origY + dy, project, snapEnabled);
-        // Also snap right/bottom edge magnetically to adjacent room edges or site perimeter
+        const target = snapCoordinateFree(
+          roomDrag.origX + dx,
+          roomDrag.origY + dy,
+          project,
+          snapEnabled,
+          roomDrag.roomId
+        );
+        // Also magnetically snap right/bottom edge to adjacent room edges or site perimeter without trapping
         let finalX = target.x;
         let finalY = target.y;
         if (snapEnabled) {
           const rightEdge = target.x + roomDrag.origW;
           const botEdge = target.y + roomDrag.origH;
-          const xGuides = [lengthM, ...project.rooms.filter((r) => r.id !== roomDrag.roomId).flatMap((r) => [r.x, r.x + r.width])];
-          const yGuides = [widthM, ...project.rooms.filter((r) => r.id !== roomDrag.roomId).flatMap((r) => [r.y, r.y + r.height])];
+          const xGuides = [
+            0,
+            lengthM,
+            ...project.rooms
+              .filter((r) => r.id !== roomDrag.roomId)
+              .flatMap((r) => [r.x, r.x + r.width]),
+          ];
+          const yGuides = [
+            0,
+            widthM,
+            ...project.rooms
+              .filter((r) => r.id !== roomDrag.roomId)
+              .flatMap((r) => [r.y, r.y + r.height]),
+          ];
           for (const gx of xGuides) {
             if (Math.abs(rightEdge - gx) < 0.16) {
               finalX = Number((gx - roomDrag.origW).toFixed(3));
@@ -453,7 +508,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
         nextX = finalX;
         nextY = finalY;
       } else if (roomDrag.handle) {
-        const snappedPtr = snapCoordinate(raw.x, raw.y, project, snapEnabled);
+        const snappedPtr = snapCoordinateFree(raw.x, raw.y, project, snapEnabled, roomDrag.roomId);
         const h = roomDrag.handle;
         const origRight = roomDrag.origX + roomDrag.origW;
         const origBottom = roomDrag.origY + roomDrag.origH;
@@ -530,13 +585,9 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     }
 
     if (groupDrag) {
-      if (groupDrag.moved) {
-        if (groupDrag.valid && (Math.abs(groupDrag.dx) > 0.001 || Math.abs(groupDrag.dy) > 0.001)) {
-          onMoveAll?.(groupDrag.dx, groupDrag.dy);
-        } else if (!groupDrag.valid) {
-          onValidationWarning?.('Cannot move selected group outside the site boundary.');
-        }
-      } else {
+      if (groupDrag.moved && (Math.abs(groupDrag.dx) > 0.001 || Math.abs(groupDrag.dy) > 0.001)) {
+        onMoveAll?.(groupDrag.dx, groupDrag.dy);
+      } else if (!groupDrag.moved) {
         // Simple click without drag clears Select All
         onClearAllSelection?.();
       }
@@ -544,27 +595,29 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
-    if (draggingPointId) {
-      setDraggingPointId(null);
+    if (draggingPoint) {
+      setDraggingPoint(null);
+      return;
+    }
+
+    if (draggingOpening) {
+      setDraggingOpening(null);
       return;
     }
 
     if (roomDrag) {
       if (roomDrag.moved) {
-        if (roomDrag.valid) {
-          onUpdateRoom?.(
-            roomDrag.roomId,
-            {
-              x: roomDrag.draftX,
-              y: roomDrag.draftY,
-              width: roomDrag.draftW,
-              height: roomDrag.draftH,
-            },
-            true
-          );
-        } else if (roomDrag.reason) {
-          onValidationWarning?.(roomDrag.reason);
-        }
+        // Allow freely dismantling & placing room sections anywhere on the canvas
+        onUpdateRoom?.(
+          roomDrag.roomId,
+          {
+            x: roomDrag.draftX,
+            y: roomDrag.draftY,
+            width: roomDrag.draftW,
+            height: roomDrag.draftH,
+          },
+          true
+        );
       }
       setRoomDrag(null);
       return;
@@ -619,10 +672,47 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
+    // Ctrl + Left Click on a room -> duplicate immediately & allow dragging it freely
+    if ((e.ctrlKey || e.metaKey) && e.button === 0 && mode === 'move' && onDuplicateRoom) {
+      e.preventDefault();
+      onClearAllSelection?.();
+      const dup = onDuplicateRoom(room.id);
+      if (dup) {
+        try {
+          svgRef.current?.setPointerCapture(e.pointerId);
+        } catch {
+          // Ignore if unsupported
+        }
+        const raw = clientToRawMeters(e.clientX, e.clientY);
+        setRoomDrag({
+          mode: 'move',
+          roomId: dup.id,
+          startPointerX: raw.x,
+          startPointerY: raw.y,
+          origX: dup.x,
+          origY: dup.y,
+          origW: dup.width,
+          origH: dup.height,
+          draftX: dup.x,
+          draftY: dup.y,
+          draftW: dup.width,
+          draftH: dup.height,
+          valid: true,
+          moved: false,
+        });
+      }
+      return;
+    }
+
     onClearAllSelection?.();
     onSelectEntity?.({ kind: 'room', id: room.id });
 
     if (activeTool === 'select' || activeTool === 'move') {
+      try {
+        svgRef.current?.setPointerCapture(e.pointerId);
+      } catch {
+        // Ignore if unsupported
+      }
       const raw = clientToRawMeters(e.clientX, e.clientY);
       setRoomDrag({
         mode,
@@ -684,7 +774,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
         onPointerUp={handleSvgPointerUp}
         onPointerCancel={handleSvgPointerUp}
         onPointerLeave={(e) => {
-          if (!panStart) handleSvgPointerUp(e);
+          if (!panStart && !roomDrag && !groupDrag) handleSvgPointerUp(e);
         }}
       >
         <defs>
@@ -733,7 +823,43 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             fill={showGrid ? `url(#major-grid-${project.id})` : '#0B1325'}
           />
 
-          {/* Blank Site Guidance Prompt when no rooms exist yet */}
+          {/* Faint ghost underlay of the floor directly below so upper floors align cleanly */}
+          {!previewOnly && activeFloor > 1 && underlayRooms.length > 0 && (
+            <g pointerEvents="none" opacity="0.32">
+              {underlayRooms.map((ur) => {
+                const ux = PAD + ur.x * SCALE;
+                const uy = PAD + ur.y * SCALE;
+                const uw = ur.width * SCALE;
+                const uh = ur.height * SCALE;
+                return (
+                  <g key={`underlay-${ur.id}`}>
+                    <rect
+                      x={ux}
+                      y={uy}
+                      width={uw}
+                      height={uh}
+                      fill="rgba(56, 189, 248, 0.04)"
+                      stroke="#38BDF8"
+                      strokeWidth="1"
+                      strokeDasharray="4,4"
+                    />
+                    <text
+                      x={ux + uw / 2}
+                      y={uy + uh / 2}
+                      textAnchor="middle"
+                      fill="#64748B"
+                      fontFamily="Red Hat Mono, monospace"
+                      fontSize="8"
+                    >
+                      {formatFloorLabel(activeFloor - 1)}: {ur.name}
+                    </text>
+                  </g>
+                );
+              })}
+            </g>
+          )}
+
+          {/* Blank Site Guidance Prompt when no rooms exist yet on this floor */}
           {!previewOnly && project.rooms.length === 0 && (
             <g pointerEvents="none">
               <text
@@ -745,7 +871,9 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                 fontSize="13"
                 fontWeight="600"
               >
-                Click anywhere inside the site boundary to create a room
+                {activeFloor > 1
+                  ? `${formatFloorLabel(activeFloor)} is ready — click inside to add rooms or click Copy Below`
+                  : 'Click anywhere inside the site boundary to create a room'}
               </text>
               <text
                 x={PAD + planW / 2}
@@ -756,6 +884,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                 fontSize="10"
               >
                 SITE BOUNDARY: {siteLenLabel} × {siteWidLabel} ({formatArea(lengthM * widthM, units)})
+                {activeFloor > 1 ? ` · ELEVATION +${formatLength((activeFloor - 1) * ceilingM, units, 1)}` : ''}
               </text>
             </g>
           )}
@@ -853,14 +982,14 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                   height={rh}
                   fill={
                     isInvalidDraft
-                      ? 'rgba(239, 68, 68, 0.22)'
+                      ? 'rgba(255, 157, 0, 0.18)'
                       : isSelected
                         ? 'rgba(0, 168, 255, 0.16)'
                         : ROOM_FILLS[room.floorFinish] ?? 'rgba(0,168,255,0.06)'
                   }
                   stroke={
                     isInvalidDraft
-                      ? '#EF4444'
+                      ? '#FF9D00'
                       : isSelected
                         ? '#00A8FF'
                         : '#334C73'
@@ -875,7 +1004,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                   y={ry + rh / 2 - (showExtraLines ? 8 : 0)}
                   textAnchor="middle"
                   dominantBaseline="middle"
-                  fill={isInvalidDraft ? '#FCA5A5' : '#F5F7FA'}
+                  fill={isInvalidDraft ? '#FFE2B3' : '#F5F7FA'}
                   fontFamily="Instrument Sans, sans-serif"
                   fontSize={previewOnly ? 8.5 : Math.min(12, Math.max(8.5, rw / 11))}
                   fontWeight="600"
@@ -1036,6 +1165,10 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                       e.stopPropagation();
                       if (activeTool === 'erase') {
                         onEraseEntity?.({ kind: 'wall', id: seg.customWallId! });
+                      } else if ((e.ctrlKey || e.metaKey) && e.button === 0 && onDuplicateWall) {
+                        e.preventDefault();
+                        onClearAllSelection?.();
+                        onDuplicateWall(seg.customWallId!);
                       } else {
                         onClearAllSelection?.();
                         onSelectEntity?.({ kind: 'wall', id: seg.customWallId! });
@@ -1127,9 +1260,21 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                     onClearAllSelection?.();
                     onSelectEntity?.({ kind: 'opening', id: op.id });
                     onRotateEntity?.({ kind: 'opening', id: op.id });
+                  } else if ((e.ctrlKey || e.metaKey) && e.button === 0 && onDuplicateOpening) {
+                    e.preventDefault();
+                    onClearAllSelection?.();
+                    const dup = onDuplicateOpening(op.id);
+                    if (dup) {
+                      const raw = clientToRawMeters(e.clientX, e.clientY);
+                      setDraggingOpening({ id: dup.id, startX: raw.x, startY: raw.y, moved: false });
+                    }
                   } else {
                     onClearAllSelection?.();
                     onSelectEntity?.({ kind: 'opening', id: op.id });
+                    if (activeTool === 'select' || activeTool === 'move') {
+                      const raw = clientToRawMeters(e.clientX, e.clientY);
+                      setDraggingOpening({ id: op.id, startX: raw.x, startY: raw.y, moved: false });
+                    }
                   }
                 }}
               >
@@ -1285,11 +1430,23 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                     onEraseEntity?.({ kind: 'point', id: pt.id });
                     return;
                   }
+                  // Ctrl + Left Click on any electrical point (fan, light, switch, socket, AC, etc.) -> Duplicate & position freely!
+                  if ((e.ctrlKey || e.metaKey) && e.button === 0 && onDuplicatePoint) {
+                    e.preventDefault();
+                    onClearAllSelection?.();
+                    const dup = onDuplicatePoint(pt.id);
+                    if (dup) {
+                      const raw = clientToRawMeters(e.clientX, e.clientY);
+                      setDraggingPoint({ id: dup.id, startX: raw.x, startY: raw.y, moved: false });
+                    }
+                    return;
+                  }
                   onClearAllSelection?.();
                   onSelectEntity?.({ kind: 'point', id: pt.id });
                   onSelectPoint?.(pt.id);
                   if (activeTool === 'select' || activeTool === 'move') {
-                    setDraggingPointId(pt.id);
+                    const raw = clientToRawMeters(e.clientX, e.clientY);
+                    setDraggingPoint({ id: pt.id, startX: raw.x, startY: raw.y, moved: false });
                   }
                 }}
               >

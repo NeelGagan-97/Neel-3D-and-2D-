@@ -20,7 +20,7 @@ export default function App() {
   const [redoStack, setRedoStack] = useState<ProjectData[]>([]);
 
   const activeProject = useMemo(
-    () => projects.find((p) => p.id === activeProjectId) ?? projects[0],
+    () => projects.find((p) => p.id === activeProjectId) ?? projects[0] ?? INITIAL_PROJECTS[0],
     [projects, activeProjectId]
   );
 
@@ -234,11 +234,26 @@ export default function App() {
     [projects]
   );
 
+  const handleDeleteProject = useCallback(
+    (projectId: string) => {
+      setProjects((prev) => {
+        const next = prev.filter((p) => p.id !== projectId);
+        if (projectId === activeProjectId) {
+          setActiveProjectId(next[0]?.id ?? '');
+          setUndoStack([]);
+          setRedoStack([]);
+        }
+        return next;
+      });
+    },
+    [activeProjectId]
+  );
+
   if (screen === 'studio') {
     return (
       <DesignStudioPage
         key={`${activeProject.id}-${activeProject.siteConfigured ? 'ready' : 'setup'}`}
-        projects={projects}
+        projects={projects.length > 0 ? projects : [activeProject]}
         project={activeProject}
         initialViewMode={studioInitialView}
         canUndo={undoStack.length > 0}
@@ -262,6 +277,7 @@ export default function App() {
         project={activeProject}
         onNavigate={(s) => handleNavigate(s)}
         onSaveProject={handleSaveProject}
+        onUpdateProject={handleUpdateProject}
       />
     );
   }
@@ -274,6 +290,7 @@ export default function App() {
       onOpenProject={handleOpenProject}
       onCreateProject={handleCreateProject}
       onImportProject={handleImportProject}
+      onDeleteProject={handleDeleteProject}
     />
   );
 }

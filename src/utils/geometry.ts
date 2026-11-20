@@ -3,6 +3,35 @@ import { ProjectData, RoomZone, UnitSystem } from '../types/design';
 
 const EPS = 0.015; // 1.5 cm tolerance for shared walls and floating-point comparisons
 
+export function getItemFloor(item: { floor?: number }): number {
+  return item.floor && item.floor >= 1 ? Math.floor(item.floor) : 1;
+}
+
+export function formatFloorLabel(floor: number): string {
+  const n = Math.max(1, Math.floor(floor));
+  if (n === 1) return '1st Floor';
+  if (n === 2) return '2nd Floor';
+  if (n === 3) return '3rd Floor';
+  return `${n}th Floor`;
+}
+
+/**
+ * Returns a floor-scoped view of ProjectData containing only elements belonging to `floor` (1-based).
+ * Used for per-floor 2D editing, geometric validation, wall extraction, and elevated 3D floor rendering.
+ */
+export function sliceProjectForFloor(project: ProjectData, floor: number): ProjectData {
+  const target = Math.max(1, Math.floor(floor));
+  return {
+    ...project,
+    rooms: project.rooms.filter((r) => getItemFloor(r) === target),
+    customWalls: project.customWalls.filter((w) => getItemFloor(w) === target),
+    openings: project.openings.filter((o) => getItemFloor(o) === target),
+    dimensions: (project.dimensions ?? []).filter((d) => getItemFloor(d) === target),
+    furniture: project.furniture.filter((f) => getItemFloor(f) === target),
+    points: project.points.filter((p) => getItemFloor(p) === target),
+  };
+}
+
 export function toMeters(value: number, units: UnitSystem): number {
   return units === 'ft' ? value * FT_TO_M : value;
 }
@@ -260,16 +289,24 @@ export function extractMergedWalls(project: ProjectData): MergedWallSegment[] {
     const y1 = r.y;
     const y2 = r.y + r.height;
 
-    if (y1 > 0.08 && y1 < widthM - 0.08) {
+    const withinX = x1 >= -0.08 && x2 <= lengthM + 0.08;
+    const withinY = y1 >= -0.08 && y2 <= widthM + 0.08;
+
+    const onNorthPerim = Math.abs(y1) < 0.08 && withinX;
+    const onSouthPerim = Math.abs(y2 - widthM) < 0.08 && withinX;
+    const onWestPerim = Math.abs(x1) < 0.08 && withinY;
+    const onEastPerim = Math.abs(x2 - lengthM) < 0.08 && withinY;
+
+    if (!onNorthPerim) {
       hSegs.push({ fixed: y1, start: x1, end: x2, thickness: thick, isExterior: false });
     }
-    if (y2 > 0.08 && y2 < widthM - 0.08) {
+    if (!onSouthPerim) {
       hSegs.push({ fixed: y2, start: x1, end: x2, thickness: thick, isExterior: false });
     }
-    if (x1 > 0.08 && x1 < lengthM - 0.08) {
+    if (!onWestPerim) {
       vSegs.push({ fixed: x1, start: y1, end: y2, thickness: thick, isExterior: false });
     }
-    if (x2 > 0.08 && x2 < lengthM - 0.08) {
+    if (!onEastPerim) {
       vSegs.push({ fixed: x2, start: y1, end: y2, thickness: thick, isExterior: false });
     }
   });
@@ -364,6 +401,53 @@ export function snapCoordinate(
   return {
     x: Number(Math.max(0, Math.min(lengthM, sx)).toFixed(3)),
     y: Number(Math.max(0, Math.min(widthM, sy)).toFixed(3)),
+  };
+}
+
+/**
+ * Unclamped coordinate snapping so users can freely dismantle sections and place them anywhere on the canvas.
+ */
+export function snapCoordinateFree(
+  x: number,
+  y: number,
+  project: ProjectData,
+  snapEnabled: boolean,
+  ignoreRoomId?: string
+): { x: number; y: number } {
+  if (!snapEnabled) {
+    return { x: Number(x.toFixed(2)), y: Number(y.toFixed(2)) };
+  }
+
+  const { lengthM, widthM } = siteToMeters(project.site);
+  const gridStep = project.site.units === 'ft' ? 0.5 * FT_TO_M : 0.1;
+  let sx = Math.round(x / gridStep) * gridStep;
+  let sy = Math.round(y / gridStep) * gridStep;
+
+  const threshold = 0.16;
+  const xGuides = [0, lengthM];
+  const yGuides = [0, widthM];
+  project.rooms.forEach((r) => {
+    if (r.id === ignoreRoomId) return;
+    xGuides.push(r.x, r.x + r.width);
+    yGuides.push(r.y, r.y + r.height);
+  });
+
+  for (const gx of xGuides) {
+    if (Math.abs(x - gx) < threshold) {
+      sx = gx;
+      break;
+    }
+  }
+  for (const gy of yGuides) {
+    if (Math.abs(y - gy) < threshold) {
+      sy = gy;
+      break;
+    }
+  }
+
+  return {
+    x: Number(sx.toFixed(3)),
+    y: Number(sy.toFixed(3)),
   };
 }
 

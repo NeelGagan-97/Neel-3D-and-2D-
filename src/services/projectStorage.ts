@@ -76,6 +76,9 @@ export const projectStorage: ProjectRepository = {
       dimensionAnnotations: project.dimensions ?? [],
       furniture: project.furniture,
       electricalPoints: project.points,
+      ...(project.summaryOverrides !== undefined
+        ? { summaryOverrides: project.summaryOverrides }
+        : {}),
       settings: {
         status: project.status,
         siteConfigured: project.siteConfigured ?? true,
@@ -125,6 +128,9 @@ export const projectStorage: ProjectRepository = {
         points: Array.isArray(data.electricalPoints ?? data.points)
           ? (data.electricalPoints ?? data.points)
           : [],
+        ...(data.summaryOverrides && typeof data.summaryOverrides === 'object'
+          ? { summaryOverrides: data.summaryOverrides }
+          : {}),
         updatedAt: new Date().toISOString(),
       });
     } catch {

@@ -1,7 +1,7 @@
 import { computeProjectMetrics, siteToMeters } from '../data/presets';
 import { projectStorage } from '../services/projectStorage';
 import { ProjectData } from '../types/design';
-import { extractMergedWalls, formatArea, formatLength } from './geometry';
+import { extractMergedWalls, formatArea, formatFloorLabel, formatLength, sliceProjectForFloor } from './geometry';
 
 function safeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9-_]+/g, '_').replace(/^_+|_+$/g, '') || 'Ananya_Floor_Plan';
@@ -27,7 +27,12 @@ function triggerDownload(blob: Blob, filename: string) {
  * - Doors, Windows, Dimension Lines
  * - Total Built-Up Area & Remaining Available Area
  */
-function renderArchitecturalSheetCanvas(project: ProjectData, lightPaper = false): HTMLCanvasElement {
+function renderArchitecturalSheetCanvas(
+  fullProject: ProjectData,
+  lightPaper = false,
+  activeFloor = 1
+): HTMLCanvasElement {
+  const project = sliceProjectForFloor(fullProject, activeFloor);
   const W = 1600;
   const H = 1130; // ~A4 landscape ratio
   const canvas = document.createElement('canvas');
@@ -72,7 +77,8 @@ function renderArchitecturalSheetCanvas(project: ProjectData, lightPaper = false
 
   ctx.fillStyle = textPrimary;
   ctx.font = '700 28px "Red Hat Text", sans-serif';
-  ctx.fillText(project.name, 40, 68);
+  const floorSuffix = project.site.floors > 1 ? ` — ${formatFloorLabel(activeFloor)}` : '';
+  ctx.fillText(`${project.name}${floorSuffix}`, 40, 68);
 
   ctx.textAlign = 'right';
   ctx.fillStyle = textPrimary;
@@ -318,11 +324,12 @@ export function downloadProjectJson(project: ProjectData) {
   triggerDownload(blob, `${safeFileName(project.name)}.json`);
 }
 
-export function downloadFloorPlanPng(project: ProjectData) {
-  const canvas = renderArchitecturalSheetCanvas(project, false);
+export function downloadFloorPlanPng(project: ProjectData, activeFloor = 1) {
+  const canvas = renderArchitecturalSheetCanvas(project, false, activeFloor);
+  const suffix = project.site.floors > 1 ? `_Floor${activeFloor}` : '';
   canvas.toBlob((blob) => {
     if (blob) {
-      triggerDownload(blob, `${safeFileName(project.name)}_FloorPlan.png`);
+      triggerDownload(blob, `${safeFileName(project.name)}${suffix}_FloorPlan.png`);
     }
   }, 'image/png');
 }
@@ -330,8 +337,8 @@ export function downloadFloorPlanPng(project: ProjectData) {
 /**
  * Generates a self-contained single-page landscape A4 binary PDF embedding the high-res floor plan image.
  */
-export function downloadFloorPlanPdf(project: ProjectData) {
-  const canvas = renderArchitecturalSheetCanvas(project, true);
+export function downloadFloorPlanPdf(project: ProjectData, activeFloor = 1) {
+  const canvas = renderArchitecturalSheetCanvas(project, true, activeFloor);
   const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
   const base64 = dataUrl.split(',')[1];
   const binaryStr = atob(base64);

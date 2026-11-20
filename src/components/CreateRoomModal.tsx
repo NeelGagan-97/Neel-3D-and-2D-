@@ -4,13 +4,16 @@ import { ProjectData, RoomType } from '../types/design';
 import {
   findNearestValidPosition,
   formatArea,
+  formatFloorLabel,
   fromMeters,
+  sliceProjectForFloor,
   toMeters,
   validateRoomPlacement,
 } from '../utils/geometry';
 
 interface CreateRoomModalProps {
   project: ProjectData;
+  activeFloor?: number;
   initialX: number; // meters
   initialY: number; // meters
   initialRoomType?: RoomType;
@@ -27,13 +30,18 @@ interface CreateRoomModalProps {
 }
 
 export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({
-  project,
+  project: fullProject,
+  activeFloor = 1,
   initialX,
   initialY,
   initialRoomType,
   onCancel,
   onPlaceRoom,
 }) => {
+  const project = useMemo(
+    () => sliceProjectForFloor(fullProject, activeFloor),
+    [fullProject, activeFloor]
+  );
   const units = project.site.units;
   const initialTemplate =
     ROOM_LIBRARY.find((r) => r.type === initialRoomType) ?? ROOM_LIBRARY[2]; // Kitchen default if unset
@@ -132,6 +140,7 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({
               What would you like to create here?
             </h2>
             <p className="font-mono text-mono-sm text-on-surface-variant">
+              {project.site.floors > 1 ? `${formatFloorLabel(activeFloor).toUpperCase()} · ` : ''}
               SELECT ROOM TYPE &amp; CONFIGURE EXACT ARCHITECTURAL DIMENSIONS
             </p>
           </div>

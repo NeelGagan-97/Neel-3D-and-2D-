@@ -600,6 +600,14 @@ export function formatINR(amount: number): string {
   return '₹' + Math.round(amount).toLocaleString('en-IN');
 }
 
+function ordinalFloorShort(floor: number): string {
+  const n = Math.max(1, Math.round(floor || 1));
+  if (n === 1) return '1st Floor';
+  if (n === 2) return '2nd Floor';
+  if (n === 3) return '3rd Floor';
+  return `${n}th Floor`;
+}
+
 export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
   const categoryCounts: Record<ElectricalCategory, number> = {
     Fans: 0,
@@ -611,12 +619,14 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
 
   let totalWatts = 0;
   let totalCost = 0;
+  const isMultiFloor = Math.max(1, Math.round(project.site.floors || 1)) > 1;
 
   const roomMap = new Map<string, RoomBreakdownRow>();
   project.rooms.forEach((r) => {
+    const fl = Math.max(1, Math.round(r.floor ?? 1));
     roomMap.set(r.id, {
       roomId: r.id,
-      roomName: r.name,
+      roomName: isMultiFloor ? `${r.name} (${ordinalFloorShort(fl)})` : r.name,
       fans: 0,
       lights: 0,
       switches: 0,
@@ -633,15 +643,43 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
     totalWatts += pt.wattage;
     totalCost += pt.unitCost;
 
-    const rRow = roomMap.get(pt.roomId);
-    if (rRow) {
-      if (pt.category === 'Fans') rRow.fans += 1;
-      else if (pt.category === 'Lighting') rRow.lights += 1;
-      else if (pt.category === 'Switches') rRow.switches += 1;
-      else if (pt.category === 'Sockets') rRow.sockets += 1;
-      else if (pt.category === 'Appliances') rRow.appliances += 1;
-      rRow.loadWatts += pt.wattage;
+    const ptFloor = Math.max(1, Math.round(pt.floor ?? 1));
+    let rRow = roomMap.get(pt.roomId);
+    if (!rRow) {
+      // Fallback: match geometrically to a room on the same floor
+      const sameFloorRooms = project.rooms.filter(
+        (r) => Math.max(1, Math.round(r.floor ?? 1)) === ptFloor
+      );
+      const geoMatch = findRoomAtPoint(sameFloorRooms, pt.x, pt.y);
+      if (geoMatch) {
+        rRow = roomMap.get(geoMatch.id);
+      }
     }
+    if (!rRow) {
+      // Unassigned / site-level electrical library item placed outside rooms
+      const openId = `open-site-f${ptFloor}`;
+      rRow = roomMap.get(openId);
+      if (!rRow) {
+        rRow = {
+          roomId: openId,
+          roomName: isMultiFloor ? `Open Site (${ordinalFloorShort(ptFloor)})` : 'Open Site',
+          fans: 0,
+          lights: 0,
+          switches: 0,
+          sockets: 0,
+          appliances: 0,
+          loadWatts: 0,
+        };
+        roomMap.set(openId, rRow);
+      }
+    }
+
+    if (pt.category === 'Fans') rRow.fans += 1;
+    else if (pt.category === 'Lighting') rRow.lights += 1;
+    else if (pt.category === 'Switches') rRow.switches += 1;
+    else if (pt.category === 'Sockets') rRow.sockets += 1;
+    else if (pt.category === 'Appliances') rRow.appliances += 1;
+    rRow.loadWatts += pt.wattage;
 
     const cat = CATALOG_MAP[pt.itemType];
     const existingBoq = boqMap.get(pt.itemType);
@@ -651,6 +689,7 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
       existingBoq.estimatedCost += pt.unitCost;
     } else {
       boqMap.set(pt.itemType, {
+        id: pt.itemType,
         itemType: pt.itemType,
         productName: cat ? cat.productName : pt.name,
         category: cat ? cat.boqCategory : pt.category,
@@ -675,7 +714,7 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
   const builtUpAreaSqM = project.rooms.reduce((sum, r) => sum + r.width * r.height, 0);
   const remainingAreaSqM = Math.max(0, siteAreaSqM - builtUpAreaSqM);
 
-  const order: ElectricalItemType[] = ELECTRICAL_CATALOG.map((c) => c.itemType);
+  const order: Array<ElectricalItemType | 'custom'> = ELECTRICAL_CATALOG.map((c) => c.itemType);
   const boqRows = Array.from(boqMap.values()).sort(
     (a, b) => order.indexOf(a.itemType) - order.indexOf(b.itemType)
   );

@@ -1,6 +1,8 @@
 import React, { useRef, useState } from 'react';
-import { computeProjectMetrics } from '../data/presets';
+import { computeProjectMetrics, INITIAL_PROJECTS } from '../data/presets';
 import { ProjectData, ScreenId, ViewMode } from '../types/design';
+import { downloadProjectJson } from '../utils/exporters';
+import { DrawingInstructionsModal } from './DrawingInstructionsModal';
 import { FloorPlan2D } from './FloorPlan2D';
 import { Navbar } from './Navbar';
 import { ProjectCreationInput, ProjectCreationModal } from './ProjectCreationModal';
@@ -13,6 +15,7 @@ interface HomePageProps {
   onOpenProject: (projectId: string, targetScreen: ScreenId, initialView?: ViewMode) => void;
   onCreateProject: (input: ProjectCreationInput) => void;
   onImportProject: (rawJson: string) => { ok: boolean; error?: string };
+  onDeleteProject: (projectId: string) => void;
 }
 
 export const HomePage: React.FC<HomePageProps> = ({
@@ -22,13 +25,16 @@ export const HomePage: React.FC<HomePageProps> = ({
   onOpenProject,
   onCreateProject,
   onImportProject,
+  onDeleteProject,
 }) => {
   const [showNewModal, setShowNewModal] = useState(false);
+  const [showGuideModal, setShowGuideModal] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const heroProject =
-    projects.find((p) => p.id === activeProjectId) ?? projects[0];
+    projects.find((p) => p.id === activeProjectId) ?? projects[0] ?? INITIAL_PROJECTS[0];
   const heroMetrics = computeProjectMetrics(heroProject);
   const heroUnitSuffix = heroProject.site.units === 'ft' ? "'" : 'm';
 
@@ -111,6 +117,17 @@ export const HomePage: React.FC<HomePageProps> = ({
                       view_in_ar
                     </span>
                     <span>EXPLORE 3D DESIGN</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowGuideModal(true)}
+                    className="inline-flex items-center justify-center gap-gutter-sm bg-surface-container text-primary border border-primary/60 px-gutter-lg py-gutter-sm rounded-md font-label text-label-md transition-colors duration-state-change hover:bg-primary-container/30 hover:border-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary cursor-pointer whitespace-nowrap"
+                  >
+                    <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+                      menu_book
+                    </span>
+                    <span>HOW TO WORK ON DRAWINGS</span>
                   </button>
                 </div>
 
@@ -367,66 +384,159 @@ export const HomePage: React.FC<HomePageProps> = ({
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-gutter-lg items-stretch">
-            {projects.map((proj) => {
-              const metrics = computeProjectMetrics(proj);
-              const isCurrent = proj.id === activeProjectId;
-              const statusStyle =
-                proj.status === 'Active' || isCurrent
-                  ? 'bg-primary-container text-on-primary-container'
-                  : proj.status === 'BOQ Ready'
-                    ? 'bg-secondary-container text-on-secondary-container'
-                    : 'bg-surface-container-high text-on-surface-variant';
-
-              return (
-                <article
-                  key={proj.id}
-                  className={`bg-surface-container border rounded-lg overflow-hidden flex flex-col h-full transition-colors duration-state-change ${
-                    isCurrent ? 'border-primary' : 'border-outline-variant'
-                  }`}
+            {projects.length === 0 ? (
+              <div className="md:col-span-3 bg-surface-container border border-dashed border-outline rounded-lg p-gutter-2xl flex flex-col items-center justify-center text-center gap-gutter-md">
+                <span className="material-symbols-outlined text-on-surface-variant text-[36px]" aria-hidden="true">
+                  folder_off
+                </span>
+                <p className="font-body text-body-md text-on-surface-variant">
+                  No saved projects yet. Create a new architectural space or import a project JSON file.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowNewModal(true)}
+                  className="inline-flex items-center gap-gutter-xs px-gutter-lg py-gutter-sm rounded-md bg-primary text-on-primary font-label text-label-md hover:bg-on-primary-container cursor-pointer"
                 >
-                  <div className="aspect-video bg-surface-container-low border-b border-outline-variant overflow-hidden">
-                    <FloorPlan2D project={proj} previewOnly={true} />
-                  </div>
-                  <div className="p-gutter-lg flex flex-col gap-gutter-sm flex-1">
-                    <header className="flex items-start justify-between gap-gutter-sm">
-                      <div>
-                        <h3 className="font-headline text-headline-sm text-on-surface">
-                          {proj.name}
-                        </h3>
-                        <p className="font-mono text-mono-sm text-on-surface-variant tabular-nums">
-                          {metrics.dimensionsDisplay} • {metrics.totalKw.toFixed(2)} kW
-                        </p>
-                      </div>
-                      <span
-                        className={`px-gutter-sm py-gutter-xs rounded-full font-label text-label-sm shrink-0 ${statusStyle}`}
-                      >
-                        {isCurrent ? 'Active' : proj.status}
-                      </span>
-                    </header>
-                    <p className="font-body text-body-sm text-on-surface-variant">
-                      {proj.site.floors > 1 ? `${proj.site.floors} floors, ` : ''}
-                      {proj.rooms.length} rooms, {metrics.totalPoints} electrical points. {proj.description}
-                    </p>
-                  </div>
-                  <footer className="px-gutter-lg py-gutter-md border-t border-outline-variant flex items-center justify-between gap-gutter-sm bg-surface-container-low">
-                    <button
-                      type="button"
+                  <span className="material-symbols-outlined text-[18px]" aria-hidden="true">add</span>
+                  <span>Create New Project</span>
+                </button>
+              </div>
+            ) : (
+              projects.map((proj) => {
+                const metrics = computeProjectMetrics(proj);
+                const isCurrent = proj.id === activeProjectId;
+                const isConfirmingDelete = confirmDeleteId === proj.id;
+                const statusStyle =
+                  proj.status === 'Active' || isCurrent
+                    ? 'bg-primary-container text-on-primary-container'
+                    : proj.status === 'BOQ Ready'
+                      ? 'bg-secondary-container text-on-secondary-container'
+                      : 'bg-surface-container-high text-on-surface-variant';
+
+                return (
+                  <article
+                    key={proj.id}
+                    className={`bg-surface-container border rounded-lg overflow-hidden flex flex-col h-full transition-colors duration-state-change ${
+                      isCurrent ? 'border-primary' : 'border-outline-variant'
+                    }`}
+                  >
+                    <div
                       onClick={() => onOpenProject(proj.id, 'studio', '2d')}
-                      className="font-label text-label-md text-primary hover:underline cursor-pointer"
+                      className="aspect-video bg-surface-container-low border-b border-outline-variant overflow-hidden cursor-pointer"
+                      title={`Edit ${proj.name}`}
                     >
-                      Open in Studio
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onOpenProject(proj.id, 'summary')}
-                      className="font-label text-label-md text-on-surface-variant hover:text-on-surface cursor-pointer"
-                    >
-                      View Summary
-                    </button>
-                  </footer>
-                </article>
-              );
-            })}
+                      <FloorPlan2D project={proj} previewOnly={true} />
+                    </div>
+                    <div className="p-gutter-lg flex flex-col gap-gutter-sm flex-1">
+                      <header className="flex items-start justify-between gap-gutter-sm">
+                        <div>
+                          <h3 className="font-headline text-headline-sm text-on-surface">
+                            {proj.name}
+                          </h3>
+                          <p className="font-mono text-mono-sm text-on-surface-variant tabular-nums">
+                            {metrics.dimensionsDisplay} • {metrics.totalKw.toFixed(2)} kW
+                          </p>
+                        </div>
+                        <span
+                          className={`px-gutter-sm py-gutter-xs rounded-full font-label text-label-sm shrink-0 ${statusStyle}`}
+                        >
+                          {isCurrent ? 'Active' : proj.status}
+                        </span>
+                      </header>
+                      <p className="font-body text-body-sm text-on-surface-variant">
+                        {proj.site.floors > 1 ? `${proj.site.floors} floors, ` : ''}
+                        {proj.rooms.length} rooms, {metrics.totalPoints} electrical points. {proj.description}
+                      </p>
+                    </div>
+                    <footer className="px-gutter-lg py-gutter-sm border-t border-outline-variant flex items-center justify-between gap-gutter-sm bg-surface-container-low">
+                      <div className="flex items-center gap-gutter-xs">
+                        {/* Edit Symbol */}
+                        <button
+                          type="button"
+                          onClick={() => onOpenProject(proj.id, 'studio', '2d')}
+                          title="Edit Project in Design Studio"
+                          aria-label={`Edit ${proj.name}`}
+                          className="w-9 h-9 inline-flex items-center justify-center rounded-sm bg-surface-container border border-outline-variant text-primary hover:bg-primary-container hover:border-primary transition-colors cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
+                            edit
+                          </span>
+                        </button>
+
+                        {/* Download Symbol */}
+                        <button
+                          type="button"
+                          onClick={() => downloadProjectJson(proj)}
+                          title="Download Project (.json)"
+                          aria-label={`Download ${proj.name}`}
+                          className="w-9 h-9 inline-flex items-center justify-center rounded-sm bg-surface-container border border-outline-variant text-secondary hover:bg-secondary-container/40 hover:border-secondary transition-colors cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
+                            download
+                          </span>
+                        </button>
+
+                        {/* Delete Symbol (with inline symbol confirmation — zero window.confirm) */}
+                        {isConfirmingDelete ? (
+                          <div className="inline-flex items-center gap-1 bg-error/15 border border-error rounded-sm p-0.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setConfirmDeleteId(null);
+                                onDeleteProject(proj.id);
+                              }}
+                              title="Confirm Delete"
+                              aria-label={`Confirm delete ${proj.name}`}
+                              className="w-8 h-8 inline-flex items-center justify-center rounded-sm bg-error text-on-primary hover:opacity-90 cursor-pointer"
+                            >
+                              <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+                                check
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(null)}
+                              title="Cancel Delete"
+                              aria-label="Cancel delete"
+                              className="w-8 h-8 inline-flex items-center justify-center rounded-sm bg-surface-container text-on-surface-variant hover:text-on-surface cursor-pointer"
+                            >
+                              <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+                                close
+                              </span>
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteId(proj.id)}
+                            title="Delete Project"
+                            aria-label={`Delete ${proj.name}`}
+                            className="w-9 h-9 inline-flex items-center justify-center rounded-sm bg-surface-container border border-outline-variant text-error hover:bg-error/15 hover:border-error transition-colors cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
+                              delete
+                            </span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Project Summary Symbol */}
+                      <button
+                        type="button"
+                        onClick={() => onOpenProject(proj.id, 'summary')}
+                        title="View Project Summary & BOQ"
+                        aria-label={`View summary for ${proj.name}`}
+                        className="w-9 h-9 inline-flex items-center justify-center rounded-sm bg-surface-container border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary transition-colors cursor-pointer"
+                      >
+                        <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
+                          summarize
+                        </span>
+                      </button>
+                    </footer>
+                  </article>
+                );
+              })
+            )}
           </div>
         </section>
       </main>
@@ -479,6 +589,14 @@ export const HomePage: React.FC<HomePageProps> = ({
             setShowNewModal(false);
             onCreateProject(input);
           }}
+        />
+      )}
+
+      {/* Drawing & Multi-Floor Instructions Modal */}
+      {showGuideModal && (
+        <DrawingInstructionsModal
+          onClose={() => setShowGuideModal(false)}
+          onStartDesigning={() => setShowNewModal(true)}
         />
       )}
     </div>

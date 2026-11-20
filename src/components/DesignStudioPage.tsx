@@ -10,11 +10,14 @@ import {
   siteToMeters,
 } from '../data/presets';
 import {
+  ArchitecturalOpening,
   CameraMode,
   CanvasTool,
   CircuitId,
   ElectricalItemType,
   ElectricalPoint,
+  FloorView3DMode,
+  FurnitureItem,
   LightingMode,
   ProjectData,
   RoomType,
@@ -33,12 +36,16 @@ import {
 import {
   findNearestValidPosition,
   formatArea,
+  formatFloorLabel,
   formatLength,
   fromMeters,
+  getItemFloor,
+  sliceProjectForFloor,
   toMeters,
   validateRoomPlacement,
 } from '../utils/geometry';
 import { CreateRoomModal } from './CreateRoomModal';
+import { DrawingInstructionsModal } from './DrawingInstructionsModal';
 import { FloorPlan2D } from './FloorPlan2D';
 import { Navbar } from './Navbar';
 import { SiteConfigStep } from './SiteConfigStep';
@@ -93,13 +100,29 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const [viewMode, setViewMode] = useState<ViewMode>(
     project.siteConfigured === false ? '2d' : initialViewMode
   );
+  const [activeFloor, setActiveFloor] = useState<number>(1);
+  const [floorView3D, setFloorView3D] = useState<FloorView3DMode>('active-only');
+  const [showGuideModal, setShowGuideModal] = useState<boolean>(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>('orbit');
   const [lightingMode, setLightingMode] = useState<LightingMode>('daylight');
   const [zoom, setZoom] = useState<number>(100);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [showGrid, setShowGrid] = useState<boolean>(true);
-  const [snapEnabled, setSnapEnabled] = useState<boolean>(true);
+  const showGrid = true;
+  const snapEnabled = true;
   const [activeTool, setActiveTool] = useState<CanvasTool>('select');
+
+  const totalFloors = Math.max(1, Math.min(5, Math.round(project.site.floors || 1)));
+
+  useEffect(() => {
+    if (activeFloor > totalFloors) {
+      setActiveFloor(totalFloors);
+    }
+  }, [activeFloor, totalFloors]);
+
+  const floorProject = useMemo(
+    () => sliceProjectForFloor(project, activeFloor),
+    [project, activeFloor]
+  );
 
   const [selectedEntity, setSelectedEntity] = useState<SelectedEntity>(() =>
     project.rooms[0] ? { kind: 'room', id: project.rooms[0].id } : null
@@ -113,6 +136,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   } | null>(null);
 
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [openDrawer, setOpenDrawer] = useState<'tools' | 'rooms' | 'site' | 'electrical' | null>(null);
   const [showSaveAsModal, setShowSaveAsModal] = useState(false);
   const [saveAsName, setSaveAsName] = useState(`${project.name} (Copy)`);
   const [saveAsError, setSaveAsError] = useState<string | null>(null);
@@ -163,7 +187,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     if (project.siteConfigured === false || viewMode !== '2d') return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (pendingRoomModal || showSaveAsModal) return;
+      if (pendingRoomModal || showSaveAsModal || showGuideModal) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
@@ -176,16 +200,16 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         setAllSelected(true);
         setInspectorWarning(null);
         const total =
-          project.rooms.length +
-          project.customWalls.length +
-          project.openings.length +
-          project.points.length +
-          (project.dimensions?.length ?? 0);
+          floorProject.rooms.length +
+          floorProject.customWalls.length +
+          floorProject.openings.length +
+          floorProject.points.length +
+          (floorProject.dimensions?.length ?? 0);
         setStatusMessage({
           text:
             total > 0
-              ? `Selected all (${project.rooms.length} rooms, ${project.customWalls.length} walls, ${project.openings.length} openings) — drag to move together, Delete to clear, or Esc to deselect`
-              : 'Site selected — click inside the boundary to create rooms or press Esc to deselect',
+              ? `Selected all on ${formatFloorLabel(activeFloor)} (${floorProject.rooms.length} rooms, ${floorProject.customWalls.length} walls, ${floorProject.openings.length} openings) — drag to move together, Delete to clear, or Esc to deselect`
+              : `${formatFloorLabel(activeFloor)} selected — click inside the boundary to create rooms or press Esc to deselect`,
           tone: 'info',
         });
         return;
@@ -195,6 +219,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         setAllSelected(false);
         setSelectedEntity(null);
         setPendingPlaceItem(null);
+        setOpenDrawer(null);
         return;
       }
 
@@ -203,19 +228,19 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         onUpdateProject(
           (prev) => ({
             ...prev,
-            rooms: [],
-            customWalls: [],
-            openings: [],
-            dimensions: [],
-            furniture: [],
-            points: [],
+            rooms: prev.rooms.filter((r) => getItemFloor(r) !== activeFloor),
+            customWalls: prev.customWalls.filter((w) => getItemFloor(w) !== activeFloor),
+            openings: prev.openings.filter((o) => getItemFloor(o) !== activeFloor),
+            dimensions: (prev.dimensions ?? []).filter((d) => getItemFloor(d) !== activeFloor),
+            furniture: prev.furniture.filter((f) => getItemFloor(f) !== activeFloor),
+            points: prev.points.filter((p) => getItemFloor(p) !== activeFloor),
           }),
           true
         );
         setAllSelected(false);
         setSelectedEntity(null);
         setStatusMessage({
-          text: 'Cleared all selected elements (click Undo to restore)',
+          text: `Cleared all selected elements on ${formatFloorLabel(activeFloor)} (click Undo to restore)`,
           tone: 'info',
         });
       }
@@ -225,14 +250,16 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     project.siteConfigured,
-    project.rooms.length,
-    project.customWalls.length,
-    project.openings.length,
-    project.points.length,
-    project.dimensions?.length,
+    floorProject.rooms.length,
+    floorProject.customWalls.length,
+    floorProject.openings.length,
+    floorProject.points.length,
+    floorProject.dimensions?.length,
+    activeFloor,
     viewMode,
     pendingRoomModal,
     showSaveAsModal,
+    showGuideModal,
     allSelected,
     onUpdateProject,
   ]);
@@ -281,70 +308,172 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     if (meta) notify(meta.hint);
   };
 
-  const handleMoveAll = (dxM: number, dyM: number) => {
-    const { lengthM, widthM } = siteToMeters(project.site);
-    const clampX = (v: number) => Number(Math.max(0, Math.min(lengthM, v)).toFixed(3));
-    const clampY = (v: number) => Number(Math.max(0, Math.min(widthM, v)).toFixed(3));
+  const handleSwitchFloor = (floorNum: number) => {
+    const clamped = Math.max(1, Math.min(totalFloors, floorNum));
+    setActiveFloor(clamped);
+    setFloorView3D('active-only');
+    setSelectedEntity(null);
+    setAllSelected(false);
+    setInspectorWarning(null);
+    const { ceilingM } = siteToMeters(project.site);
+    const elev =
+      clamped > 1 ? ` · Elevation +${formatLength((clamped - 1) * ceilingM, units, 1)}` : ' · Ground Level';
+    notify(`Showing ${formatFloorLabel(clamped)} only${elev}`);
+  };
+
+  const handleToggleElevatedView = () => {
+    setFloorView3D('all');
+    setViewMode('3d');
+    setSelectedEntity(null);
+    setAllSelected(false);
+    setInspectorWarning(null);
+    notify(`Elevated View — displaying all ${totalFloors} floors stacked together`);
+  };
+
+  const handleCopyFloorBelow = () => {
+    if (activeFloor <= 1) return;
+    const sourceFloor = activeFloor - 1;
+    const sourceSlice = sliceProjectForFloor(project, sourceFloor);
+    if (
+      sourceSlice.rooms.length === 0 &&
+      sourceSlice.customWalls.length === 0 &&
+      sourceSlice.openings.length === 0
+    ) {
+      notify(`${formatFloorLabel(sourceFloor)} has no rooms or walls to copy yet.`, 'warning');
+      return;
+    }
+
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+    const roomIdMap = new Map<string, string>();
+
+    const clonedRooms = sourceSlice.rooms.map((r, idx) => {
+      const nextId = `rm-f${activeFloor}-${stamp}-${idx}`;
+      roomIdMap.set(r.id, nextId);
+      return { ...r, id: nextId, floor: activeFloor };
+    });
+    const clonedWalls = sourceSlice.customWalls.map((w, idx) => ({
+      ...w,
+      id: `cw-f${activeFloor}-${stamp}-${idx}`,
+      floor: activeFloor,
+    }));
+    const clonedOpenings = sourceSlice.openings.map((o, idx) => ({
+      ...o,
+      id: `op-f${activeFloor}-${stamp}-${idx}`,
+      floor: activeFloor,
+    }));
+    const clonedFurniture = sourceSlice.furniture.map((f, idx) => ({
+      ...f,
+      id: `fn-f${activeFloor}-${stamp}-${idx}`,
+      roomId: roomIdMap.get(f.roomId) ?? f.roomId,
+      floor: activeFloor,
+    }));
+    const clonedPoints = sourceSlice.points.map((p, idx) => ({
+      ...p,
+      id: `pt-f${activeFloor}-${stamp}-${idx}`,
+      code: `F${activeFloor}-${p.code}`,
+      roomId: roomIdMap.get(p.roomId) ?? p.roomId,
+      floor: activeFloor,
+    }));
 
     onUpdateProject(
       (prev) => ({
         ...prev,
-        rooms: prev.rooms.map((r) => ({
-          ...r,
-          x: Number((r.x + dxM).toFixed(3)),
-          y: Number((r.y + dyM).toFixed(3)),
-        })),
-        customWalls: prev.customWalls.map((w) => ({
-          ...w,
-          x1: clampX(w.x1 + dxM),
-          y1: clampY(w.y1 + dyM),
-          x2: clampX(w.x2 + dxM),
-          y2: clampY(w.y2 + dyM),
-        })),
-        openings: prev.openings.map((op) => ({
-          ...op,
-          x: clampX(op.x + dxM),
-          y: clampY(op.y + dyM),
-        })),
-        dimensions: (prev.dimensions ?? []).map((d) => ({
-          ...d,
-          x1: clampX(d.x1 + dxM),
-          y1: clampY(d.y1 + dyM),
-          x2: clampX(d.x2 + dxM),
-          y2: clampY(d.y2 + dyM),
-        })),
-        furniture: prev.furniture.map((f) => ({
-          ...f,
-          x: clampX(f.x + dxM),
-          y: clampY(f.y + dyM),
-        })),
-        points: prev.points.map((p) => ({
-          ...p,
-          x: clampX(p.x + dxM),
-          y: clampY(p.y + dyM),
-        })),
+        rooms: [...prev.rooms.filter((r) => getItemFloor(r) !== activeFloor), ...clonedRooms],
+        customWalls: [
+          ...prev.customWalls.filter((w) => getItemFloor(w) !== activeFloor),
+          ...clonedWalls,
+        ],
+        openings: [
+          ...prev.openings.filter((o) => getItemFloor(o) !== activeFloor),
+          ...clonedOpenings,
+        ],
+        furniture: [
+          ...prev.furniture.filter((f) => getItemFloor(f) !== activeFloor),
+          ...clonedFurniture,
+        ],
+        points: [
+          ...prev.points.filter((p) => getItemFloor(p) !== activeFloor),
+          ...clonedPoints,
+        ],
       }),
       true
     );
-    notify('Moved all selected elements together');
+    setSelectedEntity(null);
+    notify(
+      `Copied ${formatFloorLabel(sourceFloor)} layout (${clonedRooms.length} rooms) onto ${formatFloorLabel(activeFloor)}`
+    );
+  };
+
+  const handleMoveAll = (dxM: number, dyM: number) => {
+    const shift = (v: number, delta: number) => Number((v + delta).toFixed(3));
+
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        rooms: prev.rooms.map((r) =>
+          getItemFloor(r) === activeFloor
+            ? { ...r, x: shift(r.x, dxM), y: shift(r.y, dyM) }
+            : r
+        ),
+        customWalls: prev.customWalls.map((w) =>
+          getItemFloor(w) === activeFloor
+            ? {
+                ...w,
+                x1: shift(w.x1, dxM),
+                y1: shift(w.y1, dyM),
+                x2: shift(w.x2, dxM),
+                y2: shift(w.y2, dyM),
+              }
+            : w
+        ),
+        openings: prev.openings.map((op) =>
+          getItemFloor(op) === activeFloor
+            ? { ...op, x: shift(op.x, dxM), y: shift(op.y, dyM) }
+            : op
+        ),
+        dimensions: (prev.dimensions ?? []).map((d) =>
+          getItemFloor(d) === activeFloor
+            ? {
+                ...d,
+                x1: shift(d.x1, dxM),
+                y1: shift(d.y1, dyM),
+                x2: shift(d.x2, dxM),
+                y2: shift(d.y2, dyM),
+              }
+            : d
+        ),
+        furniture: prev.furniture.map((f) =>
+          getItemFloor(f) === activeFloor
+            ? { ...f, x: shift(f.x, dxM), y: shift(f.y, dyM) }
+            : f
+        ),
+        points: prev.points.map((p) =>
+          getItemFloor(p) === activeFloor
+            ? { ...p, x: shift(p.x, dxM), y: shift(p.y, dyM) }
+            : p
+        ),
+      }),
+      true
+    );
+    notify(`Moved all selected elements on ${formatFloorLabel(activeFloor)} freely on canvas`);
   };
 
   const handleClearAllSelected = () => {
     onUpdateProject(
       (prev) => ({
         ...prev,
-        rooms: [],
-        customWalls: [],
-        openings: [],
-        dimensions: [],
-        furniture: [],
-        points: [],
+        rooms: prev.rooms.filter((r) => getItemFloor(r) !== activeFloor),
+        customWalls: prev.customWalls.filter((w) => getItemFloor(w) !== activeFloor),
+        openings: prev.openings.filter((o) => getItemFloor(o) !== activeFloor),
+        dimensions: (prev.dimensions ?? []).filter((d) => getItemFloor(d) !== activeFloor),
+        furniture: prev.furniture.filter((f) => getItemFloor(f) !== activeFloor),
+        points: prev.points.filter((p) => getItemFloor(p) !== activeFloor),
       }),
       true
     );
     setAllSelected(false);
     setSelectedEntity(null);
-    notify('Cleared all selected elements (click Undo to restore)');
+    notify(`Cleared all selected elements on ${formatFloorLabel(activeFloor)} (click Undo to restore)`);
   };
 
   const handleFitToScreen = () => {
@@ -362,7 +491,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     const tpl = ROOM_LIBRARY.find((r) => r.type === type) ?? ROOM_LIBRARY[0];
     const defaultW = units === 'ft' ? tpl.defaultLengthFt * FT_TO_M : tpl.defaultW;
     const defaultH = units === 'ft' ? tpl.defaultWidthFt * FT_TO_M : tpl.defaultH;
-    const suggested = findNearestValidPosition(0, 0, defaultW, defaultH, project);
+    const suggested = findNearestValidPosition(0, 0, defaultW, defaultH, floorProject);
     setViewMode('2d');
     setInspectorWarning(null);
     setPendingRoomModal({
@@ -381,7 +510,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     height: number;
     finish: 'wood' | 'tile' | 'stone' | 'terrazzo';
   }) => {
-    const check = validateRoomPlacement(payload, project);
+    const check = validateRoomPlacement(payload, floorProject);
     if (!check.valid) {
       notify(check.reason ?? 'Invalid room placement.', 'warning');
       return;
@@ -393,6 +522,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       id: newId,
       name: payload.name,
       type: payload.type,
+      floor: activeFloor,
       x: payload.x,
       y: payload.y,
       width: payload.width,
@@ -411,7 +541,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     setSelectedEntity({ kind: 'room', id: newId });
     setActiveTool('select');
     notify(
-      `Placed ${newRoom.name} (${formatLength(newRoom.width, units)} × ${formatLength(newRoom.height, units)})`
+      `Placed ${newRoom.name} on ${formatFloorLabel(activeFloor)} (${formatLength(newRoom.width, units)} × ${formatLength(newRoom.height, units)})`
     );
   };
 
@@ -424,34 +554,64 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     if (!current) return;
     const next = { ...current, ...patch };
 
-    // Validate geometric fields whenever position or dimensions change
-    const geometryChanged =
-      patch.x !== undefined ||
-      patch.y !== undefined ||
-      patch.width !== undefined ||
-      patch.height !== undefined;
+    if (!Number.isFinite(next.width) || !Number.isFinite(next.height) || next.width <= 0.1 || next.height <= 0.1) {
+      const msg = 'Room length and width must be greater than zero.';
+      setInspectorWarning(msg);
+      notify(msg, 'warning');
+      return;
+    }
 
-    if (geometryChanged) {
-      const check = validateRoomPlacement(
-        { x: next.x, y: next.y, width: next.width, height: next.height },
-        project,
-        roomId
-      );
-      if (!check.valid) {
-        setInspectorWarning(check.reason ?? 'Invalid room dimensions or position.');
-        notify(check.reason ?? 'Invalid room dimensions or position.', 'warning');
-        return;
+    const dx = Number((next.x - current.x).toFixed(3));
+    const dy = Number((next.y - current.y).toFixed(3));
+    const movedPos = Math.abs(dx) > 0.0001 || Math.abs(dy) > 0.0001;
+
+    // Non-blocking geometric check: lets users dismantle & place sections freely anywhere on canvas
+    const check = validateRoomPlacement(
+      { x: next.x, y: next.y, width: next.width, height: next.height },
+      floorProject,
+      roomId
+    );
+    if (!check.valid) {
+      setInspectorWarning(null);
+      notify(`Placed "${next.name}" freely on canvas (${check.reason})`);
+    } else {
+      setInspectorWarning(null);
+      if (movedPos) {
+        notify(`Moved "${next.name}"`);
       }
     }
 
-    setInspectorWarning(null);
     onUpdateProject(
       (prev) => ({
         ...prev,
         rooms: prev.rooms.map((r) => (r.id === roomId ? next : r)),
+        // Carry attached furniture & electrical points along with the dismantled room section
+        furniture: movedPos
+          ? prev.furniture.map((f) =>
+              f.roomId === roomId
+                ? { ...f, x: Number((f.x + dx).toFixed(3)), y: Number((f.y + dy).toFixed(3)) }
+                : f
+            )
+          : prev.furniture,
+        points: movedPos
+          ? prev.points.map((p) =>
+              p.roomId === roomId
+                ? { ...p, x: Number((p.x + dx).toFixed(3)), y: Number((p.y + dy).toFixed(3)) }
+                : p
+            )
+          : prev.points,
       }),
       recordHistory
     );
+  };
+
+  const handleDismantleRoom = (roomId: string) => {
+    const room = project.rooms.find((r) => r.id === roomId);
+    if (!room) return;
+    const { lengthM } = siteToMeters(project.site);
+    const detachedX = Number((lengthM + 1.2).toFixed(2));
+    handleUpdateRoom(room.id, { x: detachedX, y: room.y }, true);
+    notify(`Dismantled "${room.name}" onto open canvas — drag freely anywhere to re-place`);
   };
 
   const handleRotateRoom = (roomId: string) => {
@@ -462,7 +622,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     const swappedH = room.width;
     const checkAnchor = validateRoomPlacement(
       { x: room.x, y: room.y, width: swappedW, height: swappedH },
-      project,
+      floorProject,
       room.id
     );
 
@@ -481,7 +641,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     }
 
     // Try nearest valid position near current center without resizing
-    const nearest = findNearestValidPosition(room.x, room.y, swappedW, swappedH, project, room.id);
+    const nearest = findNearestValidPosition(room.x, room.y, swappedW, swappedH, floorProject, room.id);
     if (nearest) {
       handleUpdateRoom(
         room.id,
@@ -510,7 +670,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       room.y,
       room.width,
       room.height,
-      project
+      floorProject
     );
     if (!spot) {
       const msg = `No open space available inside the site to duplicate "${room.name}" (${formatLength(room.width, units)} × ${formatLength(room.height, units)}).`;
@@ -520,10 +680,11 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     }
 
     const newId = `rm-${Date.now()}-dup`;
-    const sameTypeCount = project.rooms.filter((r) => r.type === room.type).length;
+    const sameTypeCount = floorProject.rooms.filter((r) => r.type === room.type).length;
     const copy: RoomZone = {
       ...room,
       id: newId,
+      floor: activeFloor,
       name: `${room.name.replace(/\s+\d+$/, '')} ${sameTypeCount + 1}`,
       x: spot.x,
       y: spot.y,
@@ -547,6 +708,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         ...prev.customWalls,
         {
           id,
+          floor: activeFloor,
           x1,
           y1,
           x2,
@@ -557,7 +719,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       ],
     }));
     setSelectedEntity({ kind: 'wall', id });
-    notify(`Added wall (${formatLength(Math.hypot(x2 - x1, y2 - y1), units)})`);
+    notify(`Added wall on ${formatFloorLabel(activeFloor)} (${formatLength(Math.hypot(x2 - x1, y2 - y1), units)})`);
   };
 
   const handleUpdateWall = (
@@ -604,6 +766,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         ...prev.openings,
         {
           id,
+          floor: activeFloor,
           kind,
           x,
           y,
@@ -613,7 +776,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       ],
     }));
     setSelectedEntity({ kind: 'opening', id });
-    notify(`Placed ${kind} snapped onto wall`);
+    notify(`Placed ${kind} on ${formatFloorLabel(activeFloor)}`);
   };
 
   const handleUpdateOpening = (
@@ -629,7 +792,10 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const handleAddDimension = (x1: number, y1: number, x2: number, y2: number) => {
     onUpdateProject((prev) => ({
       ...prev,
-      dimensions: [...(prev.dimensions ?? []), { id: `dim-${Date.now()}`, x1, y1, x2, y2 }],
+      dimensions: [
+        ...(prev.dimensions ?? []),
+        { id: `dim-${Date.now()}`, floor: activeFloor, x1, y1, x2, y2 },
+      ],
     }));
     notify(`Added dimension (${formatLength(Math.hypot(x2 - x1, y2 - y1), units)})`);
   };
@@ -705,12 +871,17 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     }
   };
 
-  // --- Electrical helpers (preserved) ---
+  // --- Electrical helpers (preserved & multi-floor aware) ---
   const handlePlaceElectrical = (itemType: ElectricalItemType) => {
     const cat = CATALOG_MAP[itemType];
-    const targetRoom = selectedRoom ?? project.rooms[0];
+    const targetRoom =
+      (selectedRoom && getItemFloor(selectedRoom) === activeFloor ? selectedRoom : null) ??
+      floorProject.rooms[0];
     if (!targetRoom) {
-      notify('Create at least one room first, or click on the 2D floor plan to place electrical items.', 'warning');
+      notify(
+        `Create at least one room on ${formatFloorLabel(activeFloor)} first, or click on the 2D floor plan to place electrical items.`,
+        'warning'
+      );
       setPendingPlaceItem(itemType);
       setViewMode('2d');
       return;
@@ -726,6 +897,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
     const newPoint: ElectricalPoint = {
       id: `pt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      floor: activeFloor,
       code,
       name: `${cat.label.replace(/s$/, '')} — ${targetRoom.name}`,
       itemType,
@@ -744,10 +916,18 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     onUpdateProject((prev) => ({
       ...prev,
       points: [...prev.points, newPoint],
+      ...(prev.summaryOverrides?.deletedBoqKeys?.includes(itemType)
+        ? {
+            summaryOverrides: {
+              ...prev.summaryOverrides,
+              deletedBoqKeys: prev.summaryOverrides.deletedBoqKeys.filter((k) => k !== itemType),
+            },
+          }
+        : {}),
     }));
 
     setSelectedEntity({ kind: 'point', id: newPoint.id });
-    notify(`Placed ${newPoint.name} (${newPoint.wattage} W) in ${targetRoom.name}`);
+    notify(`Placed ${newPoint.name} (${newPoint.wattage} W) on ${formatFloorLabel(activeFloor)}`);
   };
 
   const handlePlacePointAt = (
@@ -757,10 +937,11 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     roomId: string
   ) => {
     const cat = CATALOG_MAP[itemType];
-    const targetRoom = project.rooms.find((r) => r.id === roomId) ?? project.rooms[0];
+    const targetRoom = floorProject.rooms.find((r) => r.id === roomId) ?? floorProject.rooms[0];
     const existingCount = project.points.filter((p) => p.itemType === itemType).length + 1;
     const newPoint: ElectricalPoint = {
       id: `pt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      floor: activeFloor,
       code: `${cat.shortCode}-${String(existingCount).padStart(2, '0')}`,
       name: `${cat.label.replace(/s$/, '')} — ${targetRoom?.name ?? 'Site'}`,
       itemType,
@@ -779,10 +960,18 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     onUpdateProject((prev) => ({
       ...prev,
       points: [...prev.points, newPoint],
+      ...(prev.summaryOverrides?.deletedBoqKeys?.includes(itemType)
+        ? {
+            summaryOverrides: {
+              ...prev.summaryOverrides,
+              deletedBoqKeys: prev.summaryOverrides.deletedBoqKeys.filter((k) => k !== itemType),
+            },
+          }
+        : {}),
     }));
     setSelectedEntity({ kind: 'point', id: newPoint.id });
     setPendingPlaceItem(null);
-    notify(`Placed ${newPoint.name}`);
+    notify(`Placed ${newPoint.name} on ${formatFloorLabel(activeFloor)}`);
   };
 
   const handleUpdateSelectedPoint = (patch: Partial<ElectricalPoint>, recordHistory = false) => {
@@ -802,6 +991,164 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         ...prev,
         points: prev.points.map((p) =>
           p.id === pointId ? { ...p, x, y, roomId: roomId || p.roomId } : p
+        ),
+      }),
+      false
+    );
+  };
+
+  // --- Ctrl + Left Click Free Duplication Handlers (2D & 3D) ---
+  const handleDuplicatePoint = (pointId: string): ElectricalPoint | null => {
+    const src = project.points.find((p) => p.id === pointId);
+    if (!src) return null;
+    const cat = CATALOG_MAP[src.itemType];
+    const targetFloor = getItemFloor(src);
+    const { lengthM, widthM } = siteToMeters(project.site);
+    const existingCount = project.points.filter((p) => p.itemType === src.itemType).length + 1;
+    const shortCode = cat?.shortCode ?? 'PT';
+    const nextCode = `${shortCode}-${String(existingCount).padStart(2, '0')}`;
+
+    // Slight visible offset so quick Ctrl+Click clearly separates the duplicate, clamped cleanly
+    const nextX = Number(Math.min(lengthM - 0.25, Math.max(0.25, src.x + 0.65)).toFixed(2));
+    const nextY = Number(Math.min(widthM - 0.25, Math.max(0.25, src.y + 0.45)).toFixed(2));
+    const floorRooms = project.rooms.filter((r) => getItemFloor(r) === targetFloor);
+    const targetRoom =
+      floorRooms.find(
+        (r) => nextX >= r.x && nextX <= r.x + r.width && nextY >= r.y && nextY <= r.y + r.height
+      ) ?? floorRooms.find((r) => r.id === src.roomId);
+
+    const duplicated: ElectricalPoint = {
+      ...src,
+      id: `pt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      floor: targetFloor,
+      code: nextCode,
+      roomId: targetRoom?.id ?? src.roomId,
+      x: nextX,
+      y: nextY,
+    };
+
+    onUpdateProject((prev) => ({
+      ...prev,
+      points: [...prev.points, duplicated],
+      ...(prev.summaryOverrides?.deletedBoqKeys?.includes(src.itemType)
+        ? {
+            summaryOverrides: {
+              ...prev.summaryOverrides,
+              deletedBoqKeys: prev.summaryOverrides.deletedBoqKeys.filter(
+                (k) => k !== src.itemType
+              ),
+            },
+          }
+        : {}),
+    }));
+    setSelectedEntity({ kind: 'point', id: duplicated.id });
+    notify(`Duplicated ${src.code} as ${duplicated.code} — drag freely to position`);
+    return duplicated;
+  };
+
+  const handleDuplicateRoomFree = (roomId: string): RoomZone | null => {
+    const src = project.rooms.find((r) => r.id === roomId);
+    if (!src) return null;
+    const targetFloor = getItemFloor(src);
+    const sameTypeCount = floorProject.rooms.filter((r) => r.type === src.type).length;
+    const spot = findNearestValidPosition(
+      src.x + src.width,
+      src.y,
+      src.width,
+      src.height,
+      floorProject
+    );
+    const copy: RoomZone = {
+      ...src,
+      id: `rm-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      floor: targetFloor,
+      name: `${src.name.replace(/\s+\d+$/, '')} ${sameTypeCount + 1}`,
+      x: spot ? spot.x : Number((src.x + 0.7).toFixed(2)),
+      y: spot ? spot.y : Number((src.y + 0.7).toFixed(2)),
+    };
+    onUpdateProject((prev) => ({
+      ...prev,
+      rooms: [...prev.rooms, copy],
+    }));
+    setSelectedEntity({ kind: 'room', id: copy.id });
+    notify(`Duplicated "${src.name}" as "${copy.name}" — drag freely to position`);
+    return copy;
+  };
+
+  const handleDuplicateOpening = (openingId: string): ArchitecturalOpening | null => {
+    const src = project.openings.find((o) => o.id === openingId);
+    if (!src) return null;
+    const copy: ArchitecturalOpening = {
+      ...src,
+      id: `op-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      floor: getItemFloor(src),
+      x: Number((src.x + 0.6).toFixed(2)),
+      y: Number((src.y + 0.4).toFixed(2)),
+    };
+    onUpdateProject((prev) => ({
+      ...prev,
+      openings: [...prev.openings, copy],
+    }));
+    setSelectedEntity({ kind: 'opening', id: copy.id });
+    notify(`Duplicated ${src.kind} — drag freely to position`);
+    return copy;
+  };
+
+  const handleMoveOpening = (openingId: string, x: number, y: number) => {
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        openings: prev.openings.map((o) => (o.id === openingId ? { ...o, x, y } : o)),
+      }),
+      false
+    );
+  };
+
+  const handleDuplicateWall = (wallId: string) => {
+    const src = project.customWalls.find((w) => w.id === wallId);
+    if (!src) return;
+    const copy = {
+      ...src,
+      id: `cw-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      floor: getItemFloor(src),
+      x1: Number((src.x1 + 0.5).toFixed(2)),
+      y1: Number((src.y1 + 0.5).toFixed(2)),
+      x2: Number((src.x2 + 0.5).toFixed(2)),
+      y2: Number((src.y2 + 0.5).toFixed(2)),
+    };
+    onUpdateProject((prev) => ({
+      ...prev,
+      customWalls: [...prev.customWalls, copy],
+    }));
+    setSelectedEntity({ kind: 'wall', id: copy.id });
+    notify('Duplicated custom wall');
+  };
+
+  const handleDuplicateFurniture = (furnitureId: string): FurnitureItem | null => {
+    const src = project.furniture.find((f) => f.id === furnitureId);
+    if (!src) return null;
+    const { lengthM, widthM } = siteToMeters(project.site);
+    const copy: FurnitureItem = {
+      ...src,
+      id: `fn-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      floor: getItemFloor(src),
+      x: Number(Math.min(lengthM - 0.4, Math.max(0.4, src.x + 0.7)).toFixed(2)),
+      y: Number(Math.min(widthM - 0.4, Math.max(0.4, src.y + 0.5)).toFixed(2)),
+    };
+    onUpdateProject((prev) => ({
+      ...prev,
+      furniture: [...prev.furniture, copy],
+    }));
+    notify(`Duplicated ${src.kind.replace('-', ' ')} — drag freely to position`);
+    return copy;
+  };
+
+  const handleMoveFurniture = (furnitureId: string, x: number, y: number, roomId: string) => {
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        furniture: prev.furniture.map((f) =>
+          f.id === furnitureId ? { ...f, x, y, roomId: roomId || f.roomId } : f
         ),
       }),
       false
@@ -946,9 +1293,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    downloadFloorPlanPdf(project);
+                    downloadFloorPlanPdf(project, activeFloor);
                     setShowExportMenu(false);
-                    notify(`Exported ${project.name} Floor Plan PDF`);
+                    notify(`Exported ${project.name} (${formatFloorLabel(activeFloor)}) PDF`);
                   }}
                   className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-on-surface hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
                 >
@@ -958,9 +1305,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    downloadFloorPlanPng(project);
+                    downloadFloorPlanPng(project, activeFloor);
                     setShowExportMenu(false);
-                    notify(`Exported ${project.name} Floor Plan PNG`);
+                    notify(`Exported ${project.name} (${formatFloorLabel(activeFloor)}) PNG`);
                   }}
                   className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-on-surface hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
                 >
@@ -1056,34 +1403,6 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </button>
           </div>
 
-          {/* Grid & Snap Toggles */}
-          <div className="inline-flex items-center rounded-sm border border-outline-variant bg-surface-container p-0.5 gap-0.5">
-            <button
-              type="button"
-              onClick={() => setShowGrid((g) => !g)}
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-sm font-label text-label-sm cursor-pointer ${
-                showGrid
-                  ? 'bg-primary-container text-primary'
-                  : 'text-on-surface-variant hover:text-on-surface'
-              }`}
-            >
-              <span className="material-symbols-outlined text-[14px]" aria-hidden="true">grid_4x4</span>
-              <span>Grid</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setSnapEnabled((s) => !s)}
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-sm font-label text-label-sm cursor-pointer ${
-                snapEnabled
-                  ? 'bg-primary-container text-primary'
-                  : 'text-on-surface-variant hover:text-on-surface'
-              }`}
-            >
-              <span className="material-symbols-outlined text-[14px]" aria-hidden="true">straighten</span>
-              <span>Snap</span>
-            </button>
-          </div>
-
           {/* 2D View / 3D Preview Switch */}
           <div className="inline-flex items-center rounded-sm border border-outline bg-surface-container p-0.5">
             <button
@@ -1129,7 +1448,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 type="button"
                 onClick={() => {
                   setCameraMode('fps');
-                  notify('First-Person walkthrough — use WASD keys & drag to look');
+                  notify(`First-Person walkthrough on ${formatFloorLabel(activeFloor)} — use WASD keys & drag to look`);
                 }}
                 className={`px-2 py-0.5 rounded-sm font-label text-label-sm cursor-pointer ${
                   cameraMode === 'fps' ? 'bg-surface-container-high text-primary' : 'text-on-surface-variant'
@@ -1150,6 +1469,17 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </div>
           )}
 
+          {/* Drawing Instructions Guide */}
+          <button
+            type="button"
+            onClick={() => setShowGuideModal(true)}
+            title="How to Work on Drawings & Multi-Floor Models"
+            className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-surface-container border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
+          >
+            <span className="material-symbols-outlined text-[15px]" aria-hidden="true">menu_book</span>
+            <span>Guide</span>
+          </button>
+
           {/* Project Summary */}
           <button
             type="button"
@@ -1162,250 +1492,304 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         </div>
       </div>
 
-      {/* MAIN 3-COLUMN CAD WORKSPACE */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[248px_minmax(0,1fr)_292px] min-h-0">
-        {/* LEFT SIDEBAR: Collapsible CAD Sections */}
-        <aside className="bg-surface-container border-b lg:border-b-0 lg:border-r border-outline-variant p-gutter-sm flex flex-col gap-gutter-sm overflow-y-auto lg:max-h-[calc(100vh-146px)]">
-          {/* A. DRAWING TOOLS */}
-          <details open className="group bg-surface-container-low border border-outline-variant rounded-md">
-            <summary className="flex items-center justify-between px-gutter-sm py-gutter-xs cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md">
-              <span className="font-label text-label-sm text-primary uppercase tracking-wider">
-                A. Drawing Tools
-              </span>
-              <span
-                className="material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle group-open:rotate-180"
-                aria-hidden="true"
-              >
-                expand_more
-              </span>
-            </summary>
-            <div className="p-gutter-xs pt-1 grid grid-cols-2 gap-1">
-              {DRAWING_TOOLS.map((tool) => {
-                const isActive = activeTool === tool.id && !pendingPlaceItem;
-                return (
-                  <button
-                    key={tool.id}
-                    type="button"
-                    onClick={() => handleSelectTool(tool.id)}
-                    className={`flex items-center gap-1.5 px-2 py-1.5 rounded-sm border text-left transition-colors cursor-pointer ${
-                      isActive
-                        ? 'bg-primary-container border-primary text-primary'
-                        : 'bg-surface-container border-outline-variant text-on-surface-variant hover:border-outline hover:text-on-surface'
-                    }`}
-                  >
-                    <span className="material-symbols-outlined text-[15px] shrink-0" aria-hidden="true">
-                      {tool.icon}
-                    </span>
-                    <span className="font-label text-label-sm truncate">{tool.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </details>
-
-          {/* B. ROOM LIBRARY (15 Architectural Rooms) */}
-          <details open className="group bg-surface-container-low border border-outline-variant rounded-md">
-            <summary className="flex items-center justify-between px-gutter-sm py-gutter-xs cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md">
-              <span className="font-label text-label-sm text-primary uppercase tracking-wider">
-                B. Room Library ({ROOM_LIBRARY.length})
-              </span>
-              <span
-                className="material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle group-open:rotate-180"
-                aria-hidden="true"
-              >
-                expand_more
-              </span>
-            </summary>
-            <div className="p-gutter-xs pt-1 flex flex-col gap-1">
-              {ROOM_LIBRARY.map((rm) => (
-                <button
-                  key={rm.type}
-                  type="button"
-                  onClick={() => handleOpenRoomLibraryModal(rm.type)}
-                  className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-surface-container border border-outline-variant hover:border-primary text-left transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="material-symbols-outlined text-primary text-[16px] shrink-0" aria-hidden="true">
-                      {rm.icon}
-                    </span>
-                    <span className="font-body text-body-sm text-on-surface truncate">
-                      {rm.label}
-                    </span>
-                  </div>
-                  <span className="font-mono text-[10px] text-on-surface-variant shrink-0">
-                    {units === 'ft'
-                      ? `${rm.defaultLengthFt}×${rm.defaultWidthFt}'`
-                      : `${rm.defaultW.toFixed(1)}×${rm.defaultH.toFixed(1)}m`}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </details>
-
-          {/* C. SITE PARAMETERS */}
-          <details className="group bg-surface-container-low border border-outline-variant rounded-md">
-            <summary className="flex items-center justify-between px-gutter-sm py-gutter-xs cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md">
-              <span className="font-label text-label-sm text-on-surface-variant uppercase tracking-wider">
-                C. Site Parameters
-              </span>
-              <span
-                className="material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle group-open:rotate-180"
-                aria-hidden="true"
-              >
-                expand_more
-              </span>
-            </summary>
-            <div className="p-gutter-sm pt-1 grid grid-cols-2 gap-gutter-xs">
-              <label className="flex flex-col gap-0.5">
-                <span className="font-label text-[11px] text-on-surface-variant">Length ({unitShort})</span>
-                <input
-                  type="number"
-                  step="0.5"
-                  min={5}
-                  value={project.site.length}
-                  onChange={(e) => handleSiteChange('length', Math.max(5, Number(e.target.value) || 10))}
-                  className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
-                />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="font-label text-[11px] text-on-surface-variant">Width ({unitShort})</span>
-                <input
-                  type="number"
-                  step="0.5"
-                  min={5}
-                  value={project.site.width}
-                  onChange={(e) => handleSiteChange('width', Math.max(5, Number(e.target.value) || 10))}
-                  className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
-                />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="font-label text-[11px] text-on-surface-variant">Ceiling ({unitShort})</span>
-                <input
-                  type="number"
-                  step="0.5"
-                  min={2}
-                  value={project.site.ceilingHeight}
-                  onChange={(e) => handleSiteChange('ceilingHeight', Math.max(2, Number(e.target.value) || 10))}
-                  className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
-                />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="font-label text-[11px] text-on-surface-variant">
-                  Wall ({units === 'ft' ? 'in' : 'm'})
-                </span>
-                <input
-                  type="number"
-                  step={units === 'ft' ? '1' : '0.02'}
-                  min={units === 'ft' ? 2 : 0.05}
-                  value={
-                    units === 'ft'
-                      ? Math.round(project.site.wallThickness * 12)
-                      : Number(project.site.wallThickness.toFixed(2))
-                  }
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    if (!Number.isFinite(v) || v <= 0) return;
-                    handleSiteChange(
-                      'wallThickness',
-                      units === 'ft' ? Number((v / 12).toFixed(3)) : Number(v.toFixed(3))
-                    );
-                  }}
-                  className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
-                />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="font-label text-[11px] text-on-surface-variant">Units</span>
-                <select
-                  value={project.site.units}
-                  onChange={(e) => {
-                    const nextU = e.target.value as UnitSystem;
-                    if (nextU === project.site.units) return;
-                    const factor = nextU === 'm' ? FT_TO_M : M_TO_FT;
-                    onUpdateProject((prev) => ({
-                      ...prev,
-                      site: {
-                        ...prev.site,
-                        units: nextU,
-                        length: Number((prev.site.length * factor).toFixed(1)),
-                        width: Number((prev.site.width * factor).toFixed(1)),
-                        ceilingHeight: Number((prev.site.ceilingHeight * factor).toFixed(1)),
-                        wallThickness: Number((prev.site.wallThickness * factor).toFixed(3)),
-                      },
-                    }));
-                  }}
-                  className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface focus:border-primary focus:outline-none"
-                >
-                  <option value="ft">Feet (ft)</option>
-                  <option value="m">Metres (m)</option>
-                </select>
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="font-label text-[11px] text-on-surface-variant">Floors</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={5}
-                  value={project.site.floors}
-                  onChange={(e) => handleSiteChange('floors', Math.max(1, Math.min(5, Number(e.target.value) || 1)))}
-                  className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
-                />
-              </label>
-            </div>
-          </details>
-
-          {/* D. ELECTRICAL LIBRARY (Preserved for Electrical BOQ & 3D Fixtures) */}
-          <details className="group bg-surface-container-low border border-outline-variant rounded-md">
-            <summary className="flex items-center justify-between px-gutter-sm py-gutter-xs cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md">
-              <span className="font-label text-label-sm text-secondary uppercase tracking-wider">
-                D. Electrical Library ({ELECTRICAL_CATALOG.length})
-              </span>
-              <span
-                className="material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle group-open:rotate-180"
-                aria-hidden="true"
-              >
-                expand_more
-              </span>
-            </summary>
-            <div className="p-gutter-xs pt-1 flex flex-col gap-1">
-              {ELECTRICAL_CATALOG.map((item) => (
-                <button
-                  key={item.itemType}
-                  type="button"
-                  onClick={() => handlePlaceElectrical(item.itemType)}
-                  className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-surface-container border border-outline-variant hover:border-secondary text-left transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="material-symbols-outlined text-secondary text-[15px] shrink-0" aria-hidden="true">
-                      {item.icon}
-                    </span>
-                    <span className="font-body text-body-sm text-on-surface truncate">
-                      {item.label}
-                    </span>
-                  </div>
-                  <span className="font-mono text-[10px] text-on-surface-variant shrink-0">
-                    {item.defaultWattage}W
-                  </span>
-                </button>
-              ))}
-            </div>
-          </details>
-        </aside>
-
-        {/* CENTRE: Large 2D Architectural Canvas / 3D Preview */}
+      {/* MAIN CAD WORKSPACE (Canvas extended to occupy left area + Right Properties Inspector) */}
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_292px] min-h-0">
+        {/* PRIMARY WORKSPACE: A. Drawing Tools + B/C/D Drawers + Floor Strip + Extended 2D/3D Canvas */}
         <main className="min-w-0 bg-surface cad-grid relative flex flex-col p-gutter-sm gap-gutter-xs min-h-[520px] lg:max-h-[calc(100vh-146px)]">
-          {/* Status / Validation Strip */}
-          <div className="flex flex-wrap items-center justify-between gap-gutter-sm">
-            <div className="inline-flex items-center gap-gutter-xs px-gutter-sm py-1 rounded-sm bg-surface-container border border-outline-variant">
-              <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
-                {viewMode === '2d' ? 'architecture' : 'view_in_ar'}
-              </span>
-              <span className="font-mono text-mono-sm text-on-surface uppercase">
-                {viewMode === '2d'
-                  ? `2D CAD · TOOL: ${DRAWING_TOOLS.find((t) => t.id === activeTool)?.label ?? 'Select'}`
-                  : `3D BIM PREVIEW · ${cameraMode === 'orbit' ? 'ORBIT' : 'FIRST PERSON'}`}
-              </span>
+          {/* Summary Components Row with A. Drawing Tools positioned beside B. Room Library */}
+          <div className="flex flex-wrap items-center justify-between gap-gutter-xs z-30">
+            <div className="flex flex-wrap items-center gap-gutter-xs">
+              {/* A. DRAWING TOOLS */}
+              <details
+                open={openDrawer === 'tools'}
+                className="relative group bg-surface-container border border-outline-variant rounded-md"
+              >
+                <summary
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setOpenDrawer((prev) => (prev === 'tools' ? null : 'tools'));
+                  }}
+                  className={`flex items-center gap-1.5 px-gutter-sm py-1.5 cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md ${
+                    openDrawer === 'tools' ? 'bg-surface-container-high border-primary' : ''
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
+                    architecture
+                  </span>
+                  <span className="font-label text-label-sm text-primary uppercase tracking-wider whitespace-nowrap">
+                    A. Drawing Tools
+                  </span>
+                  <span
+                    className="material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle group-open:rotate-180"
+                    aria-hidden="true"
+                  >
+                    expand_more
+                  </span>
+                </summary>
+                <div className="absolute left-0 top-full mt-1 w-64 z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-xs grid grid-cols-2 gap-1">
+                  {DRAWING_TOOLS.map((tool) => {
+                    const isActive = activeTool === tool.id && !pendingPlaceItem;
+                    return (
+                      <button
+                        key={tool.id}
+                        type="button"
+                        onClick={() => {
+                          handleSelectTool(tool.id);
+                          setOpenDrawer(null);
+                        }}
+                        className={`flex items-center gap-1.5 px-2 py-1.5 rounded-sm border text-left transition-colors cursor-pointer ${
+                          isActive
+                            ? 'bg-primary-container border-primary text-primary'
+                            : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:border-outline hover:text-on-surface'
+                        }`}
+                      >
+                        <span className="material-symbols-outlined text-[15px] shrink-0" aria-hidden="true">
+                          {tool.icon}
+                        </span>
+                        <span className="font-label text-label-sm truncate">{tool.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </details>
+
+              {/* B. ROOM LIBRARY (15 Architectural Rooms) */}
+              <details
+                open={openDrawer === 'rooms'}
+                className="relative group bg-surface-container border border-outline-variant rounded-md"
+              >
+                <summary
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setOpenDrawer((prev) => (prev === 'rooms' ? null : 'rooms'));
+                  }}
+                  className={`flex items-center gap-1.5 px-gutter-sm py-1.5 cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md ${
+                    openDrawer === 'rooms' ? 'bg-surface-container-high border-primary' : ''
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
+                    meeting_room
+                  </span>
+                  <span className="font-label text-label-sm text-primary uppercase tracking-wider whitespace-nowrap">
+                    B. Room Library ({ROOM_LIBRARY.length})
+                  </span>
+                  <span
+                    className="material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle group-open:rotate-180"
+                    aria-hidden="true"
+                  >
+                    expand_more
+                  </span>
+                </summary>
+                <div className="absolute left-0 top-full mt-1 w-64 max-h-80 overflow-y-auto z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-xs flex flex-col gap-1">
+                  {ROOM_LIBRARY.map((rm) => (
+                    <button
+                      key={rm.type}
+                      type="button"
+                      onClick={() => {
+                        setOpenDrawer(null);
+                        handleOpenRoomLibraryModal(rm.type);
+                      }}
+                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-surface-container-low border border-outline-variant hover:border-primary text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="material-symbols-outlined text-primary text-[16px] shrink-0" aria-hidden="true">
+                          {rm.icon}
+                        </span>
+                        <span className="font-body text-body-sm text-on-surface truncate">
+                          {rm.label}
+                        </span>
+                      </div>
+                      <span className="font-mono text-[10px] text-on-surface-variant shrink-0">
+                        {units === 'ft'
+                          ? `${rm.defaultLengthFt}×${rm.defaultWidthFt}'`
+                          : `${rm.defaultW.toFixed(1)}×${rm.defaultH.toFixed(1)}m`}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </details>
+
+              {/* C. SITE PARAMETERS */}
+              <details
+                open={openDrawer === 'site'}
+                className="relative group bg-surface-container border border-outline-variant rounded-md"
+              >
+                <summary
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setOpenDrawer((prev) => (prev === 'site' ? null : 'site'));
+                  }}
+                  className={`flex items-center gap-1.5 px-gutter-sm py-1.5 cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md ${
+                    openDrawer === 'site' ? 'bg-surface-container-high' : ''
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-on-surface-variant text-[15px]" aria-hidden="true">
+                    square_foot
+                  </span>
+                  <span className="font-label text-label-sm text-on-surface uppercase tracking-wider whitespace-nowrap">
+                    C. Site Parameters
+                  </span>
+                  <span
+                    className="material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle group-open:rotate-180"
+                    aria-hidden="true"
+                  >
+                    expand_more
+                  </span>
+                </summary>
+                <div className="absolute left-0 top-full mt-1 w-64 z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-sm grid grid-cols-2 gap-gutter-xs">
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">Length ({unitShort})</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min={5}
+                      value={project.site.length}
+                      onChange={(e) => handleSiteChange('length', Math.max(5, Number(e.target.value) || 10))}
+                      className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">Width ({unitShort})</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min={5}
+                      value={project.site.width}
+                      onChange={(e) => handleSiteChange('width', Math.max(5, Number(e.target.value) || 10))}
+                      className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">Ceiling ({unitShort})</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min={2}
+                      value={project.site.ceilingHeight}
+                      onChange={(e) => handleSiteChange('ceilingHeight', Math.max(2, Number(e.target.value) || 10))}
+                      className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">
+                      Wall ({units === 'ft' ? 'in' : 'm'})
+                    </span>
+                    <input
+                      type="number"
+                      step={units === 'ft' ? '1' : '0.02'}
+                      min={units === 'ft' ? 2 : 0.05}
+                      value={
+                        units === 'ft'
+                          ? Math.round(project.site.wallThickness * 12)
+                          : Number(project.site.wallThickness.toFixed(2))
+                      }
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (!Number.isFinite(v) || v <= 0) return;
+                        handleSiteChange(
+                          'wallThickness',
+                          units === 'ft' ? Number((v / 12).toFixed(3)) : Number(v.toFixed(3))
+                        );
+                      }}
+                      className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">Units</span>
+                    <select
+                      value={project.site.units}
+                      onChange={(e) => {
+                        const nextU = e.target.value as UnitSystem;
+                        if (nextU === project.site.units) return;
+                        const factor = nextU === 'm' ? FT_TO_M : M_TO_FT;
+                        onUpdateProject((prev) => ({
+                          ...prev,
+                          site: {
+                            ...prev.site,
+                            units: nextU,
+                            length: Number((prev.site.length * factor).toFixed(1)),
+                            width: Number((prev.site.width * factor).toFixed(1)),
+                            ceilingHeight: Number((prev.site.ceilingHeight * factor).toFixed(1)),
+                            wallThickness: Number((prev.site.wallThickness * factor).toFixed(3)),
+                          },
+                        }));
+                      }}
+                      className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface focus:border-primary focus:outline-none"
+                    >
+                      <option value="ft">Feet (ft)</option>
+                      <option value="m">Metres (m)</option>
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">Floors</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={5}
+                      value={project.site.floors}
+                      onChange={(e) => handleSiteChange('floors', Math.max(1, Math.min(5, Number(e.target.value) || 1)))}
+                      className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
+                    />
+                  </label>
+                </div>
+              </details>
+
+              {/* D. ELECTRICAL LIBRARY */}
+              <details
+                open={openDrawer === 'electrical'}
+                className="relative group bg-surface-container border border-outline-variant rounded-md"
+              >
+                <summary
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setOpenDrawer((prev) => (prev === 'electrical' ? null : 'electrical'));
+                  }}
+                  className={`flex items-center gap-1.5 px-gutter-sm py-1.5 cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md ${
+                    openDrawer === 'electrical' ? 'bg-surface-container-high' : ''
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">
+                    bolt
+                  </span>
+                  <span className="font-label text-label-sm text-secondary uppercase tracking-wider whitespace-nowrap">
+                    D. Electrical Library ({ELECTRICAL_CATALOG.length})
+                  </span>
+                  <span
+                    className="material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle group-open:rotate-180"
+                    aria-hidden="true"
+                  >
+                    expand_more
+                  </span>
+                </summary>
+                <div className="absolute left-0 top-full mt-1 w-64 max-h-80 overflow-y-auto z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-xs flex flex-col gap-1">
+                  {ELECTRICAL_CATALOG.map((item) => (
+                    <button
+                      key={item.itemType}
+                      type="button"
+                      onClick={() => {
+                        setOpenDrawer(null);
+                        handlePlaceElectrical(item.itemType);
+                      }}
+                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-surface-container-low border border-outline-variant hover:border-secondary text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="material-symbols-outlined text-secondary text-[15px] shrink-0" aria-hidden="true">
+                          {item.icon}
+                        </span>
+                        <span className="font-body text-body-sm text-on-surface truncate">
+                          {item.label}
+                        </span>
+                      </div>
+                      <span className="font-mono text-[10px] text-on-surface-variant shrink-0">
+                        {item.defaultWattage}W
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </details>
             </div>
 
+            {/* Active Tool & Live Status Pill */}
             <div
               className={`inline-flex items-center gap-gutter-xs px-gutter-sm py-1 rounded-sm border font-mono text-mono-sm truncate max-w-full ${
                 statusMessage.tone === 'warning'
@@ -1420,11 +1804,108 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </div>
           </div>
 
+          {/* Multi-Floor Level Switcher Strip (1st Floor, 2nd Floor, 3rd Floor + Elevated) */}
+          <div className="flex flex-wrap items-center justify-between gap-gutter-xs px-gutter-sm py-1 rounded-md bg-surface-container border border-outline-variant z-20">
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="inline-flex items-center gap-1 pr-1.5 font-mono text-[11px] text-on-surface-variant uppercase">
+                <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
+                  layers
+                </span>
+                <span>Floors ({totalFloors}):</span>
+              </span>
+              {Array.from({ length: totalFloors }, (_, idx) => idx + 1).map((fl) => {
+                const isElevatedActive = viewMode === '3d' && floorView3D === 'all' && totalFloors > 1;
+                const isActive = fl === activeFloor && !isElevatedActive;
+                return (
+                  <button
+                    key={fl}
+                    type="button"
+                    onClick={() => handleSwitchFloor(fl)}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm border font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap ${
+                      isActive
+                        ? 'bg-primary text-on-primary border-primary'
+                        : 'bg-surface-container-low text-on-surface-variant border-outline-variant hover:border-primary hover:text-on-surface'
+                    }`}
+                  >
+                    <span>{formatFloorLabel(fl)}</span>
+                  </button>
+                );
+              })}
+
+              {totalFloors > 1 && (
+                <button
+                  type="button"
+                  onClick={handleToggleElevatedView}
+                  title={`Show all ${totalFloors} floors stacked together in Elevated 3D view`}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-sm border font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap ${
+                    viewMode === '3d' && floorView3D === 'all'
+                      ? 'bg-secondary text-on-secondary border-secondary'
+                      : 'bg-surface-container-low text-secondary border-secondary/50 hover:border-secondary hover:bg-secondary/10'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[14px]" aria-hidden="true">
+                    apartment
+                  </span>
+                  <span>Elevated</span>
+                </button>
+              )}
+
+              {totalFloors < 5 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextFloors = Math.min(5, totalFloors + 1);
+                    handleSiteChange('floors', nextFloors);
+                    setActiveFloor(nextFloors);
+                    setFloorView3D('active-only');
+                    setSelectedEntity(null);
+                    setAllSelected(false);
+                    notify(
+                      `Added ${formatFloorLabel(nextFloors)} — click Elevated to view all ${nextFloors} floors stacked`
+                    );
+                  }}
+                  title="Add an elevated floor (up to 5 floors)"
+                  className="inline-flex items-center gap-0.5 px-2 py-1 rounded-sm border border-dashed border-outline text-on-surface-variant hover:text-primary hover:border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
+                >
+                  <span className="material-symbols-outlined text-[14px]" aria-hidden="true">add</span>
+                  <span>Floor</span>
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-gutter-xs">
+              {activeFloor > 1 && !(viewMode === '3d' && floorView3D === 'all') && (
+                <button
+                  type="button"
+                  onClick={handleCopyFloorBelow}
+                  title={`Copy layout from ${formatFloorLabel(activeFloor - 1)} to ${formatFloorLabel(activeFloor)}`}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-sm bg-surface-container-high border border-outline text-primary hover:border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
+                >
+                  <span className="material-symbols-outlined text-[14px]" aria-hidden="true">content_copy</span>
+                  <span>Copy {formatFloorLabel(activeFloor - 1)}</span>
+                </button>
+              )}
+              <span className="font-mono text-[11px] text-on-surface-variant hidden sm:inline">
+                {viewMode === '3d' && floorView3D === 'all' && totalFloors > 1
+                  ? `Elevated · All ${totalFloors} Floors`
+                  : activeFloor === 1
+                    ? 'Ground Level (0)'
+                    : `Elev. +${formatLength((activeFloor - 1) * siteToMeters(project.site).ceilingM, units, 1)}`}
+              </span>
+            </div>
+          </div>
+
           {/* Primary Canvas Frame */}
-          <div className="relative flex-1 min-h-[420px] rounded-lg border border-outline bg-surface-container-low overflow-hidden">
+          <div
+            className="relative flex-1 min-h-[420px] rounded-lg border border-outline bg-surface-container-low overflow-hidden"
+            onPointerDown={() => {
+              if (openDrawer) setOpenDrawer(null);
+            }}
+          >
             {viewMode === '2d' ? (
               <FloorPlan2D
                 project={project}
+                activeFloor={activeFloor}
                 selectedEntity={selectedEntity}
                 allSelected={allSelected}
                 activeTool={activeTool}
@@ -1450,12 +1931,19 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 onEraseEntity={handleEraseEntity}
                 onRotateEntity={handleRotateEntity}
                 onMovePoint={handleMovePoint}
+                onMoveOpening={handleMoveOpening}
+                onDuplicatePoint={handleDuplicatePoint}
+                onDuplicateRoom={handleDuplicateRoomFree}
+                onDuplicateOpening={handleDuplicateOpening}
+                onDuplicateWall={handleDuplicateWall}
                 onPlacePointAt={handlePlacePointAt}
                 onValidationWarning={(msg) => notify(msg, 'warning')}
               />
             ) : (
               <Viewport3D
                 project={project}
+                activeFloor={activeFloor}
+                floorViewMode={floorView3D}
                 selectedPointId={selectedPoint?.id ?? null}
                 cameraMode={cameraMode}
                 lightingMode={lightingMode}
@@ -1463,6 +1951,10 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 pendingPlaceItem={pendingPlaceItem}
                 onSelectPoint={(pid) => setSelectedEntity({ kind: 'point', id: pid })}
                 onPlacePointAt={handlePlacePointAt}
+                onDuplicatePoint={handleDuplicatePoint}
+                onMovePoint={handleMovePoint}
+                onDuplicateFurniture={handleDuplicateFurniture}
+                onMoveFurniture={handleMoveFurniture}
               />
             )}
           </div>
@@ -1710,6 +2202,15 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   <span>Duplicate</span>
                 </button>
               </div>
+
+              <button
+                type="button"
+                onClick={() => handleDismantleRoom(selectedRoom.id)}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-sm bg-primary-container/30 border border-primary text-primary hover:bg-primary-container/50 font-label text-label-sm cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[15px]">open_with</span>
+                <span>Dismantle Section to Canvas</span>
+              </button>
 
               <button
                 type="button"
@@ -2031,15 +2532,15 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
               {/* Placed Rooms Quick Index */}
               <div className="flex flex-col gap-gutter-xs">
                 <span className="font-label text-label-sm text-on-surface-variant uppercase tracking-wider">
-                  Created Rooms ({project.rooms.length})
+                  Rooms on {formatFloorLabel(activeFloor)} ({floorProject.rooms.length})
                 </span>
-                {project.rooms.length === 0 ? (
+                {floorProject.rooms.length === 0 ? (
                   <p className="font-body text-body-sm text-on-surface-variant bg-surface-container-low border border-dashed border-outline-variant rounded-md p-gutter-sm">
-                    No rooms created yet. Click anywhere inside the empty site boundary on the 2D canvas, or choose a room from the Room Library on the left.
+                    No rooms created on {formatFloorLabel(activeFloor)} yet. Click anywhere inside the site boundary on the 2D canvas, or choose a room from B. Room Library.
                   </p>
                 ) : (
                   <div className="flex flex-col gap-1 max-h-56 overflow-y-auto">
-                    {project.rooms.map((rm) => (
+                    {floorProject.rooms.map((rm) => (
                       <button
                         key={rm.id}
                         type="button"
@@ -2069,6 +2570,13 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             <span className="text-on-surface-variant">SITE:</span>
             <span className="text-on-surface tabular-nums">
               {project.site.length} {unitShort} × {project.site.width} {unitShort}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <span className="text-on-surface-variant">FLOOR:</span>
+            <span className="text-primary">
+              {formatFloorLabel(activeFloor)} / {totalFloors}
             </span>
           </div>
 
@@ -2106,12 +2614,18 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       {pendingRoomModal && (
         <CreateRoomModal
           project={project}
+          activeFloor={activeFloor}
           initialX={pendingRoomModal.x}
           initialY={pendingRoomModal.y}
           initialRoomType={pendingRoomModal.roomType}
           onCancel={() => setPendingRoomModal(null)}
           onPlaceRoom={handlePlaceRoomFromModal}
         />
+      )}
+
+      {/* DRAWING INSTRUCTIONS MODAL */}
+      {showGuideModal && (
+        <DrawingInstructionsModal onClose={() => setShowGuideModal(false)} />
       )}
 
       {/* SAVE AS INLINE MODAL (zero window.prompt) */}

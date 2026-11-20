@@ -2,12 +2,15 @@ import * as THREE from 'three';
 import { siteToMeters } from '../data/presets';
 import {
   ElectricalPoint,
+  FloorView3DMode,
   FurnitureItem,
   LightingMode,
   ProjectData,
 } from '../types/design';
 import { ArchitecturalTextureSet } from './proceduralTextures';
-import { extractMergedWalls } from '../utils/geometry';
+import { extractMergedWalls, sliceProjectForFloor } from '../utils/geometry';
+
+export const STORY_SLAB_THICKNESS = 0.22;
 
 export interface BuiltSceneHandles {
   root: THREE.Group;
@@ -349,7 +352,9 @@ export function buildArchitecturalScene(
   selectedPointId: string | null,
   lightingMode: LightingMode,
   cutawayWalls: boolean,
-  isSoftwareGl: boolean
+  isSoftwareGl: boolean,
+  activeFloor = 1,
+  floorViewMode: FloorView3DMode = 'all'
 ): BuiltSceneHandles {
   const root = new THREE.Group();
   const clickables: THREE.Object3D[] = [];
@@ -359,56 +364,50 @@ export function buildArchitecturalScene(
   const { lengthM, widthM, ceilingM, wallThickM } = siteToMeters(project.site);
   const halfL = lengthM / 2;
   const halfW = widthM / 2;
-  const wallH = cutawayWalls ? Math.min(2.55, ceilingM * 0.85) : ceilingM;
+  const totalFloors = Math.max(1, Math.min(5, Math.round(project.site.floors || 1)));
+  const clampedActiveFloor = Math.max(1, Math.min(totalFloors, Math.round(activeFloor || 1)));
+  const storyStep = ceilingM + STORY_SLAB_THICKNESS;
+
+  const visibleFloors: number[] = [];
+  if (floorViewMode === 'active-only') {
+    visibleFloors.push(clampedActiveFloor);
+  } else if (floorViewMode === 'up-to-active') {
+    for (let f = 1; f <= clampedActiveFloor; f++) visibleFloors.push(f);
+  } else {
+    for (let f = 1; f <= totalFloors; f++) visibleFloors.push(f);
+  }
 
   // Offset helper converting project (x, y) meters -> centered Three.js (x, z)
   const toWorldX = (x: number) => x - halfL;
   const toWorldZ = (y: number) => y - halfW;
 
-  // 1. Structural Concrete Slab Base (grounded cleanly)
+  // Shared materials across floors
   const slabMat = new THREE.MeshStandardMaterial({
     color: 0x162238,
     roughness: 0.78,
     metalness: 0.15,
   });
-  const slab = new THREE.Mesh(
-    new THREE.BoxGeometry(lengthM + 0.5, 0.24, widthM + 0.5),
-    slabMat
-  );
-  slab.position.set(0, -0.12, 0);
-  slab.receiveShadow = true;
-  root.add(slab);
-
-  // Subtle Electric Blue structural perimeter plinth trim
-  const trimGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(lengthM + 0.52, 0.24, widthM + 0.52));
-  const trimLines = new THREE.LineSegments(
-    trimGeo,
-    new THREE.LineBasicMaterial({ color: 0x00a8ff, transparent: true, opacity: 0.55 })
-  );
-  trimLines.position.set(0, -0.12, 0);
-  root.add(trimLines);
-
-  // 2. Room Floor Finishes (offset slightly above slab at y = 0.02 to prevent Z-fighting)
+  const upperSlabMat = new THREE.MeshStandardMaterial({
+    color: 0x1c2b45,
+    roughness: 0.72,
+    metalness: 0.18,
+  });
+  const emptyDeckMat = new THREE.MeshStandardMaterial({
+    color: 0x1a2942,
+    roughness: 0.78,
+    metalness: 0.1,
+  });
+  const columnMat = new THREE.MeshStandardMaterial({
+    color: 0x94a3b8,
+    roughness: 0.55,
+    metalness: 0.25,
+  });
   const floorMaterials: Record<string, THREE.MeshStandardMaterial> = {
     wood: new THREE.MeshStandardMaterial({ map: textures.wood, roughness: 0.62, metalness: 0.06 }),
     tile: new THREE.MeshStandardMaterial({ map: textures.tile, roughness: 0.35, metalness: 0.12 }),
     terrazzo: new THREE.MeshStandardMaterial({ map: textures.terrazzo, roughness: 0.42, metalness: 0.08 }),
     stone: new THREE.MeshStandardMaterial({ map: textures.stone, roughness: 0.72, metalness: 0.05 }),
   };
-
-  project.rooms.forEach((room) => {
-    const mat = floorMaterials[room.floorFinish] ?? floorMaterials.wood;
-    const floorMesh = new THREE.Mesh(new THREE.BoxGeometry(room.width - 0.04, 0.03, room.height - 0.04), mat);
-    floorMesh.position.set(
-      toWorldX(room.x + room.width / 2),
-      0.015,
-      toWorldZ(room.y + room.height / 2)
-    );
-    floorMesh.receiveShadow = true;
-    root.add(floorMesh);
-  });
-
-  // 3. Structural Exterior Walls & Interior Partition Walls
   const extWallMat = new THREE.MeshStandardMaterial({
     color: 0xdbe2ec,
     roughness: 0.78,
@@ -424,61 +423,9 @@ export function buildArchitecturalScene(
     roughness: 0.82,
     metalness: 0.02,
   });
-
-  const addWallSegment = (
-    cx: number,
-    cz: number,
-    len: number,
-    thick: number,
-    rotY: number,
-    isExterior: boolean
-  ) => {
-    const h = isExterior ? wallH : wallH * 0.92;
-    const wall = new THREE.Mesh(
-      new THREE.BoxGeometry(len, h, thick),
-      [extWallMat, extWallMat, wallTopCapMat, extWallMat, isExterior ? extWallMat : intWallMat, isExterior ? extWallMat : intWallMat]
-    );
-    wall.position.set(cx, h / 2, cz);
-    wall.rotation.y = rotY;
-    wall.castShadow = true;
-    wall.receiveShadow = true;
-    root.add(wall);
-  };
-
-  // Perimeter walls (front wall slightly lower in cutaway Orbit view so interior stays readable!)
-  const frontWallH = cutawayWalls ? 0.85 : wallH;
-  const mergedWalls = extractMergedWalls(project);
-
-  mergedWalls.forEach((seg) => {
-    const dx = seg.x2 - seg.x1;
-    const dy = seg.y2 - seg.y1;
-    const len = Math.hypot(dx, dy);
-    if (len < 0.08) return;
-
-    const cx = toWorldX((seg.x1 + seg.x2) / 2);
-    const cz = toWorldZ((seg.y1 + seg.y2) / 2);
-    const angle = -Math.atan2(dy, dx);
-
-    // South perimeter cutaway lip in Orbit mode so user can inspect rooms & walls clearly
-    if (seg.id === 'ext-s') {
-      const frontWall = new THREE.Mesh(
-        new THREE.BoxGeometry(len + seg.thickness, frontWallH, seg.thickness),
-        [extWallMat, extWallMat, wallTopCapMat, extWallMat, extWallMat, extWallMat]
-      );
-      frontWall.position.set(cx, frontWallH / 2, cz);
-      frontWall.castShadow = true;
-      frontWall.receiveShadow = true;
-      root.add(frontWall);
-      return;
-    }
-
-    const extraLen = seg.id === 'ext-n' ? seg.thickness : 0;
-    addWallSegment(cx, cz, len + extraLen, seg.thickness, angle, seg.isExterior);
-  });
-
-  // 4. Doors & Windows
   const frameMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.35, metalness: 0.7 });
   const doorWoodMat = new THREE.MeshStandardMaterial({ color: 0x7c4a2d, roughness: 0.55, metalness: 0.08 });
+  const handleGoldMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, metalness: 0.85, roughness: 0.2 });
   const glassMat = new THREE.MeshPhysicalMaterial({
     color: 0x93c5fd,
     roughness: 0.08,
@@ -489,57 +436,223 @@ export function buildArchitecturalScene(
     depthWrite: false,
   });
 
-  project.openings.forEach((op) => {
-    const g = new THREE.Group();
-    if (op.kind === 'window') {
-      const winH = 1.25;
-      const frame = new THREE.Mesh(new THREE.BoxGeometry(op.width, winH, wallThickM + 0.06), frameMat);
-      const pane = new THREE.Mesh(new THREE.BoxGeometry(op.width - 0.12, winH - 0.12, 0.03), glassMat);
-      g.add(frame, pane);
-      g.position.set(toWorldX(op.x), Math.min(1.45, wallH * 0.62), toWorldZ(op.y));
-    } else {
-      const doorH = Math.min(2.1, wallH - 0.08);
-      const leaf = new THREE.Mesh(new THREE.BoxGeometry(op.width, doorH, wallThickM + 0.04), doorWoodMat);
-      const handle = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 8), new THREE.MeshStandardMaterial({ color: 0xfbbf24, metalness: 0.85, roughness: 0.2 }));
-      handle.position.set(op.width * 0.35, -0.08, (wallThickM + 0.08) / 2);
-      g.add(leaf, handle);
-      g.position.set(toWorldX(op.x), doorH / 2, toWorldZ(op.y));
+  visibleFloors.forEach((floorNum) => {
+    const floorGroup = new THREE.Group();
+    const baseY = (floorNum - 1) * storyStep;
+    floorGroup.position.y = baseY;
+    root.add(floorGroup);
+
+    const floorSlice = sliceProjectForFloor(project, floorNum);
+    const hasFloorAbove = visibleFloors.includes(floorNum + 1);
+    const isActiveFloor = floorNum === clampedActiveFloor;
+
+    // Wall height: full ceilingM if supporting a floor directly above; otherwise cutaway height in Orbit mode
+    const wallH = hasFloorAbove
+      ? ceilingM
+      : cutawayWalls
+        ? Math.min(2.55, ceilingM * 0.85)
+        : ceilingM;
+    const frontWallH = cutawayWalls ? 0.85 : wallH;
+
+    // 1. Structural Concrete Slab (ground plinth or elevated inter-floor slab)
+    const slabH = floorNum === 1 ? 0.24 : STORY_SLAB_THICKNESS;
+    const slab = new THREE.Mesh(
+      new THREE.BoxGeometry(lengthM + 0.5, slabH, widthM + 0.5),
+      floorNum === 1 ? slabMat : upperSlabMat
+    );
+    slab.position.set(0, -slabH / 2, 0);
+    slab.castShadow = floorNum > 1;
+    slab.receiveShadow = true;
+    floorGroup.add(slab);
+
+    // Architectural perimeter fascia trim (brighter Electric Blue on active floor when multi-story)
+    const trimColor = totalFloors > 1 && isActiveFloor ? 0x00a8ff : floorNum > 1 ? 0x38bdf8 : 0x00a8ff;
+    const trimOpacity = totalFloors > 1 && isActiveFloor ? 0.92 : 0.52;
+    const trimGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(lengthM + 0.52, slabH, widthM + 0.52));
+    const trimLines = new THREE.LineSegments(
+      trimGeo,
+      new THREE.LineBasicMaterial({ color: trimColor, transparent: true, opacity: trimOpacity })
+    );
+    trimLines.position.set(0, -slabH / 2, 0);
+    floorGroup.add(trimLines);
+
+    // Structural perimeter columns connecting stacked floors cleanly (also visible at front corners in cutaway)
+    if (totalFloors > 1 && (hasFloorAbove || floorNum > 1)) {
+      const colH = hasFloorAbove ? ceilingM : wallH;
+      const colSize = Math.max(0.24, wallThickM + 0.08);
+      const colCoords: [number, number][] = [
+        [-halfL, -halfW],
+        [halfL, -halfW],
+        [-halfL, halfW],
+        [halfL, halfW],
+      ];
+      if (lengthM >= 9) {
+        colCoords.push([0, -halfW], [0, halfW]);
+      }
+      if (widthM >= 8) {
+        colCoords.push([-halfL, 0], [halfL, 0]);
+      }
+      colCoords.forEach(([cx, cz]) => {
+        const col = new THREE.Mesh(new THREE.BoxGeometry(colSize, colH, colSize), columnMat);
+        col.position.set(cx, colH / 2, cz);
+        col.castShadow = true;
+        col.receiveShadow = true;
+        floorGroup.add(col);
+      });
     }
-    g.rotation.y = -(op.rotation * Math.PI) / 180;
-    root.add(g);
+
+    // 2. Room Floor Finishes (offset slightly above slab to prevent Z-fighting)
+    if (floorSlice.rooms.length > 0) {
+      floorSlice.rooms.forEach((room) => {
+        const mat = floorMaterials[room.floorFinish] ?? floorMaterials.wood;
+        const floorMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(Math.max(0.1, room.width - 0.04), 0.03, Math.max(0.1, room.height - 0.04)),
+          mat
+        );
+        floorMesh.position.set(
+          toWorldX(room.x + room.width / 2),
+          0.015,
+          toWorldZ(room.y + room.height / 2)
+        );
+        floorMesh.receiveShadow = true;
+        floorGroup.add(floorMesh);
+      });
+    } else if (floorNum > 1) {
+      // Unfurnished elevated floor slab deck surface so empty upper floors read clearly as buildable levels
+      const deckMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(Math.max(0.5, lengthM - wallThickM), 0.02, Math.max(0.5, widthM - wallThickM)),
+        emptyDeckMat
+      );
+      deckMesh.position.set(0, 0.01, 0);
+      deckMesh.receiveShadow = true;
+      floorGroup.add(deckMesh);
+    }
+
+    // 3. Structural Exterior Walls & Interior Partition Walls for this floor
+    const addWallSegment = (
+      cx: number,
+      cz: number,
+      len: number,
+      thick: number,
+      rotY: number,
+      isExterior: boolean
+    ) => {
+      const h = isExterior ? wallH : hasFloorAbove ? wallH * 0.96 : wallH * 0.92;
+      const wall = new THREE.Mesh(
+        new THREE.BoxGeometry(len, h, thick),
+        [
+          extWallMat,
+          extWallMat,
+          wallTopCapMat,
+          extWallMat,
+          isExterior ? extWallMat : intWallMat,
+          isExterior ? extWallMat : intWallMat,
+        ]
+      );
+      wall.position.set(cx, h / 2, cz);
+      wall.rotation.y = rotY;
+      wall.castShadow = true;
+      wall.receiveShadow = true;
+      floorGroup.add(wall);
+    };
+
+    const mergedWalls = extractMergedWalls(floorSlice);
+
+    mergedWalls.forEach((seg) => {
+      const dx = seg.x2 - seg.x1;
+      const dy = seg.y2 - seg.y1;
+      const len = Math.hypot(dx, dy);
+      if (len < 0.08) return;
+
+      const cx = toWorldX((seg.x1 + seg.x2) / 2);
+      const cz = toWorldZ((seg.y1 + seg.y2) / 2);
+      const angle = -Math.atan2(dy, dx);
+
+      // South perimeter cutaway lip in Orbit mode so user can inspect rooms on every elevated floor clearly
+      if (seg.id === 'ext-s') {
+        const frontWall = new THREE.Mesh(
+          new THREE.BoxGeometry(len + seg.thickness, frontWallH, seg.thickness),
+          [extWallMat, extWallMat, wallTopCapMat, extWallMat, extWallMat, extWallMat]
+        );
+        frontWall.position.set(cx, frontWallH / 2, cz);
+        frontWall.castShadow = true;
+        frontWall.receiveShadow = true;
+        floorGroup.add(frontWall);
+        return;
+      }
+
+      const extraLen = seg.id === 'ext-n' ? seg.thickness : 0;
+      addWallSegment(cx, cz, len + extraLen, seg.thickness, angle, seg.isExterior);
+    });
+
+    // 4. Doors & Windows on this floor
+    floorSlice.openings.forEach((op) => {
+      const g = new THREE.Group();
+      if (op.kind === 'window') {
+        const winH = 1.25;
+        const frame = new THREE.Mesh(new THREE.BoxGeometry(op.width, winH, wallThickM + 0.06), frameMat);
+        const pane = new THREE.Mesh(new THREE.BoxGeometry(op.width - 0.12, winH - 0.12, 0.03), glassMat);
+        g.add(frame, pane);
+        g.position.set(toWorldX(op.x), Math.min(1.45, wallH * 0.62), toWorldZ(op.y));
+      } else {
+        const doorH = Math.min(2.1, wallH - 0.08);
+        const leaf = new THREE.Mesh(new THREE.BoxGeometry(op.width, doorH, wallThickM + 0.04), doorWoodMat);
+        const handle = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 8), handleGoldMat);
+        handle.position.set(op.width * 0.35, -0.08, (wallThickM + 0.08) / 2);
+        g.add(leaf, handle);
+        g.position.set(toWorldX(op.x), doorH / 2, toWorldZ(op.y));
+      }
+      g.rotation.y = -(op.rotation * Math.PI) / 180;
+      floorGroup.add(g);
+    });
+
+    // 5. Composite 3D Furniture on this floor
+    floorSlice.furniture.forEach((f) => {
+      const fg = buildFurnitureGroup(f);
+      fg.position.set(toWorldX(f.x), 0.03, toWorldZ(f.y));
+      fg.rotation.y = -(f.rotation * Math.PI) / 180;
+      fg.traverse((child) => {
+        child.userData.furnitureId = f.id;
+      });
+      floorGroup.add(fg);
+      clickables.push(fg);
+    });
+
+    // 6. Composite 3D Electrical Fixtures on this floor
+    floorSlice.points.forEach((pt) => {
+      const isSelected = pt.id === selectedPointId;
+      const fx = buildElectricalFixture(pt, isSelected, lightingMode, isSoftwareGl, fanRotors);
+      const visualY =
+        cutawayWalls && !hasFloorAbove
+          ? Math.min(pt.z, wallH - 0.06)
+          : Math.min(pt.z, ceilingM - 0.05);
+      const wx = toWorldX(pt.x);
+      const wz = toWorldZ(pt.y);
+      const localY = Math.max(0.35, visualY);
+      fx.position.set(wx, localY, wz);
+      fx.rotation.y = -(pt.rotation * Math.PI) / 180;
+      floorGroup.add(fx);
+      clickables.push(fx);
+      // Store anchor in world space (including baseY floor elevation) for projected 3D pins
+      pointAnchors.set(pt.id, new THREE.Vector3(wx, baseY + Math.max(0.45, localY + 0.22), wz));
+    });
   });
 
-  // 5. Composite 3D Furniture
-  project.furniture.forEach((f) => {
-    const fg = buildFurnitureGroup(f);
-    fg.position.set(toWorldX(f.x), 0.03, toWorldZ(f.y));
-    fg.rotation.y = -(f.rotation * Math.PI) / 180;
-    root.add(fg);
-  });
-
-  // 6. Composite 3D Electrical Fixtures + Circuit Conduit Lines
-  project.points.forEach((pt) => {
-    const isSelected = pt.id === selectedPointId;
-    const fx = buildElectricalFixture(pt, isSelected, lightingMode, isSoftwareGl, fanRotors);
-    // Clamp fixture height visually into cutaway ceiling plane when in Orbit mode
-    const visualY = cutawayWalls ? Math.min(pt.z, wallH - 0.06) : Math.min(pt.z, ceilingM - 0.05);
-    const wx = toWorldX(pt.x);
-    const wz = toWorldZ(pt.y);
-    fx.position.set(wx, Math.max(0.35, visualY), wz);
-    fx.rotation.y = -(pt.rotation * Math.PI) / 180;
-    root.add(fx);
-    clickables.push(fx);
-    pointAnchors.set(pt.id, new THREE.Vector3(wx, Math.max(0.45, visualY + 0.22), wz));
-  });
-
-  // Clean disposal helper
+  // Clean disposal helper (avoid double-disposing shared materials)
   const dispose = () => {
+    const disposedMats = new Set<THREE.Material>();
     root.traverse((obj) => {
       if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) {
         obj.geometry?.dispose();
         if (Array.isArray(obj.material)) {
-          obj.material.forEach((m) => m.dispose());
-        } else if (obj.material) {
+          obj.material.forEach((m) => {
+            if (!disposedMats.has(m)) {
+              disposedMats.add(m);
+              m.dispose();
+            }
+          });
+        } else if (obj.material && !disposedMats.has(obj.material)) {
+          disposedMats.add(obj.material);
           obj.material.dispose();
         }
       }

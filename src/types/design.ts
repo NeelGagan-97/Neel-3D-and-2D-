@@ -4,6 +4,7 @@ export type ProjectType = 'Residential' | 'Commercial' | 'Custom';
 export type ViewMode = '2d' | '3d';
 export type CameraMode = 'orbit' | 'fps';
 export type LightingMode = 'daylight' | 'evening';
+export type FloorView3DMode = 'all' | 'up-to-active' | 'active-only';
 
 export type CanvasTool =
   | 'select'
@@ -79,6 +80,8 @@ export interface RoomZone {
   id: string;
   name: string;
   type: RoomType;
+  /** 1-based floor level (defaults to 1 = 1st Floor / Ground Floor) */
+  floor?: number;
   /** Position & dimensions in meters from top-left (0, 0) */
   x: number;
   y: number;
@@ -91,6 +94,7 @@ export interface RoomZone {
 
 export interface CustomWall {
   id: string;
+  floor?: number;
   x1: number;
   y1: number;
   x2: number;
@@ -101,6 +105,7 @@ export interface CustomWall {
 
 export interface ArchitecturalOpening {
   id: string;
+  floor?: number;
   kind: 'door' | 'window';
   x: number;
   y: number;
@@ -110,6 +115,7 @@ export interface ArchitecturalOpening {
 
 export interface DimensionAnnotation {
   id: string;
+  floor?: number;
   x1: number;
   y1: number;
   x2: number;
@@ -118,6 +124,7 @@ export interface DimensionAnnotation {
 
 export interface FurnitureItem {
   id: string;
+  floor?: number;
   kind: 'sofa' | 'bed' | 'dining-table' | 'kitchen-counter' | 'vanity' | 'tv-unit' | 'desk';
   roomId: string;
   x: number;
@@ -129,6 +136,7 @@ export interface FurnitureItem {
 
 export interface ElectricalPoint {
   id: string;
+  floor?: number;
   code: string;
   name: string;
   itemType: ElectricalItemType;
@@ -142,6 +150,33 @@ export interface ElectricalPoint {
   voltage: number;
   circuit: CircuitId;
   unitCost: number;
+}
+
+export interface RoomRowOverride {
+  roomName?: string;
+  fansDelta?: number;
+  lightsDelta?: number;
+  switchesDelta?: number;
+  socketsDelta?: number;
+  appliancesDelta?: number;
+  loadWattsDelta?: number;
+}
+
+export interface BoqRowOverride {
+  productName?: string;
+  category?: string;
+  quantityDelta?: number;
+  wattageDelta?: number;
+  costDelta?: number;
+}
+
+export interface ProjectSummaryOverrides {
+  roomEdits?: Record<string, RoomRowOverride>;
+  deletedRoomIds?: string[];
+  addedRooms?: RoomBreakdownRow[];
+  boqEdits?: Record<string, BoqRowOverride>;
+  deletedBoqKeys?: string[];
+  addedBoqRows?: BoqRow[];
 }
 
 export interface ProjectData {
@@ -160,6 +195,11 @@ export interface ProjectData {
   dimensions?: DimensionAnnotation[];
   furniture: FurnitureItem[];
   points: ElectricalPoint[];
+  /** Live-reconciled user edits, deletions, and manual rows for Project Summary tables */
+  summaryOverrides?: ProjectSummaryOverrides;
+  /** Legacy fields kept optional for backward compatibility */
+  customRoomBreakdown?: RoomBreakdownRow[];
+  customBoqRows?: BoqRow[];
   updatedAt: string;
 }
 
@@ -196,7 +236,8 @@ export interface RoomBreakdownRow {
 }
 
 export interface BoqRow {
-  itemType: ElectricalItemType;
+  id?: string;
+  itemType: ElectricalItemType | 'custom';
   productName: string;
   category: string;
   quantity: number;
