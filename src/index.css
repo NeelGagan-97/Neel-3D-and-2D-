@@ -1,0 +1,190 @@
+@import "tailwindcss";
+
+@theme {
+  /* Colors */
+  --color-deep-navy: #080F20;
+  --color-dark-slate: #111C31;
+  --color-electric-blue: #00A8FF;
+  --color-amber-orange: #FF9D00;
+  --color-metallic-silver: #C5CDD8;
+  --color-studio-white: #F5F7FA;
+
+  --color-primary: #00A8FF;
+  --color-on-primary: #080F20;
+  --color-primary-container: #0B2948;
+  --color-on-primary-container: #E0F4FF;
+
+  --color-secondary: #FF9D00;
+  --color-on-secondary: #080F20;
+  --color-secondary-container: #332208;
+  --color-on-secondary-container: #FFE2B3;
+
+  --color-surface: #080F20;
+  --color-surface-container-low: #0D1528;
+  --color-surface-container: #111C31;
+  --color-surface-container-high: #182742;
+  --color-surface-container-highest: #203254;
+
+  --color-on-surface: #F5F7FA;
+  --color-on-surface-variant: #C5CDD8;
+  --color-outline: #2C3E5E;
+  --color-outline-variant: #1D2B44;
+
+  --color-success: #22C55E;
+  --color-on-success: #052E16;
+  --color-warning: #FF9D00;
+  --color-on-warning: #080F20;
+  --color-error: #EF4444;
+  --color-on-error: #1C1C1C;
+
+  /* Border Radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* Spacing */
+  --spacing-gutter-xs: 4px;
+  --spacing-gutter-sm: 8px;
+  --spacing-gutter-md: 12px;
+  --spacing-gutter-lg: 16px;
+  --spacing-gutter-xl: 24px;
+  --spacing-gutter-2xl: 32px;
+  --spacing-section: 48px;
+  --spacing-page-margin: 24px;
+
+  /* Font Families */
+  --font-display: "Red Hat Text", sans-serif;
+  --font-headline: "Red Hat Text", sans-serif;
+  --font-title: "Instrument Sans", sans-serif;
+  --font-body: "Instrument Sans", sans-serif;
+  --font-label: "Instrument Sans", sans-serif;
+  --font-mono: "Red Hat Mono", monospace;
+
+  /* Typography Scale */
+  --text-display-lg: 48px;
+  --text-display-lg--line-height: 54px;
+  --text-display-lg--letter-spacing: -0.5px;
+  --text-display-lg--font-weight: 700;
+
+  --text-display-lg-mobile: 32px;
+  --text-display-lg-mobile--line-height: 38px;
+  --text-display-lg-mobile--letter-spacing: -0.25px;
+  --text-display-lg-mobile--font-weight: 700;
+
+  --text-headline-lg: 36px;
+  --text-headline-lg--line-height: 44px;
+  --text-headline-lg--letter-spacing: -0.25px;
+  --text-headline-lg--font-weight: 700;
+
+  --text-headline-lg-mobile: 26px;
+  --text-headline-lg-mobile--line-height: 32px;
+  --text-headline-lg-mobile--letter-spacing: -0.25px;
+  --text-headline-lg-mobile--font-weight: 700;
+
+  --text-headline-md: 24px;
+  --text-headline-md--line-height: 30px;
+  --text-headline-md--font-weight: 600;
+
+  --text-headline-sm: 18px;
+  --text-headline-sm--line-height: 24px;
+  --text-headline-sm--font-weight: 600;
+
+  --text-title-md: 16px;
+  --text-title-md--line-height: 22px;
+  --text-title-md--font-weight: 600;
+
+  --text-title-sm: 14px;
+  --text-title-sm--line-height: 20px;
+  --text-title-sm--font-weight: 600;
+
+  --text-body-lg: 16px;
+  --text-body-lg--line-height: 24px;
+  --text-body-lg--font-weight: 400;
+
+  --text-body-md: 14px;
+  --text-body-md--line-height: 20px;
+  --text-body-md--font-weight: 400;
+
+  --text-body-sm: 12px;
+  --text-body-sm--line-height: 16px;
+  --text-body-sm--font-weight: 400;
+
+  --text-label-lg: 14px;
+  --text-label-lg--line-height: 20px;
+  --text-label-lg--letter-spacing: 0.25px;
+  --text-label-lg--font-weight: 600;
+
+  --text-label-md: 12px;
+  --text-label-md--line-height: 16px;
+  --text-label-md--letter-spacing: 0.25px;
+  --text-label-md--font-weight: 600;
+
+  --text-label-sm: 11px;
+  --text-label-sm--line-height: 14px;
+  --text-label-sm--letter-spacing: 0.5px;
+  --text-label-sm--font-weight: 600;
+
+  --text-mono-md: 13px;
+  --text-mono-md--line-height: 18px;
+  --text-mono-md--font-weight: 500;
+
+  --text-mono-sm: 11px;
+  --text-mono-sm--line-height: 16px;
+  --text-mono-sm--font-weight: 500;
+
+  /* Motion */
+  --transition-duration-state-change: 100ms;
+  --transition-duration-panel-toggle: 150ms;
+  --transition-duration-viewport-transition: 250ms;
+}
+
+.material-symbols-outlined {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  line-height: 1 !important;
+  box-sizing: content-box;
+  overflow: hidden;
+  white-space: nowrap;
+  direction: ltr;
+  vertical-align: middle;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+.cad-grid {
+  background-image:
+    linear-gradient(to right, rgba(44, 62, 94, 0.28) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(44, 62, 94, 0.28) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* Custom sleek scrollbars for dark CAD sidebars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0D1528;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2C3E5E;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #00A8FF;
+}
+
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #080f20 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

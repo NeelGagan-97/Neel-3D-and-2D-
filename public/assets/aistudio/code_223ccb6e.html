@@ -1,0 +1,668 @@
+<!DOCTYPE html><html lang="en"><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Studio — Ananya Space Designer</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <script id="tailwind-config">/** @type {import('tailwindcss').Config} */
+globalThis.tailwind = globalThis.tailwind || {};
+globalThis.tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        'deep-navy': '#080F20',
+        'dark-slate': '#111C31',
+        'electric-blue': '#00A8FF',
+        'amber-orange': '#FF9D00',
+        'metallic-silver': '#C5CDD8',
+        'studio-white': '#F5F7FA',
+        'primary': '#00A8FF',
+        'on-primary': '#080F20',
+        'primary-container': '#0B2948',
+        'on-primary-container': '#E0F4FF',
+        'secondary': '#FF9D00',
+        'on-secondary': '#080F20',
+        'secondary-container': '#332208',
+        'on-secondary-container': '#FFE2B3',
+        'surface': '#080F20',
+        'surface-container-low': '#0D1528',
+        'surface-container': '#111C31',
+        'surface-container-high': '#182742',
+        'surface-container-highest': '#203254',
+        'on-surface': '#F5F7FA',
+        'on-surface-variant': '#C5CDD8',
+        'outline': '#2C3E5E',
+        'outline-variant': '#1D2B44',
+        'success': '#22C55E',
+        'on-success': '#052E16',
+        'warning': '#FF9D00',
+        'on-warning': '#080F20',
+        'error': '#EF4444',
+        'on-error': '#1C1C1C',
+      },
+      borderRadius: {
+        'sm': '4px',
+        'DEFAULT': '8px',
+        'md': '8px',
+        'lg': '12px',
+        'xl': '16px',
+        'full': '9999px',
+      },
+      spacing: {
+        'gutter-xs': '4px',
+        'gutter-sm': '8px',
+        'gutter-md': '12px',
+        'gutter-lg': '16px',
+        'gutter-xl': '24px',
+        'gutter-2xl': '32px',
+        'section': '48px',
+        'page-margin': '24px',
+      },
+      fontFamily: {
+        'display': ['"Red Hat Text"', 'sans-serif'],
+        'headline': ['"Red Hat Text"', 'sans-serif'],
+        'title': ['"Instrument Sans"', 'sans-serif'],
+        'body': ['"Instrument Sans"', 'sans-serif'],
+        'label': ['"Instrument Sans"', 'sans-serif'],
+        'mono': ['"Red Hat Mono"', 'monospace'],
+      },
+      fontSize: {
+        'display-lg': ['48px', { lineHeight: '54px', letterSpacing: '-0.5px', fontWeight: '700' }],
+        'display-lg-mobile': ['32px', { lineHeight: '38px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-lg': ['36px', { lineHeight: '44px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-lg-mobile': ['26px', { lineHeight: '32px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-md': ['24px', { lineHeight: '30px', letterSpacing: '0px', fontWeight: '600' }],
+        'headline-sm': ['18px', { lineHeight: '24px', letterSpacing: '0px', fontWeight: '600' }],
+        'title-md': ['16px', { lineHeight: '22px', letterSpacing: '0px', fontWeight: '600' }],
+        'title-sm': ['14px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '600' }],
+        'body-lg': ['16px', { lineHeight: '24px', letterSpacing: '0px', fontWeight: '400' }],
+        'body-md': ['14px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '400' }],
+        'body-sm': ['12px', { lineHeight: '16px', letterSpacing: '0px', fontWeight: '400' }],
+        'label-lg': ['14px', { lineHeight: '20px', letterSpacing: '0.25px', fontWeight: '600' }],
+        'label-md': ['12px', { lineHeight: '16px', letterSpacing: '0.25px', fontWeight: '600' }],
+        'label-sm': ['11px', { lineHeight: '14px', letterSpacing: '0.5px', fontWeight: '600' }],
+        'mono-md': ['13px', { lineHeight: '18px', letterSpacing: '0px', fontWeight: '500' }],
+        'mono-sm': ['11px', { lineHeight: '16px', letterSpacing: '0px', fontWeight: '500' }],
+      },
+      transitionDuration: {
+        'state-change': '100ms',
+        'panel-toggle': '150ms',
+        'viewport-transition': '250ms',
+      },
+      transitionDelay: {
+        'state-change': '0ms',
+        'panel-toggle': '0ms',
+        'viewport-transition': '0ms',
+      },
+      transitionTimingFunction: {
+        'state-change': 'ease-out',
+        'panel-toggle': 'cubic-bezier(0.2, 0, 0, 1)',
+        'viewport-transition': 'cubic-bezier(0.2, 0, 0, 1)',
+      },
+    },
+  },
+};
+if (typeof module !== 'undefined') module.exports = globalThis.tailwind.config;
+</script>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=Red+Hat+Mono:wght@400;500;600&amp;family=Red+Hat+Text:wght@500;600;700&amp;display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=block" rel="stylesheet">
+  <style>
+    .material-symbols-outlined, .material-symbols-rounded, .material-symbols-sharp, .material-icons { display: inline-block; width: 1em; height: 1em; line-height: 1 !important; box-sizing: content-box; overflow: hidden; white-space: nowrap; direction: ltr; vertical-align: middle; }
+    .cad-grid {
+      background-image: linear-gradient(to right, rgba(44, 62, 94, 0.28) 1px, transparent 1px),
+                        linear-gradient(to bottom, rgba(44, 62, 94, 0.28) 1px, transparent 1px);
+      background-size: 28px 28px;
+    }
+  </style>
+</head>
+<body class="bg-surface text-on-surface font-body antialiased selection:bg-primary selection:text-on-primary">
+  <div class="min-h-[1024px] flex flex-col" data-stitch-vh="min-h-[1024px]===min-h-screen">
+
+    <!-- Shared Top Navigation -->
+    <header class="bg-surface-container border-b border-outline-variant">
+      <div class="px-gutter-lg py-gutter-sm min-h-14 flex flex-wrap items-center justify-between gap-gutter-sm">
+        <a href="../home/Home.html" class="flex items-center gap-gutter-sm min-w-0">
+          <div class="w-8 h-8 rounded-md bg-primary-container border border-primary flex items-center justify-center shrink-0">
+            <span class="material-symbols-outlined text-primary text-[18px]" aria-hidden="true">deployed_code</span>
+          </div>
+          <div class="flex items-baseline gap-gutter-md min-w-0">
+            <span class="font-headline text-title-sm text-on-surface tracking-wide uppercase" data-design-text-token="title-sm">ANANYA SPACE DESIGNER</span>
+            <span class="font-mono text-mono-sm text-on-surface-variant uppercase hidden xl:inline" data-design-text-token="mono-sm">DESIGN YOUR SPACE. POWER YOUR WORLD.</span>
+          </div>
+        </a>
+
+        <nav aria-label="Primary Navigation" class="flex items-center gap-gutter-xs min-w-0">
+          <a href="../home/Home.html" class="px-gutter-sm sm:px-gutter-md py-gutter-xs rounded-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">Home</a>
+          <a href="../design-studio/DesignStudio.html" aria-current="page" class="px-gutter-sm sm:px-gutter-md py-gutter-xs rounded-sm bg-primary-container text-primary border border-primary font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">Design Studio</a>
+          <a href="../project-summary/ProjectSummary.html" class="px-gutter-sm sm:px-gutter-md py-gutter-xs rounded-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">Project Summary</a>
+        </nav>
+
+        <div class="hidden lg:flex items-center gap-gutter-sm">
+          <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">AUTOSAVE: ON</span>
+        </div>
+      </div>
+
+      <!-- Studio Top Toolbar -->
+      <div class="px-gutter-lg py-gutter-sm bg-surface-container-low border-t border-outline-variant flex flex-wrap items-center justify-between gap-gutter-md">
+        <div class="flex items-center gap-gutter-md min-w-0">
+          <div class="flex items-center gap-gutter-sm min-w-0">
+            <span class="material-symbols-outlined text-primary text-[18px] shrink-0" aria-hidden="true">folder_open</span>
+            <span class="font-title text-title-sm text-on-surface truncate" data-design-text-token="title-sm">Indiranagar 3BHK Residence</span>
+          </div>
+          <span class="px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant font-mono text-mono-sm text-on-surface-variant tabular-nums shrink-0" data-design-text-token="mono-sm">42&#39; × 34&#39; × 10&#39;</span>
+        </div>
+
+        <!-- CAD Actions & View Controls -->
+        <div class="flex flex-wrap items-center gap-gutter-sm">
+          <button id="btn-save" type="button" class="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-xs rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-md transition-colors duration-state-change">
+            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">save</span>
+            <span data-design-text-token="label-md">Save</span>
+          </button>
+
+          <div class="inline-flex items-center rounded-sm border border-outline-variant bg-surface-container">
+            <button id="btn-undo" type="button" aria-label="Undo" class="px-gutter-sm py-gutter-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high border-r border-outline-variant">
+              <span class="material-symbols-outlined text-[16px]" aria-hidden="true">undo</span>
+            </button>
+            <button id="btn-redo" type="button" aria-label="Redo" class="px-gutter-sm py-gutter-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high">
+              <span class="material-symbols-outlined text-[16px]" aria-hidden="true">redo</span>
+            </button>
+          </div>
+
+          <div class="inline-flex items-center rounded-sm border border-outline bg-surface-container p-0.5">
+            <button id="btn-2d" type="button" class="px-gutter-md py-gutter-xs rounded-sm font-label text-label-md text-on-surface-variant hover:text-on-surface transition-colors duration-state-change" data-design-text-token="label-md">2D View</button>
+            <button id="btn-3d" type="button" class="px-gutter-md py-gutter-xs rounded-sm font-label text-label-md bg-primary text-on-primary transition-colors duration-state-change" data-design-text-token="label-md">3D View</button>
+          </div>
+
+          <div class="inline-flex items-center rounded-sm border border-outline-variant bg-surface-container p-0.5">
+            <button id="btn-orbit" type="button" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm font-label text-label-sm bg-surface-container-high text-primary" data-design-text-token="label-sm">
+              <span class="material-symbols-outlined text-[15px]" aria-hidden="true">3d_rotation</span>
+              <span>Orbit</span>
+            </button>
+            <button id="btn-fps" type="button" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm font-label text-label-sm text-on-surface-variant hover:text-on-surface" data-design-text-token="label-sm">
+              <span class="material-symbols-outlined text-[15px]" aria-hidden="true">directions_walk</span>
+              <span>First Person</span>
+            </button>
+          </div>
+
+          <div class="inline-flex items-center rounded-sm border border-outline-variant bg-surface-container">
+            <button id="btn-zoom-out" type="button" aria-label="Zoom out" class="px-gutter-sm py-gutter-xs text-on-surface-variant hover:text-on-surface">
+              <span class="material-symbols-outlined text-[16px]" aria-hidden="true">zoom_out</span>
+            </button>
+            <span id="zoom-label" class="px-gutter-sm font-mono text-mono-sm text-on-surface tabular-nums" data-design-text-token="mono-sm">100%</span>
+            <button id="btn-zoom-in" type="button" aria-label="Zoom in" class="px-gutter-sm py-gutter-xs text-on-surface-variant hover:text-on-surface">
+              <span class="material-symbols-outlined text-[16px]" aria-hidden="true">zoom_in</span>
+            </button>
+          </div>
+
+          <div class="inline-flex items-center rounded-sm border border-outline-variant bg-surface-container p-0.5">
+            <button id="btn-daylight" type="button" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm font-label text-label-sm bg-surface-container-high text-secondary" data-design-text-token="label-sm">
+              <span class="material-symbols-outlined text-[15px]" aria-hidden="true">light_mode</span>
+              <span>Daylight</span>
+            </button>
+            <button id="btn-evening" type="button" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm font-label text-label-sm text-on-surface-variant hover:text-on-surface" data-design-text-token="label-sm">
+              <span class="material-symbols-outlined text-[15px]" aria-hidden="true">dark_mode</span>
+              <span>Evening</span>
+            </button>
+          </div>
+
+          <a href="../project-summary/ProjectSummary.html" data-component-id="button-summary-link" data-component-type="button" data-component-variant="secondary" class="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-xs rounded-sm bg-secondary text-on-secondary font-label text-label-md transition-colors duration-state-change hover:bg-on-secondary-container">
+            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">summarize</span>
+            <span data-design-text-token="label-md">Project Summary</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main 3-Column Studio Workspace -->
+    <div class="flex-1 grid grid-cols-1 lg:grid-cols-12">
+
+      <!-- LEFT SIDEBAR: Collapsible CAD Libraries -->
+      <aside class="lg:col-span-3 bg-surface-container border-b lg:border-b-0 lg:border-r border-outline-variant p-gutter-md flex flex-col gap-gutter-md">
+        <div data-component-id="accordion-group" data-component-type="accordion" data-component-variant="group" class="flex flex-col gap-gutter-sm">
+
+          <!-- A. SITE CONFIGURATION -->
+          <details open class="group bg-surface-container-low border border-outline-variant rounded-md">
+            <summary class="flex items-center justify-between px-gutter-md py-gutter-sm cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md">
+              <span class="font-label text-label-sm text-primary uppercase tracking-wider" data-design-text-token="label-sm">A. Site Configuration</span>
+              <span class="material-symbols-outlined text-on-surface-variant text-[18px] transition-transform duration-panel-toggle group-open:rotate-180" aria-hidden="true">expand_more</span>
+            </summary>
+            <div class="px-gutter-md pb-gutter-md pt-gutter-xs grid grid-cols-2 gap-gutter-sm">
+              <label class="flex flex-col gap-gutter-xs">
+                <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Length</span>
+                <input type="text" value="42.0" class="w-full bg-surface border border-outline rounded-sm px-gutter-sm py-1 font-mono text-mono-sm text-on-surface focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+              </label>
+              <label class="flex flex-col gap-gutter-xs">
+                <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Width</span>
+                <input type="text" value="34.0" class="w-full bg-surface border border-outline rounded-sm px-gutter-sm py-1 font-mono text-mono-sm text-on-surface focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+              </label>
+              <label class="flex flex-col gap-gutter-xs">
+                <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Ceiling Height</span>
+                <input type="text" value="10.0" class="w-full bg-surface border border-outline rounded-sm px-gutter-sm py-1 font-mono text-mono-sm text-on-surface focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+              </label>
+              <label class="flex flex-col gap-gutter-xs">
+                <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Wall Thickness</span>
+                <input type="text" value="0.75" class="w-full bg-surface border border-outline rounded-sm px-gutter-sm py-1 font-mono text-mono-sm text-on-surface focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+              </label>
+              <label class="flex flex-col gap-gutter-xs">
+                <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Units</span>
+                <select class="w-full bg-surface border border-outline rounded-sm px-gutter-sm py-1 font-mono text-mono-sm text-on-surface focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+                  <option selected>Feet (ft)</option>
+                  <option>Meters (m)</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-gutter-xs">
+                <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Floors</span>
+                <input type="number" value="1" min="1" max="5" class="w-full bg-surface border border-outline rounded-sm px-gutter-sm py-1 font-mono text-mono-sm text-on-surface focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+              </label>
+            </div>
+          </details>
+
+          <!-- B. ROOM LIBRARY -->
+          <details open class="group bg-surface-container-low border border-outline-variant rounded-md">
+            <summary class="flex items-center justify-between px-gutter-md py-gutter-sm cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md">
+              <span class="font-label text-label-sm text-primary uppercase tracking-wider" data-design-text-token="label-sm">B. Room Library</span>
+              <span class="material-symbols-outlined text-on-surface-variant text-[18px] transition-transform duration-panel-toggle group-open:rotate-180" aria-hidden="true">expand_more</span>
+            </summary>
+            <div class="px-gutter-md pb-gutter-md pt-gutter-xs flex flex-wrap gap-gutter-xs">
+              <button type="button" data-place-item="Living Room" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-primary">
+                <span class="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">weekend</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Living Room</span>
+              </button>
+              <button type="button" data-place-item="Master Bedroom" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-primary">
+                <span class="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">bed</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Master Bedroom</span>
+              </button>
+              <button type="button" data-place-item="Second Bedroom" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-primary">
+                <span class="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">single_bed</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Second Bedroom</span>
+              </button>
+              <button type="button" data-place-item="Kitchen" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-primary">
+                <span class="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">countertops</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Kitchen</span>
+              </button>
+              <button type="button" data-place-item="Bathroom" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-primary">
+                <span class="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">shower</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Bathroom</span>
+              </button>
+              <button type="button" data-place-item="Dining" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-primary">
+                <span class="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">dining</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Dining</span>
+              </button>
+              <button type="button" data-place-item="Balcony" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-primary">
+                <span class="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">balcony</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Balcony</span>
+              </button>
+              <button type="button" data-place-item="Custom Room" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-primary">
+                <span class="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">add_box</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Custom Room</span>
+              </button>
+            </div>
+          </details>
+
+          <!-- C. ARCHITECTURAL COMPONENTS -->
+          <details class="group bg-surface-container-low border border-outline-variant rounded-md">
+            <summary class="flex items-center justify-between px-gutter-md py-gutter-sm cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md">
+              <span class="font-label text-label-sm text-primary uppercase tracking-wider" data-design-text-token="label-sm">C. Architectural Components</span>
+              <span class="material-symbols-outlined text-on-surface-variant text-[18px] transition-transform duration-panel-toggle group-open:rotate-180" aria-hidden="true">expand_more</span>
+            </summary>
+            <div class="px-gutter-md pb-gutter-md pt-gutter-xs grid grid-cols-2 gap-gutter-xs">
+              <button type="button" data-place-item="Walls" class="flex items-center gap-gutter-xs p-gutter-sm rounded-sm bg-surface-container border border-outline-variant hover:border-primary text-left">
+                <span class="material-symbols-outlined text-on-surface-variant text-[16px]" aria-hidden="true">border_all</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Walls</span>
+              </button>
+              <button type="button" data-place-item="Doors" class="flex items-center gap-gutter-xs p-gutter-sm rounded-sm bg-surface-container border border-outline-variant hover:border-primary text-left">
+                <span class="material-symbols-outlined text-on-surface-variant text-[16px]" aria-hidden="true">door_front</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Doors</span>
+              </button>
+              <button type="button" data-place-item="Windows" class="flex items-center gap-gutter-xs p-gutter-sm rounded-sm bg-surface-container border border-outline-variant hover:border-primary text-left">
+                <span class="material-symbols-outlined text-on-surface-variant text-[16px]" aria-hidden="true">window</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Windows</span>
+              </button>
+              <button type="button" data-place-item="Furniture" class="flex items-center gap-gutter-xs p-gutter-sm rounded-sm bg-surface-container border border-outline-variant hover:border-primary text-left">
+                <span class="material-symbols-outlined text-on-surface-variant text-[16px]" aria-hidden="true">chair</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Furniture</span>
+              </button>
+            </div>
+          </details>
+
+          <!-- D. ELECTRICAL LIBRARY -->
+          <details open class="group bg-surface-container-low border border-outline-variant rounded-md">
+            <summary class="flex items-center justify-between px-gutter-md py-gutter-sm cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md">
+              <span class="font-label text-label-sm text-secondary uppercase tracking-wider" data-design-text-token="label-sm">D. Electrical Library</span>
+              <span class="material-symbols-outlined text-on-surface-variant text-[18px] transition-transform duration-panel-toggle group-open:rotate-180" aria-hidden="true">expand_more</span>
+            </summary>
+            <div class="px-gutter-md pb-gutter-md pt-gutter-xs flex flex-wrap gap-gutter-xs">
+              <button type="button" data-electrical="Ceiling Fan" data-watt="75W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">mode_fan</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Ceiling Fans</span>
+              </button>
+              <button type="button" data-electrical="Exhaust Fan" data-watt="45W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">air</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Exhaust Fans</span>
+              </button>
+              <button type="button" data-electrical="LED Light" data-watt="15W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">lightbulb</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">LED Lights</span>
+              </button>
+              <button type="button" data-electrical="Spotlight" data-watt="9W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">highlight</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Spotlights</span>
+              </button>
+              <button type="button" data-electrical="Panel Light" data-watt="18W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">crop_square</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Panel Lights</span>
+              </button>
+              <button type="button" data-electrical="Strip Light" data-watt="24W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">linear_scale</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Strip Lights</span>
+              </button>
+              <button type="button" data-electrical="Chandelier" data-watt="60W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">light</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Chandeliers</span>
+              </button>
+              <button type="button" data-electrical="Switch" data-watt="0W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">toggle_on</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Switches</span>
+              </button>
+              <button type="button" data-electrical="Switchboard" data-watt="0W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">grid_view</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Switchboards</span>
+              </button>
+              <button type="button" data-electrical="5A Socket" data-watt="100W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">outlet</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">5A Sockets</span>
+              </button>
+              <button type="button" data-electrical="16A Socket" data-watt="1000W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">power</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">16A Sockets</span>
+              </button>
+              <button type="button" data-electrical="USB Outlet" data-watt="20W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">usb</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">USB Outlets</span>
+              </button>
+              <button type="button" data-electrical="Split AC 1.5T" data-watt="1500W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">ac_unit</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">AC</span>
+              </button>
+              <button type="button" data-electrical="Geyser 25L" data-watt="2000W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">water_heater</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Geysers</span>
+              </button>
+              <button type="button" data-electrical="Appliance" data-watt="800W" class="inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm bg-surface-container border border-outline-variant hover:border-secondary">
+                <span class="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">kitchen</span>
+                <span class="font-label text-label-sm text-on-surface" data-design-text-token="label-sm">Appliances</span>
+              </button>
+            </div>
+          </details>
+
+        </div>
+      </aside>
+
+      <!-- CENTRAL CANVAS: 3D / 2D Architectural & Electrical Viewport -->
+      <main class="lg:col-span-6 bg-surface cad-grid relative flex flex-col justify-between p-gutter-lg min-h-[540px]">
+        <div class="flex flex-wrap items-center justify-between gap-gutter-md z-10">
+          <div class="inline-flex items-center gap-gutter-sm px-gutter-md py-gutter-xs rounded-sm bg-surface-container border border-outline">
+            <span class="material-symbols-outlined text-primary text-[16px]" aria-hidden="true">view_in_ar</span>
+            <span id="viewport-mode-badge" class="font-mono text-mono-sm text-on-surface" data-design-text-token="mono-sm">3D PERSPECTIVE • ORBIT • DAYLIGHT</span>
+          </div>
+
+          <div class="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-xs rounded-sm bg-surface-container border border-outline-variant">
+            <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">Click any node to inspect or reposition</span>
+          </div>
+        </div>
+
+        <div id="canvas-stage" class="relative my-gutter-md flex-1 flex items-center justify-center rounded-lg border border-outline bg-surface-container-low overflow-hidden">
+          <img id="viewport-3d-img" src="https://lh3.googleusercontent.com/aida/ALJJyrBV8vHk6jO1-m6GzMXqj8sKIi2AR5oFBRI37XTwkyNT0GYmHm4Hug2f8u96RVDLBPc_tU5QQj7tLQz2hXwmkyXcy-eiFt4oJDEWbmGpsiBzocx8Mai1Ou9oiO8ca_IIcPCgniJE_e8H7MIFtBw4gB3b7YKNVyuP1sg8YFWSnmAU3M4U0n9cpnlF5nR8jTZJrDtY-VvTS4BuP8XsD7aMaC--rtPRQ2nkWOvcaVRn1D1NarAW3kJVyIFjTKvbxw" alt="Interactive 3D architectural residential model with electrical fixtures" class="w-full h-full object-cover transition-opacity duration-viewport-transition">
+
+          <div id="viewport-2d-svg" class="hidden w-full h-full p-gutter-xl flex items-center justify-center bg-surface">
+            <svg viewBox="0 0 640 420" class="w-full max-w-2xl h-auto border border-outline rounded-sm bg-surface-container-low">
+              <rect x="30" y="30" width="580" height="360" fill="none" stroke="#F5F7FA" stroke-width="6"></rect>
+              <rect x="30" y="30" width="260" height="210" fill="rgba(0,168,255,0.06)" stroke="#2C3E5E" stroke-width="2"></rect>
+              <text x="50" y="58" fill="#C5CDD8" font-family="Red Hat Mono" font-size="12">LIVING ROOM (18&#39; × 14&#39;)</text>
+              <rect x="290" y="30" width="180" height="190" fill="rgba(0,168,255,0.04)" stroke="#2C3E5E" stroke-width="2"></rect>
+              <text x="305" y="58" fill="#C5CDD8" font-family="Red Hat Mono" font-size="12">MASTER BED (14&#39; × 13&#39;)</text>
+              <rect x="470" y="30" width="140" height="190" fill="rgba(255,157,0,0.05)" stroke="#2C3E5E" stroke-width="2"></rect>
+              <text x="485" y="58" fill="#C5CDD8" font-family="Red Hat Mono" font-size="12">KITCHEN</text>
+              <rect x="30" y="240" width="260" height="150" fill="rgba(0,168,255,0.03)" stroke="#2C3E5E" stroke-width="2"></rect>
+              <text x="50" y="268" fill="#C5CDD8" font-family="Red Hat Mono" font-size="12">DINING &amp; BALCONY</text>
+              <rect x="290" y="220" width="320" height="170" fill="rgba(0,168,255,0.04)" stroke="#2C3E5E" stroke-width="2"></rect>
+              <text x="305" y="248" fill="#C5CDD8" font-family="Red Hat Mono" font-size="12">BEDROOM 2 &amp; BATH</text>
+              <path d="M 160 135 L 380 125 L 540 125" stroke="#FF9D00" stroke-width="1.5" stroke-dasharray="5,4" fill="none"></path>
+              <circle cx="160" cy="135" r="8" fill="#FF9D00"></circle>
+              <circle cx="380" cy="125" r="7" fill="#00A8FF"></circle>
+              <circle cx="540" cy="125" r="7" fill="#FF9D00"></circle>
+            </svg>
+          </div>
+
+          <button type="button" data-node-name="Ceiling Fan — Living" data-x="4.25" data-y="3.60" data-z="2.95" data-rot="0" data-mount="2.95 m" data-watt="75 W" data-volt="230 V" data-circuit="CKT-L1 (Lighting)" class="canvas-node absolute top-[34%] left-[38%] inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-full bg-primary text-on-primary border-2 border-studio-white font-mono text-mono-sm cursor-pointer">
+            <span class="material-symbols-outlined text-[14px]" aria-hidden="true">mode_fan</span>
+            <span>FAN-01</span>
+          </button>
+
+          <button type="button" data-node-name="Split AC 1.5T — Master" data-x="8.40" data-y="2.10" data-z="2.40" data-rot="90" data-mount="2.40 m" data-watt="1500 W" data-volt="230 V" data-circuit="CKT-P2 (Power 16A)" class="canvas-node absolute top-[28%] left-[64%] inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-full bg-surface-container text-secondary border border-secondary font-mono text-mono-sm cursor-pointer hover:bg-secondary hover:text-on-secondary">
+            <span class="material-symbols-outlined text-[14px]" aria-hidden="true">ac_unit</span>
+            <span>AC-01</span>
+          </button>
+
+          <button type="button" data-node-name="Modular Switchboard 8M" data-x="2.10" data-y="4.85" data-z="1.20" data-rot="180" data-mount="1.20 m" data-watt="0 W" data-volt="230 V" data-circuit="CKT-L1 (Lighting)" class="canvas-node absolute top-[56%] left-[26%] inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-full bg-surface-container text-primary border border-primary font-mono text-mono-sm cursor-pointer hover:bg-primary hover:text-on-primary">
+            <span class="material-symbols-outlined text-[14px]" aria-hidden="true">grid_view</span>
+            <span>SB-01</span>
+          </button>
+
+          <button type="button" data-node-name="16A Kitchen Socket" data-x="10.80" data-y="3.15" data-z="1.05" data-rot="270" data-mount="1.05 m" data-watt="1000 W" data-volt="230 V" data-circuit="CKT-P1 (Kitchen)" class="canvas-node absolute top-[48%] left-[74%] inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-full bg-surface-container text-secondary border border-secondary font-mono text-mono-sm cursor-pointer hover:bg-secondary hover:text-on-secondary">
+            <span class="material-symbols-outlined text-[14px]" aria-hidden="true">power</span>
+            <span>SKT-16A</span>
+          </button>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-between gap-gutter-sm z-10">
+          <div class="inline-flex items-center gap-gutter-xs bg-surface-container border border-outline-variant rounded-sm p-1">
+            <button type="button" class="px-gutter-sm py-gutter-xs rounded-sm bg-primary-container text-primary font-label text-label-sm" data-design-text-token="label-sm">Select / Move</button>
+            <button type="button" class="px-gutter-sm py-gutter-xs rounded-sm text-on-surface-variant hover:text-on-surface font-label text-label-sm" data-design-text-token="label-sm">Draw Wall</button>
+            <button type="button" class="px-gutter-sm py-gutter-xs rounded-sm text-on-surface-variant hover:text-on-surface font-label text-label-sm" data-design-text-token="label-sm">Add Room</button>
+            <button type="button" class="px-gutter-sm py-gutter-xs rounded-sm text-on-surface-variant hover:text-on-surface font-label text-label-sm" data-design-text-token="label-sm">Pan</button>
+          </div>
+          <span id="studio-toast" class="font-mono text-mono-sm text-primary" data-design-text-token="mono-sm">Selected: Ceiling Fan — Living (75 W)</span>
+        </div>
+      </main>
+
+      <!-- RIGHT PROPERTIES PANEL -->
+      <aside class="lg:col-span-3 bg-surface-container border-t lg:border-t-0 lg:border-l border-outline-variant p-gutter-md flex flex-col justify-between gap-gutter-lg">
+        <div class="flex flex-col gap-gutter-md">
+          <div class="flex items-center justify-between border-b border-outline-variant pb-gutter-sm">
+            <span class="font-label text-label-sm text-on-surface-variant uppercase tracking-wider" data-design-text-token="label-sm">Properties Inspector</span>
+            <span class="px-gutter-sm py-0.5 rounded-full bg-primary-container text-primary font-mono text-mono-sm" data-design-text-token="mono-sm">ACTIVE</span>
+          </div>
+
+          <label class="flex flex-col gap-gutter-xs">
+            <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Component Name</span>
+            <input id="prop-name" type="text" value="Ceiling Fan — Living" class="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-md py-gutter-xs font-body text-body-md text-on-surface focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+          </label>
+
+          <div class="grid grid-cols-3 gap-gutter-xs">
+            <label class="flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">X (m)</span>
+              <input id="prop-x" type="text" value="4.25" class="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-gutter-xs font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            </label>
+            <label class="flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Y (m)</span>
+              <input id="prop-y" type="text" value="3.60" class="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-gutter-xs font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            </label>
+            <label class="flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Z (m)</span>
+              <input id="prop-z" type="text" value="2.95" class="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-gutter-xs font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            </label>
+          </div>
+
+          <div class="grid grid-cols-2 gap-gutter-sm">
+            <label class="flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Rotation (°)</span>
+              <input id="prop-rot" type="text" value="0°" class="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-gutter-xs font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            </label>
+            <label class="flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Mounting Height</span>
+              <input id="prop-mount" type="text" value="2.95 m" class="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-gutter-xs font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            </label>
+          </div>
+
+          <div class="grid grid-cols-2 gap-gutter-sm">
+            <label class="flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Wattage</span>
+              <input id="prop-watt" type="text" value="75 W" class="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-gutter-xs font-mono text-mono-sm text-secondary tabular-nums focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            </label>
+            <label class="flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Voltage</span>
+              <input id="prop-volt" type="text" value="230 V" class="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-gutter-xs font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            </label>
+          </div>
+
+          <label class="flex flex-col gap-gutter-xs">
+            <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Circuit Assignment</span>
+            <select id="prop-circuit" class="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-md py-gutter-xs font-mono text-mono-sm text-on-surface focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+              <option selected>CKT-L1 (Lighting)</option>
+              <option>CKT-L2 (Bedrooms)</option>
+              <option>CKT-P1 (Kitchen)</option>
+              <option>CKT-P2 (Power 16A)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="grid grid-cols-2 gap-gutter-sm pt-gutter-md border-t border-outline-variant">
+          <button id="btn-duplicate" type="button" data-component-id="button-with-icon" data-component-type="button" data-component-variant="with-icon" class="inline-flex items-center justify-center gap-gutter-xs bg-surface-container-high text-on-surface border border-outline px-gutter-md py-gutter-sm rounded-sm font-label text-label-md hover:border-primary hover:text-primary transition-colors duration-state-change">
+            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">content_copy</span>
+            <span data-design-text-token="label-md">Duplicate</span>
+          </button>
+
+          <button id="btn-delete" type="button" data-component-id="button-destructive" data-component-type="button" data-component-variant="destructive" class="inline-flex items-center justify-center gap-gutter-xs bg-error text-on-error border border-error px-gutter-md py-gutter-sm rounded-sm font-label text-label-md hover:opacity-90 transition-opacity duration-state-change">
+            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">delete</span>
+            <span data-design-text-token="label-md">Delete</span>
+          </button>
+        </div>
+      </aside>
+    </div>
+
+    <!-- BOTTOM STATUS BAR -->
+    <footer class="bg-surface-container-low border-t border-outline-variant px-gutter-lg py-gutter-sm flex flex-wrap items-center justify-between gap-gutter-md">
+      <div class="flex flex-wrap items-center gap-gutter-xl">
+        <div class="flex items-center gap-gutter-xs">
+          <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Site Dimensions:</span>
+          <span class="font-mono text-mono-sm text-on-surface tabular-nums" data-design-text-token="mono-sm">42 ft × 34 ft (1,428 sq.ft)</span>
+        </div>
+        <div class="flex items-center gap-gutter-xs">
+          <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Active Room:</span>
+          <span id="status-room" class="font-mono text-mono-sm text-primary" data-design-text-token="mono-sm">Living Room</span>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-gutter-xl">
+        <div class="flex items-center gap-gutter-xs">
+          <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Total Components:</span>
+          <span id="status-count" class="font-mono text-mono-sm text-on-surface tabular-nums" data-design-text-token="mono-sm">48 Points</span>
+        </div>
+        <div class="flex items-center gap-gutter-xs">
+          <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Total Connected Load:</span>
+          <span id="status-load" class="font-mono text-mono-sm text-secondary tabular-nums" data-design-text-token="mono-sm">6.84 kW</span>
+        </div>
+      </div>
+    </footer>
+
+  </div>
+
+  <script>
+    (function () {
+      const btn2d = document.getElementById('btn-2d');
+      const btn3d = document.getElementById('btn-3d');
+      const img3d = document.getElementById('viewport-3d-img');
+      const svg2d = document.getElementById('viewport-2d-svg');
+      const badge = document.getElementById('viewport-mode-badge');
+      const toast = document.getElementById('studio-toast');
+      const btnDay = document.getElementById('btn-daylight');
+      const btnEve = document.getElementById('btn-evening');
+      const zoomLabel = document.getElementById('zoom-label');
+      let zoom = 100;
+      let count = 48;
+
+      btn2d.addEventListener('click', function () {
+        img3d.classList.add('hidden');
+        svg2d.classList.remove('hidden');
+        btn2d.className = 'px-gutter-md py-gutter-xs rounded-sm font-label text-label-md bg-primary text-on-primary transition-colors duration-state-change';
+        btn3d.className = 'px-gutter-md py-gutter-xs rounded-sm font-label text-label-md text-on-surface-variant hover:text-on-surface transition-colors duration-state-change';
+        badge.textContent = '2D ARCHITECTURAL PLAN • ELECTRICAL CIRCUIT OVERLAY';
+      });
+
+      btn3d.addEventListener('click', function () {
+        svg2d.classList.add('hidden');
+        img3d.classList.remove('hidden');
+        btn3d.className = 'px-gutter-md py-gutter-xs rounded-sm font-label text-label-md bg-primary text-on-primary transition-colors duration-state-change';
+        btn2d.className = 'px-gutter-md py-gutter-xs rounded-sm font-label text-label-md text-on-surface-variant hover:text-on-surface transition-colors duration-state-change';
+        badge.textContent = '3D PERSPECTIVE • ORBIT • DAYLIGHT';
+      });
+
+      btnEve.addEventListener('click', function () {
+        img3d.style.filter = 'brightness(0.75) contrast(1.15)';
+        btnEve.className = 'inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm font-label text-label-sm bg-surface-container-high text-primary';
+        btnDay.className = 'inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm font-label text-label-sm text-on-surface-variant hover:text-on-surface';
+        badge.textContent = '3D PERSPECTIVE • ORBIT • EVENING LIGHTING';
+      });
+
+      btnDay.addEventListener('click', function () {
+        img3d.style.filter = 'none';
+        btnDay.className = 'inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm font-label text-label-sm bg-surface-container-high text-secondary';
+        btnEve.className = 'inline-flex items-center gap-gutter-xs px-gutter-sm py-gutter-xs rounded-sm font-label text-label-sm text-on-surface-variant hover:text-on-surface';
+        badge.textContent = '3D PERSPECTIVE • ORBIT • DAYLIGHT';
+      });
+
+      document.getElementById('btn-zoom-in').addEventListener('click', function () {
+        zoom = Math.min(150, zoom + 10);
+        zoomLabel.textContent = zoom + '%';
+      });
+
+      document.getElementById('btn-zoom-out').addEventListener('click', function () {
+        zoom = Math.max(60, zoom - 10);
+        zoomLabel.textContent = zoom + '%';
+      });
+
+      document.querySelectorAll('.canvas-node').forEach(function (node) {
+        node.addEventListener('click', function () {
+          document.getElementById('prop-name').value = node.dataset.nodeName;
+          document.getElementById('prop-x').value = node.dataset.x;
+          document.getElementById('prop-y').value = node.dataset.y;
+          document.getElementById('prop-z').value = node.dataset.z;
+          document.getElementById('prop-rot').value = node.dataset.rot + '°';
+          document.getElementById('prop-mount').value = node.dataset.mount;
+          document.getElementById('prop-watt').value = node.dataset.watt;
+          document.getElementById('prop-volt').value = node.dataset.volt;
+          toast.textContent = 'Selected: ' + node.dataset.nodeName + ' (' + node.dataset.watt + ')';
+        });
+      });
+
+      document.querySelectorAll('[data-electrical]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          count += 1;
+          document.getElementById('status-count').textContent = count + ' Points';
+          document.getElementById('prop-name').value = btn.dataset.electrical;
+          document.getElementById('prop-watt').value = btn.dataset.watt;
+          toast.textContent = 'Placed ' + btn.dataset.electrical + ' (' + btn.dataset.watt + ') in Living Room';
+        });
+      });
+
+      document.getElementById('btn-duplicate').addEventListener('click', function () {
+        count += 1;
+        document.getElementById('status-count').textContent = count + ' Points';
+        toast.textContent = 'Duplicated: ' + document.getElementById('prop-name').value;
+      });
+
+      document.getElementById('btn-delete').addEventListener('click', function () {
+        if (count > 0) count -= 1;
+        document.getElementById('status-count').textContent = count + ' Points';
+        toast.textContent = 'Removed: ' + document.getElementById('prop-name').value;
+      });
+
+      document.getElementById('btn-save').addEventListener('click', function () {
+        toast.textContent = 'Project saved to workspace';
+      });
+    })();
+  </script>
+
+
+</body></html>

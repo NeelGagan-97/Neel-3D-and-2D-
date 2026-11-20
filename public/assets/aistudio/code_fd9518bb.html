@@ -1,0 +1,445 @@
+<!DOCTYPE html><html lang="en"><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Project Summary — Ananya Space Designer</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <script id="tailwind-config">/** @type {import('tailwindcss').Config} */
+globalThis.tailwind = globalThis.tailwind || {};
+globalThis.tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        'deep-navy': '#080F20',
+        'dark-slate': '#111C31',
+        'electric-blue': '#00A8FF',
+        'amber-orange': '#FF9D00',
+        'metallic-silver': '#C5CDD8',
+        'studio-white': '#F5F7FA',
+        'primary': '#00A8FF',
+        'on-primary': '#080F20',
+        'primary-container': '#0B2948',
+        'on-primary-container': '#E0F4FF',
+        'secondary': '#FF9D00',
+        'on-secondary': '#080F20',
+        'secondary-container': '#332208',
+        'on-secondary-container': '#FFE2B3',
+        'surface': '#080F20',
+        'surface-container-low': '#0D1528',
+        'surface-container': '#111C31',
+        'surface-container-high': '#182742',
+        'surface-container-highest': '#203254',
+        'on-surface': '#F5F7FA',
+        'on-surface-variant': '#C5CDD8',
+        'outline': '#2C3E5E',
+        'outline-variant': '#1D2B44',
+        'success': '#22C55E',
+        'on-success': '#052E16',
+        'warning': '#FF9D00',
+        'on-warning': '#080F20',
+        'error': '#EF4444',
+        'on-error': '#1C1C1C',
+      },
+      borderRadius: {
+        'sm': '4px',
+        'DEFAULT': '8px',
+        'md': '8px',
+        'lg': '12px',
+        'xl': '16px',
+        'full': '9999px',
+      },
+      spacing: {
+        'gutter-xs': '4px',
+        'gutter-sm': '8px',
+        'gutter-md': '12px',
+        'gutter-lg': '16px',
+        'gutter-xl': '24px',
+        'gutter-2xl': '32px',
+        'section': '48px',
+        'page-margin': '24px',
+      },
+      fontFamily: {
+        'display': ['"Red Hat Text"', 'sans-serif'],
+        'headline': ['"Red Hat Text"', 'sans-serif'],
+        'title': ['"Instrument Sans"', 'sans-serif'],
+        'body': ['"Instrument Sans"', 'sans-serif'],
+        'label': ['"Instrument Sans"', 'sans-serif'],
+        'mono': ['"Red Hat Mono"', 'monospace'],
+      },
+      fontSize: {
+        'display-lg': ['48px', { lineHeight: '54px', letterSpacing: '-0.5px', fontWeight: '700' }],
+        'display-lg-mobile': ['32px', { lineHeight: '38px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-lg': ['36px', { lineHeight: '44px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-lg-mobile': ['26px', { lineHeight: '32px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-md': ['24px', { lineHeight: '30px', letterSpacing: '0px', fontWeight: '600' }],
+        'headline-sm': ['18px', { lineHeight: '24px', letterSpacing: '0px', fontWeight: '600' }],
+        'title-md': ['16px', { lineHeight: '22px', letterSpacing: '0px', fontWeight: '600' }],
+        'title-sm': ['14px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '600' }],
+        'body-lg': ['16px', { lineHeight: '24px', letterSpacing: '0px', fontWeight: '400' }],
+        'body-md': ['14px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '400' }],
+        'body-sm': ['12px', { lineHeight: '16px', letterSpacing: '0px', fontWeight: '400' }],
+        'label-lg': ['14px', { lineHeight: '20px', letterSpacing: '0.25px', fontWeight: '600' }],
+        'label-md': ['12px', { lineHeight: '16px', letterSpacing: '0.25px', fontWeight: '600' }],
+        'label-sm': ['11px', { lineHeight: '14px', letterSpacing: '0.5px', fontWeight: '600' }],
+        'mono-md': ['13px', { lineHeight: '18px', letterSpacing: '0px', fontWeight: '500' }],
+        'mono-sm': ['11px', { lineHeight: '16px', letterSpacing: '0px', fontWeight: '500' }],
+      },
+      transitionDuration: {
+        'state-change': '100ms',
+        'panel-toggle': '150ms',
+        'viewport-transition': '250ms',
+      },
+      transitionDelay: {
+        'state-change': '0ms',
+        'panel-toggle': '0ms',
+        'viewport-transition': '0ms',
+      },
+      transitionTimingFunction: {
+        'state-change': 'ease-out',
+        'panel-toggle': 'cubic-bezier(0.2, 0, 0, 1)',
+        'viewport-transition': 'cubic-bezier(0.2, 0, 0, 1)',
+      },
+    },
+  },
+};
+if (typeof module !== 'undefined') module.exports = globalThis.tailwind.config;
+</script>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=Red+Hat+Mono:wght@400;500;600&amp;family=Red+Hat+Text:wght@500;600;700&amp;display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=block" rel="stylesheet">
+  <style>.material-symbols-outlined, .material-symbols-rounded, .material-symbols-sharp, .material-icons { display: inline-block; width: 1em; height: 1em; line-height: 1 !important; box-sizing: content-box; overflow: hidden; white-space: nowrap; direction: ltr; vertical-align: middle; }</style>
+</head>
+<body class="bg-surface text-on-surface font-body antialiased selection:bg-primary selection:text-on-primary">
+  <div class="min-h-[1024px] flex flex-col" data-stitch-vh="min-h-[1024px]===min-h-screen">
+
+    <!-- Shared Top Navigation -->
+    <header class="sticky top-0 z-30 bg-surface-container border-b border-outline-variant">
+      <div class="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-gutter-sm min-h-16 flex flex-wrap items-center justify-between gap-gutter-sm">
+        <a href="../home/Home.html" class="flex items-center gap-gutter-sm min-w-0">
+          <div class="w-9 h-9 rounded-md bg-primary-container border border-primary flex items-center justify-center shrink-0">
+            <span class="material-symbols-outlined text-primary text-[20px]" aria-hidden="true">deployed_code</span>
+          </div>
+          <div class="flex flex-col min-w-0">
+            <span class="font-headline text-title-sm text-on-surface tracking-wide uppercase" data-design-text-token="title-sm">ANANYA SPACE DESIGNER</span>
+            <span class="font-mono text-mono-sm text-on-surface-variant tracking-wider uppercase hidden sm:block" data-design-text-token="mono-sm">DESIGN YOUR SPACE. POWER YOUR WORLD.</span>
+          </div>
+        </a>
+
+        <nav aria-label="Primary Navigation" class="flex items-center gap-gutter-xs min-w-0">
+          <a href="../home/Home.html" class="px-gutter-sm sm:px-gutter-md py-gutter-xs rounded-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">Home</a>
+          <a href="../design-studio/DesignStudio.html" class="px-gutter-sm sm:px-gutter-md py-gutter-xs rounded-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">Design Studio</a>
+          <a href="../project-summary/ProjectSummary.html" aria-current="page" class="px-gutter-sm sm:px-gutter-md py-gutter-xs rounded-sm bg-primary-container text-primary border border-primary font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">Project Summary</a>
+        </nav>
+
+        <div class="hidden md:flex items-center gap-gutter-sm">
+          <a href="../design-studio/DesignStudio.html" data-component-id="button-header-cta" data-component-type="button" data-component-variant="primary" class="inline-flex items-center justify-center gap-gutter-sm bg-primary text-on-primary px-gutter-lg py-gutter-sm rounded-md font-label text-label-md transition-colors duration-state-change hover:bg-on-primary-container">
+            <span class="material-symbols-outlined text-[18px]" aria-hidden="true">edit</span>
+            <span data-design-text-token="label-md">Edit Design</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main class="flex-1 max-w-7xl w-full mx-auto px-gutter-lg lg:px-gutter-xl py-gutter-2xl flex flex-col gap-gutter-2xl">
+
+      <!-- Report Header & Actions -->
+      <section class="flex flex-col lg:flex-row lg:items-center justify-between gap-gutter-lg pb-gutter-xl border-b border-outline-variant">
+        <div class="flex flex-col gap-gutter-xs">
+          <div class="flex items-center gap-gutter-sm">
+            <span class="px-gutter-sm py-0.5 rounded-full bg-primary-container text-primary font-mono text-mono-sm" data-design-text-token="mono-sm">PROJECT REPORT</span>
+            <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">REF: ASD-2026-IND-04</span>
+          </div>
+          <h1 class="font-headline text-headline-lg-mobile lg:text-headline-lg text-on-surface" data-design-text-token="headline-lg">Indiranagar 3BHK Residence</h1>
+          <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">Complete architectural dimensions, room-wise electrical schedule, and Bill of Quantities (BOQ).</p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-gutter-sm">
+          <a href="../design-studio/DesignStudio.html" class="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-sm rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">
+            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">edit</span>
+            <span>Edit Design</span>
+          </a>
+          <button type="button" class="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-sm rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">
+            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">save</span>
+            <span>Save Project</span>
+          </button>
+          <button type="button" data-component-id="button-with-icon" data-component-type="button" data-component-variant="with-icon" class="inline-flex items-center justify-center gap-gutter-xs bg-surface-container-high text-on-surface border border-outline px-gutter-md py-gutter-sm rounded-sm font-label text-label-md hover:border-primary hover:text-primary transition-colors duration-state-change">
+            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">picture_as_pdf</span>
+            <span data-design-text-token="label-md">Download PDF</span>
+          </button>
+          <button type="button" class="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-sm rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">
+            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">table_view</span>
+            <span>Export Excel</span>
+          </button>
+          <button type="button" class="inline-flex items-center gap-gutter-xs px-gutter-lg py-gutter-sm rounded-sm bg-secondary text-on-secondary font-label text-label-md hover:bg-on-secondary-container transition-colors duration-state-change" data-design-text-token="label-md">
+            <span class="material-symbols-outlined text-[16px]" aria-hidden="true">request_quote</span>
+            <span>Request Quotation</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Visual Previews + Core Engineering KPIs -->
+      <section class="grid grid-cols-1 lg:grid-cols-12 gap-gutter-lg">
+        <div class="lg:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-gutter-lg">
+          <div class="bg-surface-container border border-outline-variant rounded-lg overflow-hidden flex flex-col">
+            <div class="px-gutter-md py-gutter-sm border-b border-outline-variant bg-surface-container-high flex items-center justify-between">
+              <span class="font-label text-label-sm text-on-surface-variant uppercase" data-design-text-token="label-sm">Project Thumbnail</span>
+              <span class="font-mono text-mono-sm text-primary" data-design-text-token="mono-sm">ISOMETRIC</span>
+            </div>
+            <div class="aspect-video bg-surface">
+              <img src="https://lh3.googleusercontent.com/aida/ALJJyrDSwEhzMlF0_OTxymbWK2mD4NqIVEz6qpjRpj_TUFTtvBGJU_CjB2dhoAWbUqTyXHO-cOD1zE11hbmHGx2d9JkwPcrNlDRp0nC3qOnAYJv1_7WKWsNV0vNx9aRD4ujbkxUMnXDHsg6ukWrOV-uIAVg39I51EgFnnl0n0Qb0STJzBBZQOJrpCRPHSFLah96DWvzCXsgZpYvdWAdEyFMZKny5t1k8KJQe_VoQR5ATYDOCYzdNdujuuXIo5ecOf6JI55MsPA" alt="Isometric thumbnail of Indiranagar 3BHK Residence" class="w-full h-full object-cover">
+            </div>
+          </div>
+
+          <div class="bg-surface-container border border-outline-variant rounded-lg overflow-hidden flex flex-col">
+            <div class="px-gutter-md py-gutter-sm border-b border-outline-variant bg-surface-container-high flex items-center justify-between">
+              <span class="font-label text-label-sm text-on-surface-variant uppercase" data-design-text-token="label-sm">3D Preview</span>
+              <span class="font-mono text-mono-sm text-secondary" data-design-text-token="mono-sm">ELECTRICAL BIM</span>
+            </div>
+            <div class="aspect-video bg-surface">
+              <img src="https://lh3.googleusercontent.com/aida/ALJJyrBV8vHk6jO1-m6GzMXqj8sKIi2AR5oFBRI37XTwkyNT0GYmHm4Hug2f8u96RVDLBPc_tU5QQj7tLQz2hXwmkyXcy-eiFt4oJDEWbmGpsiBzocx8Mai1Ou9oiO8ca_IIcPCgniJE_e8H7MIFtBw4gB3b7YKNVyuP1sg8YFWSnmAU3M4U0n9cpnlF5nR8jTZJrDtY-VvTS4BuP8XsD7aMaC--rtPRQ2nkWOvcaVRn1D1NarAW3kJVyIFjTKvbxw" alt="3D electrical preview of Indiranagar 3BHK Residence" class="w-full h-full object-cover">
+            </div>
+          </div>
+        </div>
+
+        <div class="lg:col-span-5 grid grid-cols-2 gap-gutter-md">
+          <div class="bg-surface-container border border-outline-variant rounded-lg p-gutter-lg flex flex-col justify-between gap-gutter-sm">
+            <span class="font-label text-label-sm text-on-surface-variant uppercase" data-design-text-token="label-sm">Site Dimensions</span>
+            <span class="font-mono text-headline-sm text-on-surface tabular-nums" data-design-text-token="headline-sm">42&#39; × 34&#39;</span>
+            <span class="font-mono text-mono-sm text-on-surface-variant tabular-nums" data-design-text-token="mono-sm">1,428 sq.ft • 10&#39; Ceiling</span>
+          </div>
+
+          <div class="bg-surface-container border border-outline-variant rounded-lg p-gutter-lg flex flex-col justify-between gap-gutter-sm">
+            <span class="font-label text-label-sm text-on-surface-variant uppercase" data-design-text-token="label-sm">Number of Rooms</span>
+            <span class="font-mono text-headline-sm text-primary tabular-nums" data-design-text-token="headline-sm">7 Rooms</span>
+            <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">Single Floor Plan</span>
+          </div>
+
+          <div class="bg-surface-container border border-outline-variant rounded-lg p-gutter-lg flex flex-col justify-between gap-gutter-sm">
+            <span class="font-label text-label-sm text-on-surface-variant uppercase" data-design-text-token="label-sm">Total Electrical Points</span>
+            <span class="font-mono text-headline-sm text-on-surface tabular-nums" data-design-text-token="headline-sm">48 Points</span>
+            <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">4 Sub-Circuits (230V)</span>
+          </div>
+
+          <div class="bg-surface-container border border-secondary rounded-lg p-gutter-lg flex flex-col justify-between gap-gutter-sm">
+            <span class="font-label text-label-sm text-secondary uppercase" data-design-text-token="label-sm">Total Connected Load</span>
+            <span class="font-mono text-headline-sm text-secondary tabular-nums" data-design-text-token="headline-sm">6.84 kW</span>
+            <span class="font-mono text-mono-sm text-on-surface-variant tabular-nums" data-design-text-token="mono-sm">Est. Demand: 29.7 A</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Category Quantity Strip -->
+      <section class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-gutter-md">
+        <div class="bg-surface-container border border-outline-variant rounded-md p-gutter-lg flex items-center justify-between">
+          <div class="flex flex-col gap-gutter-xs">
+            <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Fan Quantities</span>
+            <span class="font-mono text-headline-md text-on-surface tabular-nums" data-design-text-token="headline-md">5</span>
+          </div>
+          <span class="material-symbols-outlined text-primary text-[24px]" aria-hidden="true">mode_fan</span>
+        </div>
+
+        <div class="bg-surface-container border border-outline-variant rounded-md p-gutter-lg flex items-center justify-between">
+          <div class="flex flex-col gap-gutter-xs">
+            <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Lighting Quantities</span>
+            <span class="font-mono text-headline-md text-on-surface tabular-nums" data-design-text-token="headline-md">20</span>
+          </div>
+          <span class="material-symbols-outlined text-secondary text-[24px]" aria-hidden="true">lightbulb</span>
+        </div>
+
+        <div class="bg-surface-container border border-outline-variant rounded-md p-gutter-lg flex items-center justify-between">
+          <div class="flex flex-col gap-gutter-xs">
+            <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Switch Quantities</span>
+            <span class="font-mono text-headline-md text-on-surface tabular-nums" data-design-text-token="headline-md">9</span>
+          </div>
+          <span class="material-symbols-outlined text-primary text-[24px]" aria-hidden="true">toggle_on</span>
+        </div>
+
+        <div class="bg-surface-container border border-outline-variant rounded-md p-gutter-lg flex items-center justify-between">
+          <div class="flex flex-col gap-gutter-xs">
+            <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Socket Quantities</span>
+            <span class="font-mono text-headline-md text-on-surface tabular-nums" data-design-text-token="headline-md">10</span>
+          </div>
+          <span class="material-symbols-outlined text-primary text-[24px]" aria-hidden="true">power</span>
+        </div>
+
+        <div class="bg-surface-container border border-outline-variant rounded-md p-gutter-lg flex items-center justify-between col-span-2 sm:col-span-1">
+          <div class="flex flex-col gap-gutter-xs">
+            <span class="font-label text-label-sm text-on-surface-variant" data-design-text-token="label-sm">Appliance Quantities</span>
+            <span class="font-mono text-headline-md text-secondary tabular-nums" data-design-text-token="headline-md">4</span>
+          </div>
+          <span class="material-symbols-outlined text-secondary text-[24px]" aria-hidden="true">ac_unit</span>
+        </div>
+      </section>
+
+      <!-- Room-Wise Electrical Breakdown -->
+      <section class="flex flex-col gap-gutter-md">
+        <div class="flex items-center justify-between">
+          <h2 class="font-headline text-headline-md text-on-surface" data-design-text-token="headline-md">Room-Wise Electrical Breakdown</h2>
+          <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">7 ZONES</span>
+        </div>
+
+        <div data-component-id="table-room-breakdown" data-component-type="table" data-component-variant="standard" class="w-full overflow-x-auto bg-surface-container border border-outline-variant rounded-lg">
+          <table class="w-full text-left border-collapse">
+            <thead>
+              <tr class="border-b border-outline bg-surface-container-high">
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant"><span data-design-text-token="label-md">Room</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant text-right"><span data-design-text-token="label-md">Fans</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant text-right"><span data-design-text-token="label-md">Lights</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant text-right"><span data-design-text-token="label-md">Switches</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant text-right"><span data-design-text-token="label-md">Sockets</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant text-right"><span data-design-text-token="label-md">Appliances</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant text-right"><span data-design-text-token="label-md">Room Load</span></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-outline-variant">
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">Living Room</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">2</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">6</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">2</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">3</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">1,980 W</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">Master Bedroom</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">4</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">2</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">2</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">1,745 W</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">Second Bedroom</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">3</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">2</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">0</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">320 W</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">Kitchen</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">2</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">2</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">1,475 W</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">Bathroom, Dining &amp; Balcony</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">0</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">5</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">3</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">1,320 W</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Bill of Quantities (BOQ) Table -->
+      <section class="flex flex-col gap-gutter-md">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-gutter-sm">
+          <h2 class="font-headline text-headline-md text-on-surface" data-design-text-token="headline-md">Bill of Quantities (BOQ)</h2>
+          <span class="font-mono text-mono-md text-primary tabular-nums" data-design-text-token="mono-md">Total Estimated Cost: ₹1,42,850</span>
+        </div>
+
+        <div data-component-id="table-standard" data-component-type="table" data-component-variant="standard" class="w-full overflow-x-auto bg-surface-container border border-outline-variant rounded-lg">
+          <table class="w-full text-left border-collapse">
+            <thead>
+              <tr class="border-b border-outline bg-surface-container-high">
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant"><span data-design-text-token="label-md">Product Name</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant"><span data-design-text-token="label-md">Category</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant text-right"><span data-design-text-token="label-md">Quantity</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant text-right"><span data-design-text-token="label-md">Wattage</span></th>
+                <th scope="col" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface-variant text-right"><span data-design-text-token="label-md">Estimated Cost</span></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-outline-variant">
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">BLDC Smart Ceiling Fan 1200mm</span></td>
+                <td class="px-gutter-lg py-gutter-md font-body text-body-sm text-on-surface-variant"><span data-design-text-token="body-sm">Ceiling Fans</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">4</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">140 W</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">₹15,400</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">Kitchen Ventilation Exhaust Fan 200mm</span></td>
+                <td class="px-gutter-lg py-gutter-md font-body text-body-sm text-on-surface-variant"><span data-design-text-token="body-sm">Exhaust Fans</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">45 W</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">₹2,150</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">Recessed 15W LED Panel Light</span></td>
+                <td class="px-gutter-lg py-gutter-md font-body text-body-sm text-on-surface-variant"><span data-design-text-token="body-sm">Lighting</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">14</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">210 W</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">₹11,900</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">Architectural Spotlight &amp; Cove Strip Set</span></td>
+                <td class="px-gutter-lg py-gutter-md font-body text-body-sm text-on-surface-variant"><span data-design-text-token="body-sm">Lighting</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">6</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">120 W</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">₹9,600</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">8-Module Glass Plate Switchboard</span></td>
+                <td class="px-gutter-lg py-gutter-md font-body text-body-sm text-on-surface-variant"><span data-design-text-token="body-sm">Switches</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">9</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface-variant text-right tabular-nums"><span data-design-text-token="mono-md">0 W</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">₹14,400</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">5A / 16A Modular Sockets &amp; USB Outlets</span></td>
+                <td class="px-gutter-lg py-gutter-md font-body text-body-sm text-on-surface-variant"><span data-design-text-token="body-sm">Sockets</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">10</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">1,825 W</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">₹8,400</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">1.5 Ton 5-Star Inverter Split AC</span></td>
+                <td class="px-gutter-lg py-gutter-md font-body text-body-sm text-on-surface-variant"><span data-design-text-token="body-sm">Appliances</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">2</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">3,000 W</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">₹68,000</span></td>
+              </tr>
+              <tr class="hover:bg-surface-container-high">
+                <td class="px-gutter-lg py-gutter-md font-body text-body-md text-on-surface"><span data-design-text-token="body-md">25L Storage Water Heater (Geyser)</span></td>
+                <td class="px-gutter-lg py-gutter-md font-body text-body-sm text-on-surface-variant"><span data-design-text-token="body-sm">Appliances</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">1</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">1,500 W</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">₹13,000</span></td>
+              </tr>
+            </tbody>
+            <tfoot>
+              <tr class="border-t border-outline bg-surface-container-high">
+                <td colspan="2" class="px-gutter-lg py-gutter-md font-label text-label-md text-on-surface"><span data-design-text-token="label-md">Total Connected System Summary</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-primary text-right tabular-nums"><span data-design-text-token="mono-md">48</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums"><span data-design-text-token="mono-md">6.84 kW</span></td>
+                <td class="px-gutter-lg py-gutter-md font-mono text-mono-md text-on-surface text-right tabular-nums"><span data-design-text-token="mono-md">₹1,42,850</span></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-surface-container border-t border-outline-variant">
+      <div class="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-gutter-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-gutter-md">
+        <span class="font-mono text-mono-sm text-on-surface-variant uppercase" data-design-text-token="mono-sm">ANANYA SPACE DESIGNER • DESIGN YOUR SPACE. POWER YOUR WORLD.</span>
+        <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">BOQ Estimates Exclusive of Civil Conduit Labor</span>
+      </div>
+    </footer>
+
+  </div>
+
+
+</body></html>

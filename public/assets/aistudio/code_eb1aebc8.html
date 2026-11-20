@@ -1,0 +1,410 @@
+<!DOCTYPE html><html lang="en"><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Home — Ananya Space Designer</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <script id="tailwind-config">/** @type {import('tailwindcss').Config} */
+globalThis.tailwind = globalThis.tailwind || {};
+globalThis.tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        'deep-navy': '#080F20',
+        'dark-slate': '#111C31',
+        'electric-blue': '#00A8FF',
+        'amber-orange': '#FF9D00',
+        'metallic-silver': '#C5CDD8',
+        'studio-white': '#F5F7FA',
+        'primary': '#00A8FF',
+        'on-primary': '#080F20',
+        'primary-container': '#0B2948',
+        'on-primary-container': '#E0F4FF',
+        'secondary': '#FF9D00',
+        'on-secondary': '#080F20',
+        'secondary-container': '#332208',
+        'on-secondary-container': '#FFE2B3',
+        'surface': '#080F20',
+        'surface-container-low': '#0D1528',
+        'surface-container': '#111C31',
+        'surface-container-high': '#182742',
+        'surface-container-highest': '#203254',
+        'on-surface': '#F5F7FA',
+        'on-surface-variant': '#C5CDD8',
+        'outline': '#2C3E5E',
+        'outline-variant': '#1D2B44',
+        'success': '#22C55E',
+        'on-success': '#052E16',
+        'warning': '#FF9D00',
+        'on-warning': '#080F20',
+        'error': '#EF4444',
+        'on-error': '#1C1C1C',
+      },
+      borderRadius: {
+        'sm': '4px',
+        'DEFAULT': '8px',
+        'md': '8px',
+        'lg': '12px',
+        'xl': '16px',
+        'full': '9999px',
+      },
+      spacing: {
+        'gutter-xs': '4px',
+        'gutter-sm': '8px',
+        'gutter-md': '12px',
+        'gutter-lg': '16px',
+        'gutter-xl': '24px',
+        'gutter-2xl': '32px',
+        'section': '48px',
+        'page-margin': '24px',
+      },
+      fontFamily: {
+        'display': ['"Red Hat Text"', 'sans-serif'],
+        'headline': ['"Red Hat Text"', 'sans-serif'],
+        'title': ['"Instrument Sans"', 'sans-serif'],
+        'body': ['"Instrument Sans"', 'sans-serif'],
+        'label': ['"Instrument Sans"', 'sans-serif'],
+        'mono': ['"Red Hat Mono"', 'monospace'],
+      },
+      fontSize: {
+        'display-lg': ['48px', { lineHeight: '54px', letterSpacing: '-0.5px', fontWeight: '700' }],
+        'display-lg-mobile': ['32px', { lineHeight: '38px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-lg': ['36px', { lineHeight: '44px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-lg-mobile': ['26px', { lineHeight: '32px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-md': ['24px', { lineHeight: '30px', letterSpacing: '0px', fontWeight: '600' }],
+        'headline-sm': ['18px', { lineHeight: '24px', letterSpacing: '0px', fontWeight: '600' }],
+        'title-md': ['16px', { lineHeight: '22px', letterSpacing: '0px', fontWeight: '600' }],
+        'title-sm': ['14px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '600' }],
+        'body-lg': ['16px', { lineHeight: '24px', letterSpacing: '0px', fontWeight: '400' }],
+        'body-md': ['14px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '400' }],
+        'body-sm': ['12px', { lineHeight: '16px', letterSpacing: '0px', fontWeight: '400' }],
+        'label-lg': ['14px', { lineHeight: '20px', letterSpacing: '0.25px', fontWeight: '600' }],
+        'label-md': ['12px', { lineHeight: '16px', letterSpacing: '0.25px', fontWeight: '600' }],
+        'label-sm': ['11px', { lineHeight: '14px', letterSpacing: '0.5px', fontWeight: '600' }],
+        'mono-md': ['13px', { lineHeight: '18px', letterSpacing: '0px', fontWeight: '500' }],
+        'mono-sm': ['11px', { lineHeight: '16px', letterSpacing: '0px', fontWeight: '500' }],
+      },
+      transitionDuration: {
+        'state-change': '100ms',
+        'panel-toggle': '150ms',
+        'viewport-transition': '250ms',
+      },
+      transitionDelay: {
+        'state-change': '0ms',
+        'panel-toggle': '0ms',
+        'viewport-transition': '0ms',
+      },
+      transitionTimingFunction: {
+        'state-change': 'ease-out',
+        'panel-toggle': 'cubic-bezier(0.2, 0, 0, 1)',
+        'viewport-transition': 'cubic-bezier(0.2, 0, 0, 1)',
+      },
+    },
+  },
+};
+if (typeof module !== 'undefined') module.exports = globalThis.tailwind.config;
+</script>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=Red+Hat+Mono:wght@400;500;600&amp;family=Red+Hat+Text:wght@500;600;700&amp;display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=block" rel="stylesheet">
+  <style>.material-symbols-outlined, .material-symbols-rounded, .material-symbols-sharp, .material-icons { display: inline-block; width: 1em; height: 1em; line-height: 1 !important; box-sizing: content-box; overflow: hidden; white-space: nowrap; direction: ltr; vertical-align: middle; }</style>
+</head>
+<body class="bg-surface text-on-surface font-body antialiased selection:bg-primary selection:text-on-primary">
+  <div class="min-h-[1024px] flex flex-col" data-stitch-vh="min-h-[1024px]===min-h-screen">
+
+    <!-- Shared Top Navigation -->
+    <header class="sticky top-0 z-30 bg-surface-container border-b border-outline-variant">
+      <div class="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-gutter-sm min-h-16 flex flex-wrap items-center justify-between gap-gutter-sm">
+        <a href="../home/Home.html" class="flex items-center gap-gutter-sm min-w-0">
+          <div class="w-9 h-9 rounded-md bg-primary-container border border-primary flex items-center justify-center shrink-0">
+            <span class="material-symbols-outlined text-primary text-[20px]" aria-hidden="true">deployed_code</span>
+          </div>
+          <div class="flex flex-col min-w-0">
+            <span class="font-headline text-title-sm text-on-surface tracking-wide uppercase" data-design-text-token="title-sm">ANANYA SPACE DESIGNER</span>
+            <span class="font-mono text-mono-sm text-on-surface-variant tracking-wider uppercase hidden sm:block" data-design-text-token="mono-sm">DESIGN YOUR SPACE. POWER YOUR WORLD.</span>
+          </div>
+        </a>
+
+        <nav aria-label="Primary Navigation" class="flex items-center gap-gutter-xs min-w-0">
+          <a href="../home/Home.html" aria-current="page" class="px-gutter-sm sm:px-gutter-md py-gutter-xs rounded-sm bg-primary-container text-primary border border-primary font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">Home</a>
+          <a href="../design-studio/DesignStudio.html" class="px-gutter-sm sm:px-gutter-md py-gutter-xs rounded-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">Design Studio</a>
+          <a href="../project-summary/ProjectSummary.html" class="px-gutter-sm sm:px-gutter-md py-gutter-xs rounded-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">Project Summary</a>
+        </nav>
+
+        <div class="hidden md:flex items-center gap-gutter-sm">
+          <a href="../design-studio/DesignStudio.html" data-component-id="button-header-cta" data-component-type="button" data-component-variant="primary" class="inline-flex items-center justify-center gap-gutter-sm bg-primary text-on-primary px-gutter-lg py-gutter-sm rounded-md font-label text-label-md transition-colors duration-state-change hover:bg-on-primary-container">
+            <span class="material-symbols-outlined text-[18px]" aria-hidden="true">add_box</span>
+            <span data-design-text-token="label-md">Launch Studio</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main class="flex-1">
+      <!-- Hero Section -->
+      <section class="border-b border-outline-variant bg-surface-container-low">
+        <div class="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-section">
+          <div class="grid grid-cols-1 lg:grid-cols-12 gap-gutter-2xl items-center">
+            <div class="lg:col-span-5 flex flex-col gap-gutter-lg">
+              <div class="inline-flex items-center gap-gutter-sm self-start px-gutter-md py-gutter-xs rounded-full bg-surface-container-high border border-outline">
+                <span class="material-symbols-outlined text-secondary text-[16px]" aria-hidden="true">bolt</span>
+                <span class="font-mono text-mono-sm text-on-surface-variant uppercase" data-design-text-token="mono-sm">2D CAD • 3D BIM • Electrical BOQ</span>
+              </div>
+
+              <h1 class="font-display text-display-lg-mobile lg:text-display-lg text-on-surface text-balance" data-design-text-token="display-lg">
+                Design Your Home. Plan Every Electrical Detail.
+              </h1>
+
+              <p class="font-body text-body-lg text-on-surface-variant text-pretty max-w-prose" data-design-text-token="body-lg">
+                Precision architectural floor planning paired with real-time 3D residential visualization, circuit-level electrical placement, connected load calculation, and automated Bill of Quantities.
+              </p>
+
+              <div class="flex flex-wrap items-center gap-gutter-md pt-gutter-sm">
+                <a href="../design-studio/DesignStudio.html" data-component-id="button-primary" data-component-type="button" data-component-variant="primary" class="inline-flex items-center justify-center gap-gutter-sm bg-primary text-on-primary px-gutter-xl py-gutter-md rounded-md font-label text-label-lg transition-colors duration-state-change hover:bg-on-primary-container focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+                  <span class="material-symbols-outlined text-[20px]" aria-hidden="true">architecture</span>
+                  <span data-design-text-token="label-lg">CREATE YOUR OWN SPACE</span>
+                </a>
+
+                <a href="../design-studio/DesignStudio.html?view=3d" data-component-id="button-secondary" data-component-type="button" data-component-variant="secondary" class="inline-flex items-center justify-center gap-gutter-sm bg-surface-container-high text-on-surface border border-outline px-gutter-xl py-gutter-md rounded-md font-label text-label-lg transition-colors duration-state-change hover:border-primary hover:text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+                  <span class="material-symbols-outlined text-[20px]" aria-hidden="true">view_in_ar</span>
+                  <span data-design-text-token="label-lg">EXPLORE 3D DESIGN</span>
+                </a>
+              </div>
+
+              <div class="grid grid-cols-3 gap-gutter-md pt-gutter-lg border-t border-outline-variant">
+                <div class="flex flex-col gap-gutter-xs">
+                  <span class="font-mono text-headline-sm text-primary tabular-nums" data-design-text-token="headline-sm">0.1m</span>
+                  <span class="font-body text-body-sm text-on-surface-variant" data-design-text-token="body-sm">Snap Grid Accuracy</span>
+                </div>
+                <div class="flex flex-col gap-gutter-xs">
+                  <span class="font-mono text-headline-sm text-secondary tabular-nums" data-design-text-token="headline-sm">230V</span>
+                  <span class="font-body text-body-sm text-on-surface-variant" data-design-text-token="body-sm">IS-Standard Circuits</span>
+                </div>
+                <div class="flex flex-col gap-gutter-xs">
+                  <span class="font-mono text-headline-sm text-on-surface tabular-nums" data-design-text-token="headline-sm">Instant</span>
+                  <span class="font-body text-body-sm text-on-surface-variant" data-design-text-token="body-sm">Room-Wise BOQ</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="lg:col-span-7">
+              <div class="bg-surface-container border border-outline rounded-xl overflow-hidden">
+                <div class="px-gutter-lg py-gutter-sm border-b border-outline-variant bg-surface-container-high flex items-center justify-between gap-gutter-sm">
+                  <div class="flex items-center gap-gutter-sm min-w-0">
+                    <span class="material-symbols-outlined text-primary text-[18px]" aria-hidden="true">view_in_ar</span>
+                    <span class="font-mono text-mono-sm text-on-surface truncate" data-design-text-token="mono-sm">3D_VIEWPORT // MODERN_INDIAN_3BHK_RESIDENCE</span>
+                  </div>
+                  <span class="font-mono text-mono-sm text-secondary tabular-nums shrink-0" data-design-text-token="mono-sm">42&#39; × 34&#39; • 6.84 kW</span>
+                </div>
+                <div class="relative aspect-video bg-surface">
+                  <img src="https://lh3.googleusercontent.com/aida/ALJJyrC42RcYq6kxFoCrQ70jv5XVMu5uoF5mIHMzwzeUlwhTbFpUthgMWkGZXTSdqhlIDfBb2ig3-sgxeAFoHbF8A3H8FerDC5vHsdwcdqD8An27t2X66fRy4iDmT4hMFGthT7tO-1Vsyy1dN7Q-aAEINNrn5i0rDsns7dCNrgIWM6MWtB1qDfveaBnqALXHQhxpLH-LCXYkA4ecdIt4ogYL8V2KJMTR1z_mZrmWw4R9X14R6SbrVHdQmjPon2Qm" alt="Photorealistic 3D architectural cutaway of a modern Indian residential apartment with electrical planning grid" class="w-full h-full object-cover">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Core Capabilities: 4 Feature Cards -->
+      <section class="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-section">
+        <div class="flex flex-col md:flex-row md:items-end justify-between gap-gutter-md mb-gutter-2xl">
+          <div class="flex flex-col gap-gutter-xs">
+            <h2 class="font-headline text-headline-lg-mobile lg:text-headline-lg text-on-surface" data-design-text-token="headline-lg">Engineering Capabilities</h2>
+            <p class="font-body text-body-md text-on-surface-variant max-w-prose" data-design-text-token="body-md">Unified architectural drafting and electrical load estimation inside one browser workspace.</p>
+          </div>
+          <a href="../design-studio/DesignStudio.html" class="font-label text-label-md text-primary hover:underline inline-flex items-center gap-gutter-xs" data-design-text-token="label-md">
+            <span>Open Design Studio</span>
+            <span class="material-symbols-outlined text-[18px]" aria-hidden="true">arrow_forward</span>
+          </a>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-gutter-lg items-stretch">
+          <article data-component-id="card-elevated" data-component-type="card" data-component-variant="elevated" class="bg-surface-container border border-outline-variant rounded-lg p-gutter-xl flex flex-col gap-gutter-md h-full">
+            <header class="flex items-center justify-between gap-gutter-md">
+              <div class="w-10 h-10 rounded-md bg-primary-container border border-primary flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-primary text-[22px]" aria-hidden="true">floor_lamp</span>
+              </div>
+              <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">2D CAD</span>
+            </header>
+            <div class="flex flex-col gap-gutter-xs">
+              <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">Custom Floor Plans</h3>
+              <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">Configure exact site boundaries, wall thicknesses, and room zones with parametric doors and windows.</p>
+            </div>
+          </article>
+
+          <article data-component-id="card-elevated" data-component-type="card" data-component-variant="elevated" class="bg-surface-container border border-outline-variant rounded-lg p-gutter-xl flex flex-col gap-gutter-md h-full">
+            <header class="flex items-center justify-between gap-gutter-md">
+              <div class="w-10 h-10 rounded-md bg-primary-container border border-primary flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-primary text-[22px]" aria-hidden="true">deployed_code</span>
+              </div>
+              <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">3D BIM</span>
+            </header>
+            <div class="flex flex-col gap-gutter-xs">
+              <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">3D Home Designer</h3>
+              <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">Switch instantaneously between 2D blueprints and 3D Orbit or First-Person views under Daylight and Evening lighting.</p>
+            </div>
+          </article>
+
+          <article data-component-id="card-elevated" data-component-type="card" data-component-variant="elevated" class="bg-surface-container border border-outline-variant rounded-lg p-gutter-xl flex flex-col gap-gutter-md h-full">
+            <header class="flex items-center justify-between gap-gutter-md">
+              <div class="w-10 h-10 rounded-md bg-secondary-container border border-secondary flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-secondary text-[22px]" aria-hidden="true">electrical_services</span>
+              </div>
+              <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">LOAD</span>
+            </header>
+            <div class="flex flex-col gap-gutter-xs">
+              <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">Electrical Planner</h3>
+              <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">Place fans, LEDs, switchboards, 5A/16A sockets, ACs, and geysers with exact X/Y/Z mounting heights and circuits.</p>
+            </div>
+          </article>
+
+          <article data-component-id="card-elevated" data-component-type="card" data-component-variant="elevated" class="bg-surface-container border border-outline-variant rounded-lg p-gutter-xl flex flex-col gap-gutter-md h-full">
+            <header class="flex items-center justify-between gap-gutter-md">
+              <div class="w-10 h-10 rounded-md bg-secondary-container border border-secondary flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-secondary text-[22px]" aria-hidden="true">receipt_long</span>
+              </div>
+              <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">BOQ</span>
+            </header>
+            <div class="flex flex-col gap-gutter-xs">
+              <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">Smart BOQ</h3>
+              <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">Generate room-wise electrical schedules, total connected load in kW, and exportable PDF/Excel cost estimates.</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- How It Works -->
+      <section class="border-y border-outline-variant bg-surface-container-low">
+        <div class="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-section">
+          <div class="flex flex-col gap-gutter-xs mb-gutter-2xl">
+            <h2 class="font-headline text-headline-lg-mobile lg:text-headline-lg text-on-surface" data-design-text-token="headline-lg">How It Works</h2>
+            <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">From empty plot dimensions to an engineering-ready electrical schedule in three steps.</p>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-gutter-lg">
+            <div class="bg-surface-container border border-outline-variant rounded-lg p-gutter-xl flex flex-col gap-gutter-md">
+              <div class="flex items-center justify-between">
+                <span class="font-mono text-mono-md text-primary" data-design-text-token="mono-md">STEP 1</span>
+                <span class="material-symbols-outlined text-on-surface-variant text-[22px]" aria-hidden="true">square_foot</span>
+              </div>
+              <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">Configure Site &amp; Rooms</h3>
+              <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">Set site length, width, ceiling height, and wall thickness. Drop Living, Bedroom, Kitchen, and Balcony zones onto the 2D grid.</p>
+            </div>
+
+            <div class="bg-surface-container border border-outline-variant rounded-lg p-gutter-xl flex flex-col gap-gutter-md">
+              <div class="flex items-center justify-between">
+                <span class="font-mono text-mono-md text-primary" data-design-text-token="mono-md">STEP 2</span>
+                <span class="material-symbols-outlined text-on-surface-variant text-[22px]" aria-hidden="true">lightbulb</span>
+              </div>
+              <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">Place Electrical Points in 3D</h3>
+              <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">Drag fans, lights, switches, sockets, and heavy appliances. Fine-tune X/Y/Z coordinates, rotation, and circuit assignment.</p>
+            </div>
+
+            <div class="bg-surface-container border border-outline-variant rounded-lg p-gutter-xl flex flex-col gap-gutter-md">
+              <div class="flex items-center justify-between">
+                <span class="font-mono text-mono-md text-secondary" data-design-text-token="mono-md">STEP 3</span>
+                <span class="material-symbols-outlined text-on-surface-variant text-[22px]" aria-hidden="true">analytics</span>
+              </div>
+              <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">Export Load &amp; Smart BOQ</h3>
+              <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">Review room-wise breakdowns, total connected load, and itemized Bill of Quantities. Download PDF, Excel, or request a quote.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- My Saved Projects -->
+      <section class="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-section">
+        <div class="flex flex-col sm:flex-row sm:items-end justify-between gap-gutter-md mb-gutter-2xl">
+          <div class="flex flex-col gap-gutter-xs">
+            <h2 class="font-headline text-headline-lg-mobile lg:text-headline-lg text-on-surface" data-design-text-token="headline-lg">My Saved Projects</h2>
+            <p class="font-body text-body-md text-on-surface-variant" data-design-text-token="body-md">Resume active residential floor plans or inspect their engineering summaries.</p>
+          </div>
+          <a href="../design-studio/DesignStudio.html" class="inline-flex items-center gap-gutter-xs px-gutter-lg py-gutter-sm rounded-md bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-md transition-colors duration-state-change" data-design-text-token="label-md">
+            <span class="material-symbols-outlined text-[18px]" aria-hidden="true">add</span>
+            <span>New Project</span>
+          </a>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-gutter-lg items-stretch">
+          <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-surface-container border border-outline-variant rounded-lg overflow-hidden flex flex-col h-full">
+            <div class="aspect-video bg-surface-container-low border-b border-outline-variant overflow-hidden">
+              <img src="https://lh3.googleusercontent.com/aida/ALJJyrDSwEhzMlF0_OTxymbWK2mD4NqIVEz6qpjRpj_TUFTtvBGJU_CjB2dhoAWbUqTyXHO-cOD1zE11hbmHGx2d9JkwPcrNlDRp0nC3qOnAYJv1_7WKWsNV0vNx9aRD4ujbkxUMnXDHsg6ukWrOV-uIAVg39I51EgFnnl0n0Qb0STJzBBZQOJrpCRPHSFLah96DWvzCXsgZpYvdWAdEyFMZKny5t1k8KJQe_VoQR5ATYDOCYzdNdujuuXIo5ecOf6JI55MsPA" alt="3D isometric floor plan of Indiranagar 3BHK Residence" class="w-full h-full object-cover">
+            </div>
+            <div class="p-gutter-lg flex flex-col gap-gutter-sm flex-1">
+              <header class="flex items-start justify-between gap-gutter-sm">
+                <div>
+                  <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">Indiranagar 3BHK Residence</h3>
+                  <p class="font-mono text-mono-sm text-on-surface-variant tabular-nums" data-design-text-token="mono-sm">42 ft × 34 ft • 6.84 kW</p>
+                </div>
+                <span class="px-gutter-sm py-gutter-xs rounded-full bg-primary-container text-on-primary-container font-label text-label-sm shrink-0" data-design-text-token="label-sm">Active</span>
+              </header>
+              <p class="font-body text-body-sm text-on-surface-variant" data-design-text-token="body-sm">7 rooms, 48 electrical points, complete 3-phase circuit distribution.</p>
+            </div>
+            <footer class="px-gutter-lg py-gutter-md border-t border-outline-variant flex items-center justify-between gap-gutter-sm bg-surface-container-low">
+              <a href="../design-studio/DesignStudio.html" class="font-label text-label-md text-primary hover:underline" data-design-text-token="label-md">Open in Studio</a>
+              <a href="../project-summary/ProjectSummary.html" class="font-label text-label-md text-on-surface-variant hover:text-on-surface" data-design-text-token="label-md">View Summary</a>
+            </footer>
+          </article>
+
+          <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-surface-container border border-outline-variant rounded-lg overflow-hidden flex flex-col h-full">
+            <div class="aspect-video bg-surface-container-low border-b border-outline-variant overflow-hidden">
+              <img src="https://lh3.googleusercontent.com/aida/ALJJyrDzasTUKGDI4CvIB5FMRf85MtDzaH_78NgHs4zeOy-TnWrBmhGx2PMsS5CIfg0hhmj9Ia0DD2KCHuyJozD2LpP1aAzwszghK7oFZQPvZKavBSSB0jHir96FvRlNuu7GeG2XsT_Xp9hvChGmtBw6iLBuBGDfKHdt-3HerbvH0CBxwMUFWasYmXYpIUoyxs4ohD_zbnd9U3cE8XzV3QPkWJYnNC2jTT2gzUkv28ZjzrcMpmRJvw4i-k8YCHeA8lgu" alt="3D isometric floor plan of Bandra West 2BHK Suite" class="w-full h-full object-cover">
+            </div>
+            <div class="p-gutter-lg flex flex-col gap-gutter-sm flex-1">
+              <header class="flex items-start justify-between gap-gutter-sm">
+                <div>
+                  <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">Bandra West 2BHK Suite</h3>
+                  <p class="font-mono text-mono-sm text-on-surface-variant tabular-nums" data-design-text-token="mono-sm">36 ft × 28 ft • 4.65 kW</p>
+                </div>
+                <span class="px-gutter-sm py-gutter-xs rounded-full bg-surface-container-high text-on-surface-variant font-label text-label-sm shrink-0" data-design-text-token="label-sm">Saved</span>
+              </header>
+              <p class="font-body text-body-sm text-on-surface-variant" data-design-text-token="body-sm">5 rooms, 34 electrical points, cove strip lighting &amp; USB modular switches.</p>
+            </div>
+            <footer class="px-gutter-lg py-gutter-md border-t border-outline-variant flex items-center justify-between gap-gutter-sm bg-surface-container-low">
+              <a href="../design-studio/DesignStudio.html" class="font-label text-label-md text-primary hover:underline" data-design-text-token="label-md">Open in Studio</a>
+              <a href="../project-summary/ProjectSummary.html" class="font-label text-label-md text-on-surface-variant hover:text-on-surface" data-design-text-token="label-md">View Summary</a>
+            </footer>
+          </article>
+
+          <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-surface-container border border-outline-variant rounded-lg overflow-hidden flex flex-col h-full">
+            <div class="aspect-video bg-surface-container-low border-b border-outline-variant overflow-hidden">
+              <img src="https://lh3.googleusercontent.com/aida/ALJJyrCXnznX9aWqNNycH36An10qypoGb0eN0AdaaqXnrFzj_RuRs0qZtzty7zH9RBRMHkDop4aliMxFBUpXXNozIO9o4eLnjAWK1k_CYXTym5poZnzyojHXrA9UIBSt2XPDCxXYX0XbkmS8-9cK9ZDr8Oo9JeSxLUQmwgwThUvhFEvHdKIwH-HdHM0TD0HM6AU-vL6smP1XlSO4bU_oNjp4mEjxgQcsc0TmgCL0DSh81zMjWYWKFdUYoM6SXBZhAAV_" alt="3D isometric floor plan of Jubilee Hills 4BHK Villa" class="w-full h-full object-cover">
+            </div>
+            <div class="p-gutter-lg flex flex-col gap-gutter-sm flex-1">
+              <header class="flex items-start justify-between gap-gutter-sm">
+                <div>
+                  <h3 class="font-headline text-headline-sm text-on-surface" data-design-text-token="headline-sm">Jubilee Hills 4BHK Villa</h3>
+                  <p class="font-mono text-mono-sm text-on-surface-variant tabular-nums" data-design-text-token="mono-sm">55 ft × 44 ft • 11.40 kW</p>
+                </div>
+                <span class="px-gutter-sm py-gutter-xs rounded-full bg-secondary-container text-on-secondary-container font-label text-label-sm shrink-0" data-design-text-token="label-sm">BOQ Ready</span>
+              </header>
+              <p class="font-body text-body-sm text-on-surface-variant" data-design-text-token="body-sm">2 floors, 11 rooms, 76 electrical points, HVAC &amp; geyser sub-circuits.</p>
+            </div>
+            <footer class="px-gutter-lg py-gutter-md border-t border-outline-variant flex items-center justify-between gap-gutter-sm bg-surface-container-low">
+              <a href="../design-studio/DesignStudio.html" class="font-label text-label-md text-primary hover:underline" data-design-text-token="label-md">Open in Studio</a>
+              <a href="../project-summary/ProjectSummary.html" class="font-label text-label-md text-on-surface-variant hover:text-on-surface" data-design-text-token="label-md">View Summary</a>
+            </footer>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-surface-container border-t border-outline-variant">
+      <div class="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-gutter-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-gutter-lg">
+        <div class="flex flex-col gap-gutter-xs">
+          <span class="font-headline text-title-sm text-on-surface uppercase tracking-wide" data-design-text-token="title-sm">ANANYA SPACE DESIGNER</span>
+          <span class="font-mono text-mono-sm text-on-surface-variant uppercase" data-design-text-token="mono-sm">DESIGN YOUR SPACE. POWER YOUR WORLD.</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-gutter-xl">
+          <a href="../home/Home.html" class="font-label text-label-md text-on-surface-variant hover:text-primary" data-design-text-token="label-md">Home</a>
+          <a href="../design-studio/DesignStudio.html" class="font-label text-label-md text-on-surface-variant hover:text-primary" data-design-text-token="label-md">Design Studio</a>
+          <a href="../project-summary/ProjectSummary.html" class="font-label text-label-md text-on-surface-variant hover:text-primary" data-design-text-token="label-md">Project Summary</a>
+        </div>
+        <span class="font-mono text-mono-sm text-on-surface-variant" data-design-text-token="mono-sm">IS 732 / NBC Residential Electrical Standard</span>
+      </div>
+    </footer>
+
+  </div>
+
+
+</body></html>
