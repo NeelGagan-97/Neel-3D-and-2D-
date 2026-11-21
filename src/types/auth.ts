@@ -22,6 +22,15 @@ export interface EmployeeProfile {
   approved_by: string | null;
   created_at: string;
   updated_at: string;
+  /** Read-only timestamp joined from auth.users when returned by Admin RPCs. */
+  email_confirmed_at?: string | null;
+}
+
+export interface ProfileRecoveryInput {
+  fullName?: string;
+  employeeId?: string;
+  username?: string;
+  mobile?: string;
 }
 
 export interface EmployeeRegistrationInput {

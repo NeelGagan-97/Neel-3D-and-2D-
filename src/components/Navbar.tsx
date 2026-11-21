@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { useRouteNavigation } from '../context/RouteNavigationContext';
 import { AppRoute } from '../types/auth';
 import { ScreenId } from '../types/design';
-import { resolvePostLoginRoute } from '../utils/authValidation';
+import { canViewAdminNavigation, resolvePostLoginRoute } from '../utils/authValidation';
 
 interface NavbarProps {
   activeScreen: ScreenId;
@@ -22,7 +22,14 @@ export const Navbar: React.FC<NavbarProps> = ({
   compact = false,
   rightSlot,
 }) => {
-  const { isAuthenticated, isApproved, isAdmin, profile, signOut } = useAuth();
+  const { isAuthenticated, isApproved, authLoading, profileLoading, user, profile, signOut } =
+    useAuth();
+  const showAdminNav = canViewAdminNavigation({
+    isAuthenticated,
+    isLoading: authLoading || profileLoading,
+    authUserId: user?.id ?? null,
+    profile,
+  });
   const routeCtx = useRouteNavigation();
 
   const currentRoute: AppRoute = activeRoute ?? routeCtx?.activeRoute ?? activeScreen;
@@ -47,7 +54,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     goRoute('login');
   };
 
-  const accountRoute: AppRoute = resolvePostLoginRoute(profile);
+  const accountRoute: AppRoute = resolvePostLoginRoute(profile, user?.id ?? null);
 
   return (
     <header className="sticky top-0 z-30 bg-surface-container border-b border-outline-variant no-print">
@@ -109,7 +116,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             );
           })}
 
-          {isAuthenticated && isAdmin && (
+          {showAdminNav && (
             <button
               type="button"
               aria-current={currentRoute === 'admin' ? 'page' : undefined}
@@ -124,7 +131,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          {isAuthenticated && isApproved && !isAdmin && (
+          {isAuthenticated && isApproved && !showAdminNav && (
             <button
               type="button"
               aria-current={currentRoute === 'employee-dashboard' ? 'page' : undefined}
@@ -150,7 +157,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 className="hidden sm:inline-flex items-center gap-1.5 px-gutter-sm py-gutter-xs rounded-sm border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-outline font-label text-label-sm cursor-pointer whitespace-nowrap max-w-[170px]"
               >
                 <span className="material-symbols-outlined text-[16px] text-primary shrink-0" aria-hidden="true">
-                  {isAdmin ? 'admin_panel_settings' : 'account_circle'}
+                  {showAdminNav ? 'admin_panel_settings' : 'account_circle'}
                 </span>
                 <span className="truncate">{profile?.full_name ?? 'Account'}</span>
               </button>

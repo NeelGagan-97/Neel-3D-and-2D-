@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { computeProjectMetrics } from '../../data/presets';
 import { AppRoute } from '../../types/auth';
 import { ProjectData, ScreenId, ViewMode } from '../../types/design';
+import { canViewAdminNavigation } from '../../utils/authValidation';
 import { downloadProjectJson } from '../../utils/exporters';
 import { Navbar } from '../Navbar';
 import { ProjectCreationInput, ProjectCreationModal } from '../ProjectCreationModal';
@@ -39,7 +40,13 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
   onOpenProject,
   onCreateProject,
 }) => {
-  const { profile, isAdmin, signOut } = useAuth();
+  const { isAuthenticated, authLoading, profileLoading, user, profile, signOut } = useAuth();
+  const showAdminNav = canViewAdminNavigation({
+    isAuthenticated,
+    isLoading: authLoading || profileLoading,
+    authUserId: user?.id ?? null,
+    profile,
+  });
   const [showNewModal, setShowNewModal] = useState(false);
 
   const handleSignOut = async () => {
@@ -125,7 +132,7 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
               </span>
               <span>3D Design Studio</span>
             </button>
-            {isAdmin && (
+            {showAdminNav && (
               <button
                 type="button"
                 onClick={() => onNavigateRoute('admin')}

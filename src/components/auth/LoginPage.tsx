@@ -1,7 +1,13 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { getSupabaseConfigStatus } from '../../lib/supabase';
 import { AppRoute } from '../../types/auth';
-import { resolvePostLoginRoute, validateLoginInput } from '../../utils/authValidation';
+import {
+  isApprovedAdmin,
+  isApprovedUser,
+  resolvePostLoginRoute,
+  validateLoginInput,
+} from '../../utils/authValidation';
 
 interface LoginPageProps {
   onNavigateRoute: (route: AppRoute) => void;
@@ -57,13 +63,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       }
 
       const profile = res.data.profile;
-      const defaultDestination = resolvePostLoginRoute(profile);
+      const authUserId = res.data.user.id;
+      const defaultDestination = resolvePostLoginRoute(profile, authUserId);
 
       // Only honor intendedRoute if the user is APPROVED and authorized for it
       if (
         intendedRoute &&
-        profile?.account_status === 'APPROVED' &&
-        (intendedRoute !== 'admin' || profile.role === 'ADMIN') &&
+        isApprovedUser(profile, authUserId) &&
+        (intendedRoute !== 'admin' || isApprovedAdmin(profile, authUserId)) &&
         (intendedRoute === 'home' ||
           intendedRoute === 'studio' ||
           intendedRoute === 'summary' ||
@@ -225,7 +232,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             {!isConfigured && (
               <div
                 role="alert"
-                className="mb-5 p-3.5 rounded-lg bg-amber-500/10 border border-amber-400/35 text-amber-100 text-xs flex flex-col gap-1"
+                className="mb-5 p-3.5 rounded-lg bg-amber-500/10 border border-amber-400/35 text-amber-100 text-xs flex flex-col gap-1.5"
               >
                 <div className="flex items-center gap-1.5 font-semibold text-amber-300">
                   <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
@@ -234,9 +241,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   <span>Supabase Configuration Required</span>
                 </div>
                 <p className="text-slate-300 leading-relaxed">
-                  Set <code className="font-mono text-white">VITE_SUPABASE_URL</code> and{' '}
-                  <code className="font-mono text-white">VITE_SUPABASE_ANON_KEY</code> (or{' '}
-                  <code className="font-mono text-white">VITE_SUPABASE_PUBLISHABLE_KEY</code>) in your environment settings to connect live authentication.
+                  {getSupabaseConfigStatus().validationError ?? (
+                    <>
+                      Set <code className="font-mono text-white">VITE_SUPABASE_URL</code> and{' '}
+                      <code className="font-mono text-white">VITE_SUPABASE_ANON_KEY</code> (or{' '}
+                      <code className="font-mono text-white">VITE_SUPABASE_PUBLISHABLE_KEY</code>) in
+                      your build environment settings and rebuild the frontend to connect live
+                      authentication.
+                    </>
+                  )}
                 </p>
               </div>
             )}

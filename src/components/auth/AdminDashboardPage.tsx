@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import {
+  adminGetEmployeeProfile,
   adminUpdateEmployeeStatus,
   fetchAllEmployeeProfiles,
 } from '../../services/authService';
 import { AccountStatus, AppRoute, EmployeeProfile } from '../../types/auth';
 import { ScreenId, ViewMode } from '../../types/design';
-import { computeAdminStats } from '../../utils/authValidation';
+import { computeAdminStats, isApprovedAdmin } from '../../utils/authValidation';
 import { Navbar } from '../Navbar';
 
 interface AdminDashboardPageProps {
@@ -57,7 +58,22 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
   onNavigate,
   onNavigateRoute,
 }) => {
-  const { profile: currentAdmin, signOut } = useAuth();
+  const {
+    isAuthenticated,
+    isAdmin,
+    authLoading,
+    profileLoading,
+    user,
+    profile: currentAdmin,
+    signOut,
+  } = useAuth();
+  const isVerifiedAdmin =
+    isAuthenticated &&
+    !authLoading &&
+    !profileLoading &&
+    isAdmin &&
+    isApprovedAdmin(currentAdmin, user?.id ?? null);
+
   const [employees, setEmployees] = useState<EmployeeProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +85,11 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
   const [actionLoading, setActionLoading] = useState(false);
 
   const loadEmployees = useCallback(async () => {
+    if (!isVerifiedAdmin || !currentAdmin) {
+      setEmployees([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     const res = await fetchAllEmployeeProfiles(currentAdmin);
@@ -78,29 +99,48 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
       setError(res.error ?? 'Failed to load employee records.');
     }
     setLoading(false);
-  }, [currentAdmin]);
+  }, [isVerifiedAdmin, currentAdmin]);
 
   useEffect(() => {
+    if (!isVerifiedAdmin) return;
     void loadEmployees();
-  }, [loadEmployees]);
+  }, [isVerifiedAdmin, loadEmployees]);
+
+  const handleOpenDetails = useCallback(
+    async (emp: EmployeeProfile) => {
+      if (!isVerifiedAdmin || !currentAdmin) return;
+      setSelectedEmployee(emp);
+      const res = await adminGetEmployeeProfile(emp.id, currentAdmin);
+      if (res.ok && res.data) {
+        setSelectedEmployee((prev) => (prev?.id === emp.id ? res.data! : prev));
+      }
+    },
+    [isVerifiedAdmin, currentAdmin]
+  );
 
   const stats = useMemo(() => computeAdminStats(employees), [employees]);
 
   const filteredEmployees = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return employees.filter((emp) => {
-      if (statusFilter !== 'ALL' && emp.account_status !== statusFilter) {
-        return false;
-      }
-      if (!q) return true;
-      return (
-        emp.full_name.toLowerCase().includes(q) ||
-        emp.employee_id.toLowerCase().includes(q) ||
-        emp.username.toLowerCase().includes(q) ||
-        emp.email.toLowerCase().includes(q) ||
-        (emp.mobile ?? '').toLowerCase().includes(q)
-      );
-    });
+    return employees
+      .filter((emp) => {
+        if (statusFilter !== 'ALL' && emp.account_status !== statusFilter) {
+          return false;
+        }
+        if (!q) return true;
+        return (
+          emp.full_name.toLowerCase().includes(q) ||
+          emp.employee_id.toLowerCase().includes(q) ||
+          emp.username.toLowerCase().includes(q) ||
+          emp.email.toLowerCase().includes(q) ||
+          (emp.mobile ?? '').toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => {
+        if (a.account_status === 'PENDING' && b.account_status !== 'PENDING') return -1;
+        if (b.account_status === 'PENDING' && a.account_status !== 'PENDING') return 1;
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
   }, [employees, searchQuery, statusFilter]);
 
   const openConfirmation = (employee: EmployeeProfile, action: AdminActionType) => {
@@ -171,6 +211,10 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
     { id: 'REJECTED', label: 'Rejected', count: stats.rejected },
     { id: 'SUSPENDED', label: 'Suspended', count: stats.suspended },
   ];
+
+  if (!isVerifiedAdmin) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-surface text-on-surface">
@@ -328,6 +372,33 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
           </div>
         )}
 
+        {/* Pending Registration Requests Highlight */}
+        {!loading && stats.pending > 0 && (
+          <div
+            role="status"
+            className="p-gutter-md rounded-lg bg-warning/10 border border-warning/40 text-on-surface text-body-sm flex flex-wrap items-center justify-between gap-gutter-md"
+          >
+            <div className="flex items-center gap-gutter-sm">
+              <span className="material-symbols-outlined text-warning text-[20px]" aria-hidden="true">
+                pending_actions
+              </span>
+              <span>
+                <strong className="font-semibold">
+                  {stats.pending} Pending Registration {stats.pending === 1 ? 'Request' : 'Requests'}
+                </strong>{' '}
+                awaiting administrator review.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setStatusFilter(statusFilter === 'PENDING' ? 'ALL' : 'PENDING')}
+              className="px-gutter-md py-1 rounded-sm border border-warning text-warning hover:bg-warning/15 font-label text-label-sm cursor-pointer whitespace-nowrap"
+            >
+              {statusFilter === 'PENDING' ? 'Show All Employees' : `Review Pending (${stats.pending})`}
+            </button>
+          </div>
+        )}
+
         {/* Filter & Search Bar */}
         <section className="flex flex-col lg:flex-row lg:items-center justify-between gap-gutter-md">
           <div
@@ -378,7 +449,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
         {/* Employee Management Table */}
         <section className="bg-surface-container border border-outline-variant rounded-lg overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse min-w-[980px]">
+            <table className="w-full text-left border-collapse min-w-[1080px]">
               <thead>
                 <tr className="border-b border-outline-variant bg-surface-container-low font-label text-label-sm text-on-surface-variant">
                   <th className="py-gutter-sm px-gutter-md">Full Name</th>
@@ -387,6 +458,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
                   <th className="py-gutter-sm px-gutter-sm">Email</th>
                   <th className="py-gutter-sm px-gutter-sm">Mobile</th>
                   <th className="py-gutter-sm px-gutter-sm">Registered</th>
+                  <th className="py-gutter-sm px-gutter-sm">Email Status</th>
                   <th className="py-gutter-sm px-gutter-sm">Account Status</th>
                   <th className="py-gutter-sm px-gutter-sm">Role</th>
                   <th className="py-gutter-sm px-gutter-md text-right">Actions</th>
@@ -396,7 +468,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
                 {loading ? (
                   Array.from({ length: 4 }).map((_, i) => (
                     <tr key={i}>
-                      <td colSpan={9} className="py-gutter-md px-gutter-md">
+                      <td colSpan={10} className="py-gutter-md px-gutter-md">
                         <div className="h-5 rounded bg-surface-container-high animate-pulse" />
                       </td>
                     </tr>
@@ -404,7 +476,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
                 ) : filteredEmployees.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={9}
+                      colSpan={10}
                       className="py-gutter-2xl px-gutter-lg text-center text-on-surface-variant"
                     >
                       {employees.length === 0
@@ -440,6 +512,15 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
                         <td className="py-gutter-sm px-gutter-sm font-mono tabular-nums text-on-surface-variant whitespace-nowrap">
                           {formatDateTime(emp.created_at)}
                         </td>
+                        <td className="py-gutter-sm px-gutter-sm font-mono text-mono-sm whitespace-nowrap">
+                          {emp.email_confirmed_at === undefined ? (
+                            <span className="text-on-surface-variant">—</span>
+                          ) : emp.email_confirmed_at ? (
+                            <span className="text-success">Confirmed</span>
+                          ) : (
+                            <span className="text-warning">Unconfirmed</span>
+                          )}
+                        </td>
                         <td
                           className={`py-gutter-sm px-gutter-sm font-mono text-mono-sm font-semibold whitespace-nowrap ${statusTextClass(
                             emp.account_status
@@ -454,7 +535,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
                           <div className="inline-flex items-center justify-end gap-1.5">
                             <button
                               type="button"
-                              onClick={() => setSelectedEmployee(emp)}
+                              onClick={() => void handleOpenDetails(emp)}
                               className="px-2.5 py-1 rounded-sm border border-outline text-on-surface-variant hover:text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
                             >
                               Details
@@ -580,6 +661,16 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
                 <dt className="text-on-surface-variant">Registered On</dt>
                 <dd className="font-mono text-on-surface tabular-nums mt-0.5">
                   {formatFullTimestamp(selectedEmployee.created_at)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-on-surface-variant">Email Confirmation</dt>
+                <dd className="font-mono text-on-surface tabular-nums mt-0.5">
+                  {selectedEmployee.email_confirmed_at === undefined
+                    ? '—'
+                    : selectedEmployee.email_confirmed_at
+                      ? `Confirmed (${formatFullTimestamp(selectedEmployee.email_confirmed_at)})`
+                      : 'Unconfirmed'}
                 </dd>
               </div>
               <div>

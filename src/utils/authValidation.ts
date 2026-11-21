@@ -155,24 +155,79 @@ export function validateResetPasswordInput(
   };
 }
 
-export function isApprovedAdmin(profile: EmployeeProfile | null): boolean {
-  return Boolean(profile && profile.role === 'ADMIN' && profile.account_status === 'APPROVED');
+/**
+ * Grants administrator access ONLY when:
+ *   1. profile exists,
+ *   2. profile.role === 'ADMIN' AND profile.account_status === 'APPROVED', and
+ *   3. when authUserId is supplied, profile.auth_user_id strictly matches authUserId.
+ * Never trusts email, username, localStorage, or hardcoded roles.
+ */
+export function isApprovedAdmin(
+  profile: EmployeeProfile | null,
+  authUserId?: string | null
+): boolean {
+  if (!profile) return false;
+  if (authUserId !== undefined) {
+    if (!authUserId || profile.auth_user_id !== authUserId) {
+      return false;
+    }
+  }
+  return profile.role === 'ADMIN' && profile.account_status === 'APPROVED';
 }
 
-export function isApprovedUser(profile: EmployeeProfile | null): boolean {
-  return Boolean(
-    profile &&
-      (profile.role === 'ADMIN' || profile.role === 'EMPLOYEE') &&
-      profile.account_status === 'APPROVED'
+export function isApprovedUser(
+  profile: EmployeeProfile | null,
+  authUserId?: string | null
+): boolean {
+  if (!profile) return false;
+  if (authUserId !== undefined) {
+    if (!authUserId || profile.auth_user_id !== authUserId) {
+      return false;
+    }
+  }
+  return (
+    (profile.role === 'ADMIN' || profile.role === 'EMPLOYEE') &&
+    profile.account_status === 'APPROVED'
   );
 }
 
 /**
- * Determines the authoritative landing route for an authenticated user based on
- * their employee_profiles record. Never defaults to ADMIN when profile is missing.
+ * Authoritative predicate for rendering Admin navigation links, buttons, or tabs.
+ * Always returns false while loading, when unauthenticated, when identity does not match,
+ * or for any non-ADMIN / non-APPROVED account.
  */
-export function resolvePostLoginRoute(profile: EmployeeProfile | null): AppRoute {
-  if (!profile) return 'profile-missing';
+export function canViewAdminNavigation(ctx: {
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  authUserId?: string | null;
+  profile: EmployeeProfile | null;
+}): boolean {
+  if (!ctx.isAuthenticated || ctx.isLoading) {
+    return false;
+  }
+  if (!ctx.authUserId) {
+    return false;
+  }
+  return isApprovedAdmin(ctx.profile, ctx.authUserId);
+}
+
+/**
+ * Determines the authoritative landing route for an authenticated user based on
+ * their employee_profiles record. Never defaults to ADMIN when profile is missing
+ * or when auth_user_id does not match the authenticated session user.
+ */
+export function resolvePostLoginRoute(
+  profile: EmployeeProfile | null,
+  authUserId?: string | null,
+  options?: { emailVerified?: boolean }
+): AppRoute {
+  if (!profile) {
+    return options?.emailVerified ? 'pending-approval' : 'profile-missing';
+  }
+
+  if (authUserId !== undefined && (!authUserId || profile.auth_user_id !== authUserId)) {
+    return 'profile-missing';
+  }
 
   if (profile.account_status === 'REJECTED') {
     return 'account-rejected';
@@ -197,17 +252,21 @@ export function resolvePostLoginRoute(profile: EmployeeProfile | null): AppRoute
 export interface RouteAccessContext {
   isAuthenticated: boolean;
   isLoading: boolean;
+  authUserId?: string | null;
   profile: EmployeeProfile | null;
   profileError?: string | null;
   isRecoveryMode?: boolean;
+  emailVerified?: boolean;
 }
 
 export interface RouteAccessDecision {
   allowed: boolean;
   redirectTo?: AppRoute;
   reason?:
+    | 'loading'
     | 'unauthenticated'
     | 'unauthorized-admin'
+    | 'identity-mismatch'
     | 'pending'
     | 'rejected'
     | 'suspended'
@@ -231,14 +290,18 @@ const PROTECTED_DESIGN_ROUTES = new Set<AppRoute>([
 ]);
 
 /**
- * Evaluates whether the current user may view a given route, including direct URL visits.
+ * Evaluates whether the current user may view a given route, including direct URL visits
+ * and browser refreshes. Never grants access to /admin or protected routes while loading.
  */
 export function evaluateRouteAccess(
   route: AppRoute,
   ctx: RouteAccessContext
 ): RouteAccessDecision {
   if (ctx.isLoading) {
-    return { allowed: true };
+    if (PUBLIC_ROUTES.has(route)) {
+      return { allowed: true };
+    }
+    return { allowed: false, reason: 'loading' };
   }
 
   // Always allow password reset page when in recovery mode or unauthenticated recovery link
@@ -259,15 +322,20 @@ export function evaluateRouteAccess(
     if (ctx.isAuthenticated && !ctx.isRecoveryMode) {
       return {
         allowed: false,
-        redirectTo: resolvePostLoginRoute(ctx.profile),
+        redirectTo: resolvePostLoginRoute(ctx.profile, ctx.authUserId, {
+          emailVerified: ctx.emailVerified,
+        }),
         reason: 'already-authenticated',
       };
     }
     return { allowed: true };
   }
 
-  // Every other route requires an authenticated session
+  // Allow viewing /pending-approval immediately after email verification even if no session was minted
   if (!ctx.isAuthenticated) {
+    if (route === 'pending-approval' && ctx.emailVerified) {
+      return { allowed: true };
+    }
     if (!PUBLIC_ROUTES.has(route)) {
       return {
         allowed: false,
@@ -278,8 +346,20 @@ export function evaluateRouteAccess(
     return { allowed: true };
   }
 
-  // Authenticated user genuinely without an employee_profiles row (no DB/RLS error)
+  // Authenticated user without an employee_profiles row yet
   if (!ctx.profile) {
+    // After email verification, always present Pending Approval rather than "Employee Profile Not Found"
+    // while keeping Design Studio, Employee Dashboard, and Admin strictly locked.
+    if (ctx.emailVerified) {
+      if (route === 'pending-approval') {
+        return { allowed: true };
+      }
+      return {
+        allowed: false,
+        redirectTo: 'pending-approval',
+        reason: 'pending',
+      };
+    }
     if (route === 'profile-missing') {
       return { allowed: true };
     }
@@ -287,6 +367,18 @@ export function evaluateRouteAccess(
       allowed: false,
       redirectTo: 'profile-missing',
       reason: 'missing-profile',
+    };
+  }
+
+  // Verify the authenticated session user's UUID strictly matches profile.auth_user_id
+  if (ctx.authUserId !== undefined && (!ctx.authUserId || ctx.profile.auth_user_id !== ctx.authUserId)) {
+    if (route === 'profile-missing') {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      redirectTo: 'profile-missing',
+      reason: 'identity-mismatch',
     };
   }
 
@@ -313,13 +405,13 @@ export function evaluateRouteAccess(
   ) {
     return {
       allowed: false,
-      redirectTo: resolvePostLoginRoute(ctx.profile),
+      redirectTo: resolvePostLoginRoute(ctx.profile, ctx.authUserId),
     };
   }
 
-  // Admin dashboard strictly requires ADMIN + APPROVED
+  // Admin dashboard strictly requires ADMIN + APPROVED + verified auth_user_id match
   if (route === 'admin') {
-    if (isApprovedAdmin(ctx.profile)) {
+    if (isApprovedAdmin(ctx.profile, ctx.authUserId)) {
       return { allowed: true };
     }
     return {
@@ -331,12 +423,12 @@ export function evaluateRouteAccess(
 
   // Protected Design Studio, Summary, and Employee Dashboard require APPROVED status
   if (PROTECTED_DESIGN_ROUTES.has(route)) {
-    if (isApprovedUser(ctx.profile)) {
+    if (isApprovedUser(ctx.profile, ctx.authUserId)) {
       return { allowed: true };
     }
     return {
       allowed: false,
-      redirectTo: resolvePostLoginRoute(ctx.profile),
+      redirectTo: resolvePostLoginRoute(ctx.profile, ctx.authUserId),
       reason: 'missing-profile',
     };
   }

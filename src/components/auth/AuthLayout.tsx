@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { getSupabaseConfigStatus } from '../../lib/supabase';
 import { AppRoute } from '../../types/auth';
 
 interface AuthLayoutProps {
@@ -18,11 +19,13 @@ const DEFAULT_AUTH_BACKGROUND_IMAGE =
 export const AuthLayout: React.FC<AuthLayoutProps> = ({
   title,
   onNavigateRoute,
+  isConfigured = true,
   maxWidthClass = 'max-w-lg',
   backgroundImageSrc = DEFAULT_AUTH_BACKGROUND_IMAGE,
   children,
 }) => {
   const { isAuthenticated, isApproved, signOut } = useAuth();
+  const configStatus = getSupabaseConfigStatus();
   const backLabel = isAuthenticated && isApproved ? 'Back to Home' : 'Back to Sign In';
 
   const handleBackAction = async () => {
@@ -96,6 +99,24 @@ export const AuthLayout: React.FC<AuthLayoutProps> = ({
               {title}
             </h1>
           </div>
+
+          {!isConfigured && (
+            <div
+              role="alert"
+              className="mb-gutter-lg p-gutter-md rounded-md bg-warning/15 border border-warning text-on-surface text-body-sm flex flex-col gap-gutter-xs"
+            >
+              <div className="flex items-center gap-gutter-xs font-label text-label-md text-warning">
+                <span className="material-symbols-outlined text-[17px]" aria-hidden="true">
+                  settings_alert
+                </span>
+                <span>Supabase Configuration Required</span>
+              </div>
+              <p className="text-on-surface-variant">
+                {configStatus.validationError ??
+                  'Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY (or VITE_SUPABASE_PUBLISHABLE_KEY) in your build environment and rebuild the frontend.'}
+              </p>
+            </div>
+          )}
 
           {children}
         </div>

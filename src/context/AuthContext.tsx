@@ -10,7 +10,10 @@ import React, {
 import type { Session, User } from '@supabase/supabase-js';
 import { isSupabaseConfigured, supabase } from '../lib/supabase';
 import {
+  AUTH_TIMEOUT_MS,
   AuthActionResult,
+  AuthTimeoutError,
+  ensureOwnEmployeeProfile,
   fetchEmployeeProfile,
   LoginResult,
   registerEmployee,
@@ -19,13 +22,22 @@ import {
   signInWithEmail,
   signOutUser,
   updateUserPassword,
+  withTimeout,
 } from '../services/authService';
-import { EmployeeProfile, EmployeeRegistrationInput, ProfileErrorKind } from '../types/auth';
+import {
+  EmployeeProfile,
+  EmployeeRegistrationInput,
+  ProfileErrorKind,
+  ProfileRecoveryInput,
+} from '../types/auth';
 import { isApprovedAdmin, isApprovedUser } from '../utils/authValidation';
 import {
   clearAuthUrlParams,
+  isEmailConfirmationUrl,
   isRecoveryUrl,
+  parseAuthCallbackCode,
   parseAuthErrorFromUrl,
+  parseEmailConfirmationTokenHash,
   parseRecoveryCode,
   parseRecoveryTokenHash,
 } from '../utils/router';
@@ -37,10 +49,13 @@ interface AuthContextValue {
   profile: EmployeeProfile | null;
   authLoading: boolean;
   profileLoading: boolean;
+  authError: string | null;
+  authErrorKind: ProfileErrorKind | null;
   profileError: string | null;
   profileErrorKind: ProfileErrorKind | null;
   isRecoveryMode: boolean;
   recoveryError: string | null;
+  emailVerified: boolean;
   sessionNotice: string | null;
   isAuthenticated: boolean;
   isApproved: boolean;
@@ -49,11 +64,16 @@ interface AuthContextValue {
   register: (input: EmployeeRegistrationInput) => Promise<AuthActionResult<RegisterResult>>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<EmployeeProfile | null>;
+  verifyProfile: () => Promise<AuthActionResult<EmployeeProfile | null>>;
+  recoverProfile: (
+    input?: ProfileRecoveryInput
+  ) => Promise<AuthActionResult<EmployeeProfile | null>>;
   sendPasswordReset: (email: string) => Promise<AuthActionResult>;
   resetPassword: (password: string, confirmPassword: string) => Promise<AuthActionResult>;
   completePasswordReset: () => Promise<void>;
   clearSessionNotice: () => void;
   clearRecoveryError: () => void;
+  clearEmailVerified: () => void;
   exitRecoveryMode: () => void;
 }
 
@@ -70,9 +90,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<EmployeeProfile | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(isSupabaseConfigured);
   const [profileLoading, setProfileLoading] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authErrorKind, setAuthErrorKind] = useState<ProfileErrorKind | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileErrorKind, setProfileErrorKind] = useState<ProfileErrorKind | null>(null);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const [emailVerified, setEmailVerified] = useState<boolean>(false);
   const [isRecoveryMode, setIsRecoveryMode] = useState<boolean>(() =>
     typeof window !== 'undefined'
       ? isRecoveryUrl(
@@ -82,11 +105,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         )
       : false
   );
-  const [recoveryError, setRecoveryError] = useState<string | null>(() =>
-    typeof window !== 'undefined'
-      ? parseAuthErrorFromUrl(window.location.search, window.location.hash)
-      : null
-  );
+  const [recoveryError, setRecoveryError] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    if (
+      isEmailConfirmationUrl(
+        window.location.search,
+        window.location.hash,
+        window.location.pathname
+      )
+    ) {
+      return null;
+    }
+    return parseAuthErrorFromUrl(window.location.search, window.location.hash, 'recovery');
+  });
 
   // Deduplication refs to prevent redundant profile queries and re-subscriptions
   const loadedUserIdRef = useRef<string | null>(null);
@@ -101,14 +132,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signingInRef = useRef<boolean>(false);
   const isRecoveryModeRef = useRef<boolean>(isRecoveryMode);
   const recoveryExchangeAttemptedRef = useRef<boolean>(false);
+  const emailConfirmationAttemptedRef = useRef<boolean>(false);
 
   profileRef.current = profile;
   profileErrorRef.current = profileError;
   isRecoveryModeRef.current = isRecoveryMode;
 
   const loadProfileForUser = useCallback(
-    async (userId: string, force = false): Promise<EmployeeProfile | null> => {
+    async (
+      userId: string,
+      force = false,
+      ensureIfMissing = false
+    ): Promise<EmployeeProfile | null> => {
       if (!force && loadedUserIdRef.current === userId && !profileErrorRef.current) {
+        setProfileLoading(false);
         return profileRef.current;
       }
 
@@ -123,13 +160,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const promise = (async () => {
         const res = await fetchEmployeeProfile(userId);
         if (res.ok) {
+          let verifiedProfile =
+            res.data && res.data.auth_user_id === userId ? res.data : null;
+
+          if (!verifiedProfile && ensureIfMissing) {
+            const ensured = await ensureOwnEmployeeProfile();
+            if (!ensured.ok) {
+              loadedUserIdRef.current = null;
+              profileRef.current = null;
+              profileErrorRef.current =
+                ensured.error ?? 'Unable to provision your employee profile.';
+              setProfile(null);
+              setProfileError(ensured.error ?? 'Unable to provision your employee profile.');
+              setProfileErrorKind(ensured.errorKind ?? 'database');
+              return null;
+            }
+            if (ensured.data && ensured.data.auth_user_id === userId) {
+              verifiedProfile = ensured.data;
+            }
+          }
+
           loadedUserIdRef.current = userId;
-          profileRef.current = res.data ?? null;
+          profileRef.current = verifiedProfile;
           profileErrorRef.current = null;
-          setProfile(res.data ?? null);
+          setProfile(verifiedProfile);
           setProfileError(null);
           setProfileErrorKind(null);
-          return res.data ?? null;
+          return verifiedProfile;
         }
         loadedUserIdRef.current = null;
         profileRef.current = null;
@@ -197,6 +254,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setProfileErrorKind(null);
         setProfileLoading(false);
         setIsRecoveryMode(false);
+        setEmailVerified(false);
         if (wasLoggedIn && !wasManual) {
           setSessionNotice('Your session has expired. Please sign in again.');
         }
@@ -240,15 +298,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (nextSession?.user) {
         hadActiveSessionRef.current = true;
+        // Let initSession() handle INITIAL_SESSION so it never races or leaves profileLoading stuck.
+        if (event === 'INITIAL_SESSION') {
+          return;
+        }
         // Skip profile fetch during password recovery.
-        // Mark profileLoading synchronously so route guards never flash 'profile-missing' before the profile fetch finishes.
-        if (!isRecoveryModeRef.current && loadedUserIdRef.current !== nextSession.user.id) {
-          setProfileLoading(true);
+        const shouldReloadProfile =
+          !isRecoveryModeRef.current &&
+          (loadedUserIdRef.current !== nextSession.user.id ||
+            (event === 'TOKEN_REFRESHED' && Boolean(profileErrorRef.current)));
+        if (shouldReloadProfile) {
           // When handleSignIn is actively running, let handleSignIn complete its authoritative profile query
           if (!signingInRef.current) {
+            setProfileLoading(true);
             const uid = nextSession.user.id;
+            const forceReload = event === 'TOKEN_REFRESHED';
+            const meta = nextSession.user.user_metadata as Record<string, unknown> | undefined;
+            const shouldEnsure = Boolean(
+              (typeof meta?.full_name === 'string' && meta.full_name.trim()) ||
+                (typeof meta?.employee_id === 'string' && meta.employee_id.trim()) ||
+                (typeof meta?.username === 'string' && meta.username.trim())
+            );
             window.setTimeout(() => {
-              if (isMounted) void loadProfileForUser(uid);
+              if (isMounted) void loadProfileForUser(uid, forceReload, shouldEnsure);
             }, 0);
           }
         }
@@ -267,13 +339,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const urlHash = typeof window !== 'undefined' ? window.location.hash : '';
         const urlPath = typeof window !== 'undefined' ? window.location.pathname : '';
         const lookedLikeRecoveryUrl = isRecoveryUrl(urlSearch, urlHash, urlPath);
+        const lookedLikeEmailConfirmation = isEmailConfirmationUrl(urlSearch, urlHash, urlPath);
 
-        const urlError = parseAuthErrorFromUrl(urlSearch, urlHash);
+        const urlError = parseAuthErrorFromUrl(
+          urlSearch,
+          urlHash,
+          lookedLikeEmailConfirmation ? 'confirmation' : 'recovery'
+        );
         if (urlError) {
           if (isMounted) {
-            setRecoveryError(urlError);
-            isRecoveryModeRef.current = false;
-            setIsRecoveryMode(false);
+            if (lookedLikeEmailConfirmation) {
+              setSessionNotice(urlError);
+            } else {
+              setRecoveryError(urlError);
+              isRecoveryModeRef.current = false;
+              setIsRecoveryMode(false);
+            }
           }
           clearAuthUrlParams();
           return;
@@ -283,10 +364,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const tokenHash = parseRecoveryTokenHash(urlSearch);
         if (tokenHash && !recoveryExchangeAttemptedRef.current) {
           recoveryExchangeAttemptedRef.current = true;
-          const { data: otpData, error: otpError } = await client.auth.verifyOtp({
-            token_hash: tokenHash,
-            type: 'recovery',
-          });
+          const { data: otpData, error: otpError } = await withTimeout(
+            client.auth.verifyOtp({
+              token_hash: tokenHash,
+              type: 'recovery',
+            }),
+            AUTH_TIMEOUT_MS,
+            'Recovery verification'
+          );
           if (!isMounted) return;
           if (otpError) {
             if (isDev) {
@@ -311,7 +396,48 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         }
 
-        const { data, error } = await client.auth.getSession();
+        // Handle token_hash email confirmation links (e.g. /pending-approval?token_hash=...&type=signup)
+        const confirmOtp = parseEmailConfirmationTokenHash(urlSearch);
+        if (confirmOtp && !emailConfirmationAttemptedRef.current) {
+          emailConfirmationAttemptedRef.current = true;
+          const { data: otpData, error: otpError } = await withTimeout(
+            client.auth.verifyOtp({
+              token_hash: confirmOtp.tokenHash,
+              type: confirmOtp.type,
+            }),
+            AUTH_TIMEOUT_MS,
+            'Email verification'
+          );
+          if (!isMounted) return;
+          if (otpError) {
+            console.error('[Auth] Email confirmation verifyOtp failed:', {
+              errorCategory: 'auth',
+              httpStatus: (otpError as { status?: number }).status ?? null,
+              hasSession: false,
+              message: otpError.message,
+            });
+            setSessionNotice(
+              'This email verification link is invalid or has expired. Please sign in to check your approval status or register again.'
+            );
+            clearAuthUrlParams();
+            return;
+          }
+          setEmailVerified(true);
+          clearAuthUrlParams();
+          if (otpData.session?.user) {
+            hadActiveSessionRef.current = true;
+            setSession(otpData.session);
+            setUser(otpData.session.user);
+            await loadProfileForUser(otpData.session.user.id, true, true);
+          }
+          return;
+        }
+
+        const { data, error } = await withTimeout(
+          client.auth.getSession(),
+          AUTH_TIMEOUT_MS,
+          'Session restoration'
+        );
         if (!isMounted) return;
 
         let currentSession = data.session;
@@ -320,8 +446,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const recoveryCode = parseRecoveryCode(urlPath, urlSearch);
         if (!currentSession && recoveryCode && !recoveryExchangeAttemptedRef.current) {
           recoveryExchangeAttemptedRef.current = true;
-          const { data: exchangeData, error: exchangeError } =
-            await client.auth.exchangeCodeForSession(recoveryCode);
+          const { data: exchangeData, error: exchangeError } = await withTimeout(
+            client.auth.exchangeCodeForSession(recoveryCode),
+            AUTH_TIMEOUT_MS,
+            'Recovery code exchange'
+          );
           if (!isMounted) return;
           if (exchangeError) {
             if (isDev) {
@@ -343,10 +472,52 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         }
 
-        if (error && !currentSession) {
-          if (isDev) {
-            console.error('[Auth] getSession failed during init:', error);
+        // Handle PKCE email confirmation callback (?code=...) if not already exchanged by detectSessionInUrl
+        const confirmationCode = parseAuthCallbackCode(urlPath, urlSearch);
+        if (
+          !currentSession &&
+          !lookedLikeRecoveryUrl &&
+          confirmationCode &&
+          !emailConfirmationAttemptedRef.current
+        ) {
+          emailConfirmationAttemptedRef.current = true;
+          const { data: exchangeData, error: exchangeError } = await withTimeout(
+            client.auth.exchangeCodeForSession(confirmationCode),
+            AUTH_TIMEOUT_MS,
+            'Email confirmation'
+          );
+          if (!isMounted) return;
+          if (exchangeError) {
+            console.error('[Auth] Email confirmation code exchange failed:', {
+              errorCategory: 'auth',
+              httpStatus: (exchangeError as { status?: number }).status ?? null,
+              hasSession: false,
+              message: exchangeError.message,
+            });
+            setSessionNotice(
+              'This email verification link is invalid or has expired. Please sign in to check your approval status.'
+            );
+            clearAuthUrlParams();
+            return;
           }
+          setEmailVerified(true);
+          if (exchangeData.session) {
+            currentSession = exchangeData.session;
+          }
+          clearAuthUrlParams();
+        } else if (lookedLikeEmailConfirmation && !lookedLikeRecoveryUrl) {
+          // detectSessionInUrl already consumed the confirmation hash/code before getSession() resolved
+          setEmailVerified(true);
+          clearAuthUrlParams();
+        }
+
+        if (error && !currentSession) {
+          console.error('[Auth] getSession failed during init:', {
+            errorCategory: 'auth',
+            httpStatus: (error as { status?: number }).status ?? null,
+            hasSession: false,
+            message: error.message,
+          });
           if (lookedLikeRecoveryUrl || isRecoveryModeRef.current) {
             isRecoveryModeRef.current = false;
             setIsRecoveryMode(false);
@@ -357,22 +528,66 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setSession(null);
             setUser(null);
             setProfile(null);
+            setAuthError(`Unable to verify your authentication session: ${error.message}`);
+            setAuthErrorKind('auth');
             setSessionNotice('Your session could not be verified. Please sign in again.');
           }
           return;
         }
 
-        // Never destroy an active password recovery session during initialization
-        if (currentSession && isSessionExpired(currentSession) && !isRecoveryModeRef.current && !lookedLikeRecoveryUrl) {
-          await client.auth.signOut();
+        // Never destroy an active password recovery session during initialization.
+        // For expired regular sessions, attempt a bounded token refresh before signing out.
+        if (
+          currentSession &&
+          isSessionExpired(currentSession) &&
+          !isRecoveryModeRef.current &&
+          !lookedLikeRecoveryUrl
+        ) {
+          const { data: refreshData, error: refreshError } = await withTimeout(
+            client.auth.refreshSession(),
+            AUTH_TIMEOUT_MS,
+            'Session refresh'
+          );
           if (!isMounted) return;
-          setSession(null);
-          setUser(null);
-          setProfile(null);
-          setSessionNotice('Your session has expired. Please sign in again.');
-          return;
+          if (!refreshError && refreshData?.session?.access_token) {
+            currentSession = refreshData.session;
+          } else {
+            console.warn('[Auth] Restored session expired and refresh failed:', {
+              errorCategory: 'auth',
+              httpStatus: (refreshError as { status?: number } | null)?.status ?? null,
+              hasSession: true,
+              hasAccessToken: false,
+              userId: currentSession.user?.id ?? null,
+              errorMessage: refreshError?.message ?? 'No refreshed session returned',
+            });
+            manualSignOutRef.current = true;
+            try {
+              await withTimeout(client.auth.signOut(), 5_000, 'Sign out');
+            } catch {
+              // Ignore signOut timeout on already-expired session
+            }
+            if (!isMounted) return;
+            setSession(null);
+            setUser(null);
+            setProfile(null);
+            setProfileError(null);
+            setProfileErrorKind(null);
+            setSessionNotice('Your session has expired. Please sign in again.');
+            return;
+          }
         }
 
+        if (isDev) {
+          console.info('[Auth] Session initialization complete:', {
+            hasSession: Boolean(currentSession),
+            hasAccessToken: Boolean(currentSession?.access_token),
+            userId: currentSession?.user?.id ?? null,
+            isRecovery: lookedLikeRecoveryUrl || isRecoveryModeRef.current,
+          });
+        }
+
+        setAuthError(null);
+        setAuthErrorKind(null);
         setSession(currentSession);
         setUser(currentSession?.user ?? null);
 
@@ -384,12 +599,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setRecoveryError(null);
             clearAuthUrlParams();
           } else {
-            await loadProfileForUser(currentSession.user.id);
+            const meta = currentSession.user.user_metadata as Record<string, unknown> | undefined;
+            const shouldEnsureProfile =
+              lookedLikeEmailConfirmation ||
+              Boolean(
+                (typeof meta?.full_name === 'string' && meta.full_name.trim()) ||
+                  (typeof meta?.employee_id === 'string' && meta.employee_id.trim()) ||
+                  (typeof meta?.username === 'string' && meta.username.trim())
+              );
+            await loadProfileForUser(currentSession.user.id, false, shouldEnsureProfile);
           }
         } else {
           loadedUserIdRef.current = null;
           setProfile(null);
-          // If the URL looked like a recovery link (or recovery flag was set) but no valid session exists, clear flag and inform user
           if (isRecoveryModeRef.current || lookedLikeRecoveryUrl) {
             isRecoveryModeRef.current = false;
             setIsRecoveryMode(false);
@@ -402,12 +624,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         }
       } catch (err) {
-        if (isDev) {
-          console.error('[Auth] Unexpected error during session initialization:', err);
-        }
+        if (!isMounted) return;
+        const isTimeout = err instanceof AuthTimeoutError;
+        console.error('[Auth] Session initialization failed:', {
+          errorCategory: isTimeout ? 'timeout' : 'network',
+          httpStatus: null,
+          hasSession: false,
+          message: err instanceof Error ? err.message : 'Unknown error',
+        });
+        setAuthError(
+          isTimeout
+            ? 'Timed out while restoring your authentication session. Please retry or sign in again.'
+            : 'Unable to restore your authentication session. Check your connection and retry.'
+        );
+        setAuthErrorKind('network');
       } finally {
         if (isMounted) {
           setAuthLoading(false);
+          setProfileLoading(false);
         }
       }
     };
@@ -424,6 +658,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     async (email: string, password: string): Promise<AuthActionResult<LoginResult>> => {
       setSessionNotice(null);
       setRecoveryError(null);
+      setEmailVerified(false);
+      setAuthError(null);
+      setAuthErrorKind(null);
       setProfileError(null);
       setProfileErrorKind(null);
       signingInRef.current = true;
@@ -491,18 +728,110 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSession(null);
     setUser(null);
     setProfile(null);
+    setAuthError(null);
+    setAuthErrorKind(null);
     setProfileError(null);
     setProfileErrorKind(null);
     setProfileLoading(false);
     setIsRecoveryMode(false);
     setRecoveryError(null);
+    setEmailVerified(false);
     setSessionNotice(null);
   }, []);
 
   const handleRefreshProfile = useCallback(async (): Promise<EmployeeProfile | null> => {
     if (!user) return null;
-    return loadProfileForUser(user.id, true);
-  }, [user, loadProfileForUser]);
+    const meta = user.user_metadata as Record<string, unknown> | undefined;
+    const shouldEnsure =
+      emailVerified ||
+      Boolean(
+        (typeof meta?.full_name === 'string' && meta.full_name.trim()) ||
+          (typeof meta?.employee_id === 'string' && meta.employee_id.trim()) ||
+          (typeof meta?.username === 'string' && meta.username.trim())
+      );
+    return loadProfileForUser(user.id, true, shouldEnsure);
+  }, [user, emailVerified, loadProfileForUser]);
+
+  /**
+   * Re-verifies the authenticated user's profile directly against Supabase with a bounded
+   * timeout and updates context state WITHOUT flipping global `profileLoading`, so route
+   * guards like AdminRouteGuard can perform entry checks without triggering an unmount loop.
+   */
+  const handleVerifyProfile = useCallback(async (): Promise<
+    AuthActionResult<EmployeeProfile | null>
+  > => {
+    if (!user) {
+      return {
+        ok: false,
+        error: 'Your authentication session is missing or expired. Please sign in again.',
+        errorKind: 'auth',
+      };
+    }
+
+    const res = await fetchEmployeeProfile(user.id);
+    if (res.ok) {
+      const verifiedProfile =
+        res.data && res.data.auth_user_id === user.id ? res.data : null;
+      loadedUserIdRef.current = user.id;
+      profileRef.current = verifiedProfile;
+      profileErrorRef.current = null;
+      setProfile(verifiedProfile);
+      setProfileError(null);
+      setProfileErrorKind(null);
+      return { ...res, data: verifiedProfile };
+    }
+
+    loadedUserIdRef.current = null;
+    profileRef.current = null;
+    profileErrorRef.current = res.error ?? 'Unable to verify your employee profile.';
+    setProfile(null);
+    setProfileError(res.error ?? 'Unable to verify your employee profile.');
+    setProfileErrorKind(res.errorKind ?? 'database');
+    return res;
+  }, [user]);
+
+  /**
+   * Securely provisions or recovers the authenticated user's own EMPLOYEE + PENDING
+   * profile via the server-side SECURITY DEFINER RPC `ensure_own_employee_profile(...)`.
+   * Never modifies existing profiles (including Super Admin) and never performs a direct table INSERT.
+   */
+  const handleRecoverProfile = useCallback(
+    async (
+      input?: ProfileRecoveryInput
+    ): Promise<AuthActionResult<EmployeeProfile | null>> => {
+      if (!user) {
+        return {
+          ok: false,
+          error: 'Your authentication session is missing or expired. Please sign in again.',
+          errorKind: 'auth',
+        };
+      }
+
+      const res = await ensureOwnEmployeeProfile(undefined, AUTH_TIMEOUT_MS, input);
+      if (res.ok && res.data && res.data.auth_user_id === user.id) {
+        loadedUserIdRef.current = user.id;
+        profileRef.current = res.data;
+        profileErrorRef.current = null;
+        setProfile(res.data);
+        setProfileError(null);
+        setProfileErrorKind(null);
+        return res;
+      }
+
+      if (res.ok && res.rpcUnavailable) {
+        return {
+          ok: false,
+          rpcUnavailable: true,
+          error:
+            'Automatic profile recovery RPC (ensure_own_employee_profile) is not installed in Supabase yet. Apply migration 003_employee_registration_and_approval.sql in Supabase SQL Editor and retry.',
+          errorKind: 'database',
+        };
+      }
+
+      return res;
+    },
+    [user]
+  );
 
   const handleSendPasswordReset = useCallback(async (email: string) => {
     return requestPasswordReset(email);
@@ -563,58 +892,77 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setRecoveryError(null);
   }, []);
 
+  const handleClearEmailVerified = useCallback(() => {
+    setEmailVerified(false);
+  }, []);
+
   const handleExitRecoveryMode = useCallback(() => {
     isRecoveryModeRef.current = false;
     setIsRecoveryMode(false);
   }, []);
 
-  const value = useMemo<AuthContextValue>(
-    () => ({
+  const value = useMemo<AuthContextValue>(() => {
+    const isAuthenticated = Boolean(session && user && session.user?.id === user.id);
+    const isBusy = authLoading || profileLoading;
+    const verifiedUserId = isAuthenticated ? user!.id : null;
+    return {
       isConfigured: isSupabaseConfigured,
       session,
       user,
       profile,
       authLoading,
       profileLoading,
+      authError,
+      authErrorKind,
       profileError,
       profileErrorKind,
       isRecoveryMode,
       recoveryError,
+      emailVerified,
       sessionNotice,
-      isAuthenticated: Boolean(session && user),
-      isApproved: isApprovedUser(profile),
-      isAdmin: isApprovedAdmin(profile),
+      isAuthenticated,
+      isApproved: isAuthenticated && !isBusy && isApprovedUser(profile, verifiedUserId),
+      isAdmin: isAuthenticated && !isBusy && isApprovedAdmin(profile, verifiedUserId),
       signIn: handleSignIn,
       register: handleRegister,
       signOut: handleSignOut,
       refreshProfile: handleRefreshProfile,
+      verifyProfile: handleVerifyProfile,
+      recoverProfile: handleRecoverProfile,
       sendPasswordReset: handleSendPasswordReset,
       resetPassword: handleResetPassword,
       completePasswordReset: handleCompletePasswordReset,
       clearSessionNotice: handleClearSessionNotice,
       clearRecoveryError: handleClearRecoveryError,
+      clearEmailVerified: handleClearEmailVerified,
       exitRecoveryMode: handleExitRecoveryMode,
-    }),
-    [
+    };
+  }, [
       session,
       user,
       profile,
       authLoading,
       profileLoading,
+      authError,
+      authErrorKind,
       profileError,
       profileErrorKind,
       isRecoveryMode,
       recoveryError,
+      emailVerified,
       sessionNotice,
       handleSignIn,
       handleRegister,
       handleSignOut,
       handleRefreshProfile,
+      handleVerifyProfile,
+      handleRecoverProfile,
       handleSendPasswordReset,
       handleResetPassword,
       handleCompletePasswordReset,
       handleClearSessionNotice,
       handleClearRecoveryError,
+      handleClearEmailVerified,
       handleExitRecoveryMode,
     ]
   );

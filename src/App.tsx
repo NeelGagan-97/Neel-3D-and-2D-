@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AccountStatusPage, ProfileLoadErrorPage } from './components/auth/AccountStatusPage';
 import { AdminDashboardPage } from './components/auth/AdminDashboardPage';
+import { AdminRouteGuard } from './components/auth/AdminRouteGuard';
 import { EmployeeDashboardPage } from './components/auth/EmployeeDashboardPage';
 import { LoginPage } from './components/auth/LoginPage';
 import {
@@ -24,12 +25,16 @@ import { parseRouteFromLocation, syncBrowserPath } from './utils/router';
 export default function App() {
   const {
     isAuthenticated,
+    user,
     authLoading,
     profileLoading,
+    authError,
+    authErrorKind,
     profile,
     profileError,
     profileErrorKind,
     isRecoveryMode,
+    emailVerified,
   } = useAuth();
 
   const [projects, setProjects] = useState<ProjectData[]>(() => projectStorage.loadAll());
@@ -92,17 +97,39 @@ export default function App() {
 
   const isAuthBusy = authLoading || profileLoading;
 
+  // Route freshly email-verified users onto the pending-approval screen when landing on entry pages
+  useEffect(() => {
+    if (isAuthBusy || isRecoveryMode || !emailVerified) return;
+    if (
+      !isAuthenticated &&
+      (route === 'login' || route === 'register' || route === 'forgot-password')
+    ) {
+      navigateRoute('pending-approval', true);
+    }
+  }, [isAuthBusy, isRecoveryMode, emailVerified, isAuthenticated, route, navigateRoute]);
+
   // Enforce route guards reactively (covers direct URL visits, logout, expiry, and status changes)
   const accessDecision = useMemo(
     () =>
       evaluateRouteAccess(route, {
         isAuthenticated,
         isLoading: isAuthBusy,
+        authUserId: user?.id ?? null,
         profile,
         profileError,
         isRecoveryMode,
+        emailVerified,
       }),
-    [route, isAuthenticated, isAuthBusy, profile, profileError, isRecoveryMode]
+    [
+      route,
+      isAuthenticated,
+      isAuthBusy,
+      user?.id,
+      profile,
+      profileError,
+      isRecoveryMode,
+      emailVerified,
+    ]
   );
 
   useEffect(() => {
@@ -119,12 +146,14 @@ export default function App() {
         ) {
           setIntendedRoute(route);
           setRouteNotice(
-            'Sign in with an approved Neel 3D Space account to access protected design tools.'
+            route === 'admin'
+              ? 'Sign in with an approved administrator account to access the Admin Dashboard.'
+              : 'Sign in with an approved Neel 3D Space account to access protected design tools.'
           );
         }
       } else if (accessDecision.reason === 'unauthorized-admin') {
         setRouteNotice(
-          'Administrator privileges are required to view the Admin Dashboard.'
+          'Access denied: Administrator privileges are required to view the Admin Dashboard.'
         );
       }
       navigateRoute(accessDecision.redirectTo, true);
@@ -213,7 +242,7 @@ export default function App() {
    */
   const handleCreateProject = useCallback(
     (input: ProjectCreationInput) => {
-      if (!isAuthenticated || !isApprovedUser(profile)) {
+      if (!isAuthenticated || !isApprovedUser(profile, user?.id ?? null)) {
         setIntendedRoute('studio');
         setRouteNotice(
           'Sign in with an approved Neel 3D Space account to create a new space in Design Studio.'
@@ -221,6 +250,7 @@ export default function App() {
         navigateRoute(isAuthenticated ? evaluateRouteAccess('studio', {
           isAuthenticated,
           isLoading: false,
+          authUserId: user?.id ?? null,
           profile,
         }).redirectTo ?? 'login' : 'login');
         return;
@@ -264,7 +294,7 @@ export default function App() {
       setStudioInitialView('2d');
       navigateRoute('studio');
     },
-    [projects.length, isAuthenticated, profile, navigateRoute]
+    [projects.length, isAuthenticated, user?.id, profile, navigateRoute]
   );
 
   const handleCompleteSiteConfig = useCallback(
@@ -309,7 +339,7 @@ export default function App() {
 
   const handleImportProject = useCallback(
     (rawJson: string): { ok: boolean; error?: string } => {
-      if (!isAuthenticated || !isApprovedUser(profile)) {
+      if (!isAuthenticated || !isApprovedUser(profile, user?.id ?? null)) {
         setIntendedRoute('studio');
         setRouteNotice('Sign in with an approved account to import projects into Design Studio.');
         navigateRoute(
@@ -317,6 +347,7 @@ export default function App() {
             ? evaluateRouteAccess('studio', {
                 isAuthenticated,
                 isLoading: false,
+                authUserId: user?.id ?? null,
                 profile,
               }).redirectTo ?? 'login'
             : 'login'
@@ -351,7 +382,7 @@ export default function App() {
         };
       }
     },
-    [projects, isAuthenticated, profile, navigateRoute]
+    [projects, isAuthenticated, user?.id, profile, navigateRoute]
   );
 
   const handleDeleteProject = useCallback(
@@ -374,6 +405,25 @@ export default function App() {
     route === 'register' ||
     route === 'forgot-password' ||
     route === 'reset-password';
+
+  // Dedicated error screen for session restoration failures/timeouts on protected routes
+  if (!isAuthBusy && !isPublicRoute && !isRecoveryMode && authError) {
+    return (
+      <RouteNavigationProvider
+        activeRoute={route}
+        navigateRoute={(target) => navigateRoute(target)}
+      >
+        <ProfileLoadErrorPage
+          error={authError}
+          errorKind={authErrorKind}
+          onNavigateRoute={(r) => navigateRoute(r)}
+          onRetry={() => {
+            window.location.reload();
+          }}
+        />
+      </RouteNavigationProvider>
+    );
+  }
 
   // Dedicated error screen for RLS / network / database / auth errors while fetching employee_profiles
   // Never mislabels a database or permission failure as "Employee Profile Not Found"
@@ -442,10 +492,23 @@ export default function App() {
     content = <AccountStatusPage variant={route} onNavigateRoute={(r) => navigateRoute(r)} />;
   } else if (route === 'admin') {
     content = (
-      <AdminDashboardPage
-        onNavigate={handleNavigate}
+      <AdminRouteGuard
         onNavigateRoute={(r) => navigateRoute(r)}
-      />
+        onUnauthorized={(redirectTo, noticeMsg) => {
+          if (redirectTo === 'login') {
+            setIntendedRoute('admin');
+          }
+          if (noticeMsg) {
+            setRouteNotice(noticeMsg);
+          }
+          navigateRoute(redirectTo, true);
+        }}
+      >
+        <AdminDashboardPage
+          onNavigate={handleNavigate}
+          onNavigateRoute={(r) => navigateRoute(r)}
+        />
+      </AdminRouteGuard>
     );
   } else if (route === 'employee-dashboard') {
     content = (

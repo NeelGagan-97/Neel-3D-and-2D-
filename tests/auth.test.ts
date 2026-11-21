@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
+import { validateSupabaseConfig } from '../src/lib/supabase';
 import {
+  adminGetEmployeeProfile,
   adminUpdateEmployeeStatus,
   buildAuthRedirectUrl,
+  ensureOwnEmployeeProfile,
   fetchAllEmployeeProfiles,
   fetchEmployeeProfile,
   registerEmployee,
@@ -13,13 +16,18 @@ import {
 } from '../src/services/authService';
 import { AccountStatus, EmployeeProfile } from '../src/types/auth';
 import {
+  canViewAdminNavigation,
   computeAdminStats,
   evaluateRouteAccess,
+  isApprovedAdmin,
   resolvePostLoginRoute,
 } from '../src/utils/authValidation';
 import {
+  isEmailConfirmationUrl,
   isRecoveryUrl,
+  parseAuthCallbackCode,
   parseAuthErrorFromUrl,
+  parseEmailConfirmationTokenHash,
   parseRecoveryCode,
   parseRecoveryTokenHash,
   parseRouteFromLocation,
@@ -253,11 +261,47 @@ class RlsMockSupabase {
         throw new Error('check_registration_availability RPC must not be called');
       }
 
+      if (fn === 'admin_list_employee_profiles') {
+        if (!self.isCallerApprovedAdmin()) {
+          return {
+            data: null,
+            status: 403,
+            error: {
+              code: '42501',
+              message: 'Forbidden: Approved administrator privileges required.',
+            },
+          };
+        }
+        return { data: [...self.profiles], status: 200, error: null };
+      }
+
+      if (fn === 'admin_get_employee_profile') {
+        if (!self.isCallerApprovedAdmin()) {
+          return {
+            data: null,
+            status: 403,
+            error: {
+              code: '42501',
+              message: 'Forbidden: Approved administrator privileges required.',
+            },
+          };
+        }
+        const target = self.profiles.find((p) => p.id === params.p_profile_id);
+        if (!target) {
+          return { data: null, status: 404, error: { message: 'Employee profile not found.' } };
+        }
+        return { data: { ...target }, status: 200, error: null };
+      }
+
       if (fn === 'admin_update_employee_status') {
         if (!self.isCallerApprovedAdmin()) {
           return {
             data: null,
-            error: { message: 'Forbidden: Approved administrator privileges required.' },
+            status: 403,
+            error: {
+              code: '42501',
+              message: 'Forbidden: Approved administrator privileges required.',
+            },
           };
         }
         const target = self.profiles.find((p) => p.id === params.p_profile_id);
@@ -267,7 +311,11 @@ class RlsMockSupabase {
         if (target.auth_user_id === self.currentSession!.user.id || target.role === 'ADMIN') {
           return {
             data: null,
-            error: { message: 'Administrators cannot modify their own account status.' },
+            status: 403,
+            error: {
+              code: '42501',
+              message: 'Administrators cannot modify their own account status.',
+            },
           };
         }
         const nextStatus = params.p_new_status as AccountStatus;
@@ -277,7 +325,7 @@ class RlsMockSupabase {
           target.approved_by = self.currentSession!.user.id;
         }
         target.updated_at = new Date().toISOString();
-        return { data: { ...target }, error: null };
+        return { data: { ...target }, status: 200, error: null };
       }
 
       return { data: null, error: { code: 'PGRST202', message: 'Function not found' } };
@@ -677,6 +725,7 @@ async function runTests() {
 
     // Verify missing RPC fails cleanly without ever falling back to direct table UPDATE
     const missingRpcClient = {
+      auth: sb.auth,
       rpc: async () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' } }),
       from: () => {
         throw new Error('Direct table UPDATE fallback must never be called');
@@ -1016,7 +1065,972 @@ async function runTests() {
     assert.match(netRes.error ?? '', /network error/i);
   });
 
-  console.log(`\nALL ${passed}/21 AUTHENTICATION & AUTHORIZATION SCENARIOS PASSED.`);
+  // 22. Supabase public env configuration validation (missing vars, URL format, service_role refusal)
+  await test('22. Supabase environment configuration validates public keys and blocks service_role keys', async () => {
+    const missingBoth = validateSupabaseConfig({});
+    assert.equal(missingBoth.configured, false);
+    assert.equal(missingBoth.missingVars.length, 2);
+    assert.match(missingBoth.validationError ?? '', /VITE_SUPABASE_URL/);
+    assert.match(missingBoth.validationError ?? '', /VITE_SUPABASE_ANON_KEY/);
+
+    const missingKey = validateSupabaseConfig({ url: 'https://example.supabase.co' });
+    assert.equal(missingKey.configured, false);
+    assert.equal(missingKey.hasUrl, true);
+    assert.equal(missingKey.hasKey, false);
+
+    const invalidUrl = validateSupabaseConfig({
+      url: 'not-a-valid-url',
+      anonKey: 'sb_publishable_demo_key',
+    });
+    assert.equal(invalidUrl.configured, false);
+    assert.match(invalidUrl.validationError ?? '', /invalid/i);
+
+    const secretPrefix = validateSupabaseConfig({
+      url: 'https://example.supabase.co',
+      anonKey: 'sb_secret_should_never_be_in_browser',
+    });
+    assert.equal(secretPrefix.configured, false);
+    assert.match(secretPrefix.validationError ?? '', /service_role|secret/i);
+
+    const fakeServiceRoleJwt = [
+      Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url'),
+      Buffer.from(JSON.stringify({ role: 'service_role', iss: 'supabase' })).toString('base64url'),
+      'signature',
+    ].join('.');
+    const jwtSecret = validateSupabaseConfig({
+      url: 'https://example.supabase.co',
+      anonKey: fakeServiceRoleJwt,
+    });
+    assert.equal(jwtSecret.configured, false);
+    assert.match(jwtSecret.validationError ?? '', /service_role/i);
+
+    const validAnon = validateSupabaseConfig({
+      url: 'https://example.supabase.co',
+      anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiJ9.sig',
+    });
+    assert.equal(validAnon.configured, true);
+    assert.equal(validAnon.validationError, null);
+
+    const validPublishable = validateSupabaseConfig({
+      url: 'https://example.supabase.co',
+      publishableKey: 'sb_publishable_valid_public_key',
+    });
+    assert.equal(validPublishable.configured, true);
+    assert.equal(validPublishable.validationError, null);
+  });
+
+  // 23. Active session verification, token refresh, and 42501 RLS vs expired session distinction
+  await test('23. Profile fetch requires active session, refreshes expired tokens, and classifies 42501 RLS denials', async () => {
+    const adminAuthUid = '94fd4f13-09e4-4fa4-a83f-4900649b1ffc';
+
+    // 23a. Missing session MUST be rejected as 'auth' without sending an anon query
+    await signOutUser(sb);
+    let anonQueryAttempted = false;
+    const noSessionClient = {
+      auth: {
+        getSession: async () => ({ data: { session: null }, error: null }),
+      },
+      from: () => {
+        anonQueryAttempted = true;
+        throw new Error('Must not query employee_profiles without an active session');
+      },
+    } as unknown as SupabaseClient;
+
+    const noSessionRes = await fetchEmployeeProfile(adminAuthUid, noSessionClient);
+    assert.equal(noSessionRes.ok, false);
+    assert.equal(noSessionRes.errorKind, 'auth');
+    assert.equal(anonQueryAttempted, false);
+
+    // 23b. Expired session with refreshSession() refreshes token and loads ADMIN + APPROVED profile
+    let refreshCalled = false;
+    let queriedColumn = '';
+    let queriedValue = '';
+    const refreshingClient = {
+      auth: {
+        getSession: async () => ({
+          data: {
+            session: {
+              access_token: 'expired-token',
+              refresh_token: 'valid-refresh',
+              expires_at: Math.floor(Date.now() / 1000) - 30,
+              user: { id: adminAuthUid, email: 'neelgaganat97@gmail.com' },
+            },
+          },
+          error: null,
+        }),
+        refreshSession: async () => {
+          refreshCalled = true;
+          return {
+            data: {
+              session: {
+                access_token: 'fresh-token',
+                refresh_token: 'fresh-refresh',
+                expires_at: Math.floor(Date.now() / 1000) + 3600,
+                user: { id: adminAuthUid, email: 'neelgaganat97@gmail.com' },
+              },
+            },
+            error: null,
+          };
+        },
+      },
+      from: () => ({
+        select: () => ({
+          eq: (col: string, val: string) => {
+            queriedColumn = col;
+            queriedValue = val;
+            return {
+              maybeSingle: async () => ({
+                status: 200,
+                data: {
+                  id: '22222222-2222-4222-8222-222222222222',
+                  auth_user_id: adminAuthUid,
+                  full_name: 'Neelgagan B R',
+                  employee_id: 'ADM-097',
+                  username: 'neelgaganat97',
+                  email: 'neelgaganat97@gmail.com',
+                  mobile: '+91 98765 00097',
+                  role: 'ADMIN',
+                  account_status: 'APPROVED',
+                },
+                error: null,
+              }),
+            };
+          },
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    const refreshedRes = await fetchEmployeeProfile(adminAuthUid, refreshingClient);
+    assert.equal(refreshCalled, true);
+    assert.equal(queriedColumn, 'auth_user_id');
+    assert.equal(queriedValue, adminAuthUid);
+    assert.equal(refreshedRes.ok, true);
+    assert.equal(refreshedRes.data?.role, 'ADMIN');
+    assert.equal(refreshedRes.data?.account_status, 'APPROVED');
+
+    // 23c. HTTP 403 / PostgreSQL 42501 RLS denial classified cleanly as 'rls' with HTTP status
+    const deniedClient = {
+      auth: {
+        getSession: async () => ({
+          data: {
+            session: {
+              access_token: 'valid-token',
+              refresh_token: 'valid-refresh',
+              expires_at: Math.floor(Date.now() / 1000) + 3600,
+              user: { id: adminAuthUid, email: 'neelgaganat97@gmail.com' },
+            },
+          },
+          error: null,
+        }),
+      },
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({
+              status: 403,
+              data: null,
+              error: {
+                code: '42501',
+                message: 'permission denied for table employee_profiles',
+                hint: 'Grant the required privileges to the current role with: GRANT SELECT ON public.employee_profiles TO authenticated;',
+              },
+            }),
+          }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    const deniedRes = await fetchEmployeeProfile(adminAuthUid, deniedClient);
+    assert.equal(deniedRes.ok, false);
+    assert.equal(deniedRes.errorKind, 'rls');
+    assert.equal(deniedRes.errorCode, '42501');
+    assert.equal(deniedRes.httpStatus, 403);
+    assert.match(deniedRes.error ?? '', /42501/);
+  });
+
+  // 24. Strict RBAC matrix: all 12 access scenarios (ADMIN vs EMPLOYEE/PENDING/REJECTED/SUSPENDED/logged-out/refresh/tampering)
+  await test('24. Strict RBAC enforces ADMIN-only /admin access, hides Admin nav from employees, blocks refresh flash, and secures all admin RPCs', async () => {
+    const adminLogin = await signInWithEmail('neelgaganat97@gmail.com', 'AdminNewPassword1', sb);
+    assert.equal(adminLogin.ok, true);
+    const adminUser = adminLogin.data!.user;
+    const adminProfile = adminLogin.data!.profile!;
+    assert.equal(adminUser.id, '94fd4f13-09e4-4fa4-a83f-4900649b1ffc');
+    assert.equal(adminProfile.auth_user_id, adminUser.id);
+    assert.equal(isApprovedAdmin(adminProfile, adminUser.id), true);
+
+    // Scenario 1 & 2: Existing ADMIN opens /admin and sees Admin navigation
+    assert.equal(
+      evaluateRouteAccess('admin', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: adminUser.id,
+        profile: adminProfile,
+      }).allowed,
+      true
+    );
+    assert.equal(
+      canViewAdminNavigation({
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: adminUser.id,
+        profile: adminProfile,
+      }),
+      true
+    );
+
+    // Scenario 12: Admin list, view details, suspend, and reactivate via SECURITY DEFINER RPCs
+    const listRes = await fetchAllEmployeeProfiles(adminProfile, sb);
+    assert.equal(listRes.ok, true);
+    const aarav = listRes.data!.find((p) => p.email === 'aarav@neel3dspace.com')!;
+    assert.ok(aarav);
+
+    const detailRes = await adminGetEmployeeProfile(aarav.id, adminProfile, sb);
+    assert.equal(detailRes.ok, true);
+    assert.equal(detailRes.data?.email, 'aarav@neel3dspace.com');
+
+    const suspendRes = await adminUpdateEmployeeStatus(aarav, 'SUSPENDED', adminProfile, sb);
+    assert.equal(suspendRes.ok, true);
+    assert.equal(suspendRes.data?.account_status, 'SUSPENDED');
+
+    const reactivateRes = await adminUpdateEmployeeStatus(aarav, 'APPROVED', adminProfile, sb);
+    assert.equal(reactivateRes.ok, true);
+    assert.equal(reactivateRes.data?.account_status, 'APPROVED');
+    assert.equal(reactivateRes.data?.approved_by, adminUser.id);
+
+    // Scenario 3, 4, 9, 10: Approved EMPLOYEE cannot see Admin nav, redirected from /admin, blocked from all admin RPCs & role escalation
+    const empLogin = await signInWithEmail('aarav@neel3dspace.com', 'NewPass123', sb);
+    const empUser = empLogin.data!.user;
+    const empProfile = empLogin.data!.profile!;
+    assert.equal(empProfile.role, 'EMPLOYEE');
+    assert.equal(empProfile.account_status, 'APPROVED');
+
+    assert.equal(
+      canViewAdminNavigation({
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: empUser.id,
+        profile: empProfile,
+      }),
+      false
+    );
+    const empAdminRoute = evaluateRouteAccess('admin', {
+      isAuthenticated: true,
+      isLoading: false,
+      authUserId: empUser.id,
+      profile: empProfile,
+    });
+    assert.equal(empAdminRoute.allowed, false);
+    assert.equal(empAdminRoute.redirectTo, 'employee-dashboard');
+    assert.equal(empAdminRoute.reason, 'unauthorized-admin');
+
+    // Direct RPC calls as an authenticated EMPLOYEE must be rejected by server-side RBAC
+    const rawListAttempt = await sb.rpc('admin_list_employee_profiles');
+    assert.ok(rawListAttempt.error);
+    assert.equal(rawListAttempt.error.code, '42501');
+
+    const rawGetAttempt = await sb.rpc('admin_get_employee_profile', {
+      p_profile_id: adminProfile.id,
+    });
+    assert.ok(rawGetAttempt.error);
+    assert.equal(rawGetAttempt.error.code, '42501');
+
+    const rawStatusAttempt = await sb.rpc('admin_update_employee_status', {
+      p_profile_id: 'prof-rej-10',
+      p_new_status: 'APPROVED',
+    });
+    assert.ok(rawStatusAttempt.error);
+    assert.equal(rawStatusAttempt.error.code, '42501');
+
+    // Spoofed frontend profile (mismatched auth_user_id) must ALSO be rejected
+    const spoofedList = await fetchAllEmployeeProfiles(adminProfile, sb);
+    assert.equal(spoofedList.ok, false);
+    assert.equal(spoofedList.errorKind, 'rls');
+
+    const spoofedGet = await adminGetEmployeeProfile(aarav.id, adminProfile, sb);
+    assert.equal(spoofedGet.ok, false);
+    assert.equal(spoofedGet.errorKind, 'rls');
+
+    const spoofedMutate = await adminUpdateEmployeeStatus(aarav, 'SUSPENDED', adminProfile, sb);
+    assert.equal(spoofedMutate.ok, false);
+    assert.equal(spoofedMutate.errorKind, 'rls');
+
+    const spoofedRoute = evaluateRouteAccess('admin', {
+      isAuthenticated: true,
+      isLoading: false,
+      authUserId: empUser.id,
+      profile: adminProfile, // Mismatched auth_user_id!
+    });
+    assert.equal(spoofedRoute.allowed, false);
+    assert.equal(spoofedRoute.reason, 'identity-mismatch');
+
+    // Scenario 5, 6, 7: PENDING, REJECTED, SUSPENDED cannot access /admin or see Admin nav
+    const statusCases: Array<{
+      status: AccountStatus;
+      expectedRedirect: 'pending-approval' | 'account-rejected' | 'account-suspended';
+    }> = [
+      { status: 'PENDING', expectedRedirect: 'pending-approval' },
+      { status: 'REJECTED', expectedRedirect: 'account-rejected' },
+      { status: 'SUSPENDED', expectedRedirect: 'account-suspended' },
+    ];
+    for (const tc of statusCases) {
+      const statusProfile: EmployeeProfile = {
+        ...empProfile,
+        role: 'ADMIN', // Even if role were ADMIN, non-APPROVED status MUST be blocked!
+        account_status: tc.status,
+      };
+      assert.equal(
+        canViewAdminNavigation({
+          isAuthenticated: true,
+          isLoading: false,
+          authUserId: empUser.id,
+          profile: statusProfile,
+        }),
+        false
+      );
+      const dec = evaluateRouteAccess('admin', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: empUser.id,
+        profile: statusProfile,
+      });
+      assert.equal(dec.allowed, false);
+      assert.equal(dec.redirectTo, tc.expectedRedirect);
+    }
+
+    // Scenario 8: Logged-out visitor cannot access /admin or see Admin nav
+    await signOutUser(sb);
+    assert.equal(
+      canViewAdminNavigation({
+        isAuthenticated: false,
+        isLoading: false,
+        authUserId: null,
+        profile: null,
+      }),
+      false
+    );
+    const anonAdminDec = evaluateRouteAccess('admin', {
+      isAuthenticated: false,
+      isLoading: false,
+      authUserId: null,
+      profile: null,
+    });
+    assert.equal(anonAdminDec.allowed, false);
+    assert.equal(anonAdminDec.redirectTo, 'login');
+
+    // Scenario 11: Browser refresh / loading state NEVER exposes /admin or Admin nav
+    const loadingAdminDec = evaluateRouteAccess('admin', {
+      isAuthenticated: true,
+      isLoading: true,
+      authUserId: empUser.id,
+      profile: empProfile,
+    });
+    assert.equal(loadingAdminDec.allowed, false);
+    assert.equal(loadingAdminDec.reason, 'loading');
+    assert.equal(
+      canViewAdminNavigation({
+        isAuthenticated: true,
+        isLoading: true,
+        authUserId: adminUser.id,
+        profile: adminProfile,
+      }),
+      false
+    );
+
+    // Verify /design-studio alias parses cleanly to studio
+    assert.equal(parseRouteFromLocation('/design-studio'), 'studio');
+  });
+
+  await test('25. Auth & profile timeouts settle cleanly (no infinite spinner) and both Supabase public key env vars are supported', async () => {
+    const anonCfg = validateSupabaseConfig({
+      url: 'https://dfsezdrniwsqvpglxnyh.supabase.co',
+      anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test.anon',
+    });
+    assert.equal(anonCfg.configured, true);
+    assert.equal(anonCfg.keySource, 'VITE_SUPABASE_ANON_KEY');
+
+    const publishableCfg = validateSupabaseConfig({
+      url: 'https://dfsezdrniwsqvpglxnyh.supabase.co',
+      publishableKey: 'sb_publishable_example_key_123',
+    });
+    assert.equal(publishableCfg.configured, true);
+    assert.equal(publishableCfg.keySource, 'VITE_SUPABASE_PUBLISHABLE_KEY');
+
+    const missingCfg = validateSupabaseConfig({
+      url: 'https://dfsezdrniwsqvpglxnyh.supabase.co',
+    });
+    assert.equal(missingCfg.configured, false);
+    assert.equal(missingCfg.keySource, 'none');
+
+    const adminUid = '94fd4f13-09e4-4fa4-a83f-4900649b1ffc';
+
+    // 1) Hanging getSession() must time out cleanly instead of hanging forever
+    const hangingGetSessionClient = {
+      auth: {
+        getSession: () => new Promise(() => {}),
+        refreshSession: () => new Promise(() => {}),
+      },
+      from: () => {
+        throw new Error('Should not query PostgREST when getSession hangs');
+      },
+    } as unknown as SupabaseClient;
+
+    const getSessionRes = await fetchEmployeeProfile(adminUid, hangingGetSessionClient, 40);
+    assert.equal(getSessionRes.ok, false);
+    assert.equal(getSessionRes.errorKind, 'network');
+    assert.match(getSessionRes.error ?? '', /timed out/i);
+
+    // 2) Hanging refreshSession() on an expired session must time out cleanly
+    const expiredSession = {
+      access_token: 'expired-token',
+      refresh_token: 'refresh-token',
+      expires_at: Math.floor(Date.now() / 1000) - 60,
+      user: { id: adminUid, email: 'neelgaganat97@gmail.com' } as User,
+    } as Session;
+
+    const hangingRefreshClient = {
+      auth: {
+        getSession: async () => ({ data: { session: expiredSession }, error: null }),
+        refreshSession: () => new Promise(() => {}),
+      },
+      from: () => {
+        throw new Error('Should not query PostgREST when refreshSession hangs');
+      },
+    } as unknown as SupabaseClient;
+
+    const refreshRes = await fetchEmployeeProfile(adminUid, hangingRefreshClient, 40);
+    assert.equal(refreshRes.ok, false);
+    assert.equal(refreshRes.errorKind, 'network');
+    assert.match(refreshRes.error ?? '', /timed out/i);
+
+    // 3) Hanging employee_profiles PostgREST query must time out cleanly with TIMEOUT code
+    const activeSession = {
+      access_token: 'valid-token',
+      refresh_token: 'refresh-token',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user: { id: adminUid, email: 'neelgaganat97@gmail.com' } as User,
+    } as Session;
+
+    const hangingQueryClient = {
+      auth: {
+        getSession: async () => ({ data: { session: activeSession }, error: null }),
+        refreshSession: async () => ({ data: { session: activeSession }, error: null }),
+      },
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => new Promise(() => {}),
+          }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    const queryRes = await fetchEmployeeProfile(adminUid, hangingQueryClient, 40);
+    assert.equal(queryRes.ok, false);
+    assert.equal(queryRes.errorKind, 'network');
+    assert.equal(queryRes.errorCode, 'TIMEOUT');
+    assert.match(queryRes.error ?? '', /timed out/i);
+  });
+
+  await test('26. Complete employee registration with email confirmation, server-side profile provisioning, Admin approval, rejection, suspension, and /admin protection', async () => {
+    // 1) Verify email confirmation URL detection & parsing across PKCE, OTP token_hash, and implicit hash flows
+    assert.equal(isEmailConfirmationUrl('?code=pkce-abc-123', '', '/pending-approval'), true);
+    assert.equal(isEmailConfirmationUrl('?code=pkce-abc-123', '', '/auth/callback'), true);
+    assert.equal(
+      isEmailConfirmationUrl('?token_hash=tok-signup-99&type=signup', '', '/pending-approval'),
+      true
+    );
+    assert.equal(
+      isEmailConfirmationUrl('', '#access_token=abc&type=signup', '/pending-approval'),
+      true
+    );
+    assert.deepEqual(
+      parseEmailConfirmationTokenHash('?token_hash=tok-signup-99&type=signup'),
+      { tokenHash: 'tok-signup-99', type: 'signup' }
+    );
+    assert.equal(parseAuthCallbackCode('/pending-approval', '?code=pkce-abc-123'), 'pkce-abc-123');
+    assert.equal(parseRouteFromLocation('/auth/callback', '?code=pkce-abc-123', ''), 'pending-approval');
+    assert.equal(parseRouteFromLocation('/pending-approval', '?token_hash=tok&type=signup', ''), 'pending-approval');
+
+    // Password recovery URLs MUST NOT be misclassified as email confirmation
+    assert.equal(isRecoveryUrl('?token_hash=rec-1&type=recovery', '', '/reset-password'), true);
+    assert.equal(isEmailConfirmationUrl('?token_hash=rec-1&type=recovery', '', '/reset-password'), false);
+    assert.equal(parseAuthCallbackCode('/reset-password', '?code=rec-code'), null);
+    assert.equal(parseRouteFromLocation('/reset-password', '?code=rec-code', ''), 'reset-password');
+
+    // 2) Verify email confirmation callback with missing profile NEVER shows profile-missing and NEVER grants Studio/Admin
+    assert.equal(
+      resolvePostLoginRoute(null, 'uid-new-emp', { emailVerified: true }),
+      'pending-approval'
+    );
+    const verifiedPendingDecision = evaluateRouteAccess('pending-approval', {
+      isAuthenticated: true,
+      isLoading: false,
+      authUserId: 'uid-new-emp',
+      profile: null,
+      emailVerified: true,
+    });
+    assert.equal(verifiedPendingDecision.allowed, true);
+
+    const verifiedUnauthPendingDecision = evaluateRouteAccess('pending-approval', {
+      isAuthenticated: false,
+      isLoading: false,
+      authUserId: null,
+      profile: null,
+      emailVerified: true,
+    });
+    assert.equal(verifiedUnauthPendingDecision.allowed, true);
+
+    for (const lockedRoute of ['studio', 'summary', 'employee-dashboard', 'admin'] as const) {
+      const dec = evaluateRouteAccess(lockedRoute, {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: 'uid-new-emp',
+        profile: null,
+        emailVerified: true,
+      });
+      assert.equal(dec.allowed, false);
+      assert.equal(dec.redirectTo, 'pending-approval');
+    }
+
+    // 3) Verify registerEmployee works with email confirmation enabled (no session yet)
+    // and that profile is created by the database auth.users trigger with EMPLOYEE + PENDING
+    const flowMock = new RlsMockSupabase();
+    flowMock.setRequireEmailConfirmation(true);
+    const flowSb = flowMock.asClient();
+
+    let capturedRedirectTo: string | undefined;
+    const origSignUp = flowSb.auth.signUp.bind(flowSb.auth);
+    flowSb.auth.signUp = (async (args: any) => {
+      capturedRedirectTo = args?.options?.emailRedirectTo;
+      return origSignUp(args);
+    }) as any;
+
+    const regRes = await registerEmployee(
+      {
+        fullName: 'Meera Nair',
+        employeeId: 'emp-2026',
+        username: 'Meera.Nair',
+        email: 'meera.nair@neel3dspace.com',
+        mobile: '+91 98765 11223',
+        password: 'Password123',
+        confirmPassword: 'Password123',
+      },
+      flowSb,
+      'https://neel3dspace.example.com/pending-approval'
+    );
+    assert.equal(regRes.ok, true);
+    assert.equal(regRes.data?.requiresEmailConfirmation, true);
+    assert.equal(regRes.data?.session, null);
+    assert.equal(capturedRedirectTo, 'https://neel3dspace.example.com/pending-approval');
+
+    // Trigger created EMPLOYEE + PENDING row immediately even with no authenticated browser session
+    const newUid = regRes.data!.user!.id;
+    const triggerCreated = flowMock.getProfileByAuthId(newUid);
+    assert.ok(triggerCreated);
+    assert.equal(triggerCreated!.role, 'EMPLOYEE');
+    assert.equal(triggerCreated!.account_status, 'PENDING');
+    assert.equal(triggerCreated!.auth_user_id, newUid);
+
+    // 4) Verify ensureOwnEmployeeProfile RPC safely provisions a missing profile without direct client INSERT
+    const rpcEmpUid = 'uid-rpc-provision-26';
+    const rpcSession = {
+      access_token: 'valid-token',
+      refresh_token: 'valid-refresh',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user: {
+        id: rpcEmpUid,
+        email: 'provisioned@neel3dspace.com',
+        user_metadata: {
+          full_name: 'Kiran Verma',
+          employee_id: 'EMP-9001',
+          username: 'kiran.verma',
+          mobile: '+91 90000 11111',
+        },
+      } as unknown as User,
+    } as Session;
+    let directInsertAttempted = false;
+    const rpcClient = {
+      auth: {
+        getSession: async () => ({ data: { session: rpcSession }, error: null }),
+        refreshSession: async () => ({ data: { session: rpcSession }, error: null }),
+      },
+      from: () => ({
+        insert: () => {
+          directInsertAttempted = true;
+          throw new Error('Direct client INSERT must never be called');
+        },
+      }),
+      rpc: async (fn: string) => {
+        assert.equal(fn, 'ensure_own_employee_profile');
+        return {
+          status: 200,
+          error: null,
+          data: {
+            id: 'prof-rpc-26',
+            auth_user_id: rpcEmpUid,
+            full_name: 'Kiran Verma',
+            employee_id: 'EMP-9001',
+            username: 'kiran.verma',
+            email: 'provisioned@neel3dspace.com',
+            mobile: '+91 90000 11111',
+            role: 'EMPLOYEE',
+            account_status: 'PENDING',
+            approved_at: null,
+            approved_by: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        };
+      },
+    } as unknown as SupabaseClient;
+
+    const ensuredRes = await ensureOwnEmployeeProfile(rpcClient);
+    assert.equal(directInsertAttempted, false);
+    assert.equal(ensuredRes.ok, true);
+    assert.equal(ensuredRes.data?.role, 'EMPLOYEE');
+    assert.equal(ensuredRes.data?.account_status, 'PENDING');
+    assert.equal(ensuredRes.data?.auth_user_id, rpcEmpUid);
+
+    // 5) Admin logs in -> sees Meera as PENDING -> approves -> suspends -> reactivates -> rejects
+    const adminSignIn = await signInWithEmail('neelgagan@neel3dspace.com', 'AdminPassword123', flowSb);
+    assert.equal(adminSignIn.ok, true);
+    const adminProfile = adminSignIn.data!.profile!;
+    assert.equal(isApprovedAdmin(adminProfile, adminSignIn.data!.user.id), true);
+
+    const directory = await fetchAllEmployeeProfiles(adminProfile, flowSb);
+    assert.equal(directory.ok, true);
+    const pendingMeera = directory.data!.find((p) => p.auth_user_id === newUid);
+    assert.ok(pendingMeera);
+    assert.equal(pendingMeera!.account_status, 'PENDING');
+    assert.equal(pendingMeera!.full_name, 'Meera Nair');
+    assert.equal(pendingMeera!.employee_id, 'EMP-2026');
+    assert.equal(pendingMeera!.username, 'meera.nair');
+    assert.equal(pendingMeera!.mobile, '+91 98765 11223');
+
+    // Approve -> employee can access Studio, still blocked from /admin
+    const approvedMeera = await adminUpdateEmployeeStatus(pendingMeera!, 'APPROVED', adminProfile, flowSb);
+    assert.equal(approvedMeera.ok, true);
+    assert.equal(approvedMeera.data?.account_status, 'APPROVED');
+    assert.ok(approvedMeera.data?.approved_at);
+    assert.equal(approvedMeera.data?.approved_by, adminProfile.auth_user_id);
+
+    assert.equal(
+      evaluateRouteAccess('studio', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: newUid,
+        profile: approvedMeera.data!,
+      }).allowed,
+      true
+    );
+    assert.equal(
+      evaluateRouteAccess('admin', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: newUid,
+        profile: approvedMeera.data!,
+      }).allowed,
+      false
+    );
+
+    // Suspend -> blocked from Studio
+    const suspendedMeera = await adminUpdateEmployeeStatus(approvedMeera.data!, 'SUSPENDED', adminProfile, flowSb);
+    assert.equal(suspendedMeera.ok, true);
+    assert.equal(suspendedMeera.data?.account_status, 'SUSPENDED');
+    assert.equal(
+      evaluateRouteAccess('studio', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: newUid,
+        profile: suspendedMeera.data!,
+      }).redirectTo,
+      'account-suspended'
+    );
+
+    // Reactivate -> regains Studio access
+    const reactivatedMeera = await adminUpdateEmployeeStatus(suspendedMeera.data!, 'APPROVED', adminProfile, flowSb);
+    assert.equal(reactivatedMeera.ok, true);
+    assert.equal(reactivatedMeera.data?.account_status, 'APPROVED');
+
+    // Reject -> blocked from Studio
+    const rejectedMeera = await adminUpdateEmployeeStatus(reactivatedMeera.data!, 'REJECTED', adminProfile, flowSb);
+    assert.equal(rejectedMeera.ok, true);
+    assert.equal(rejectedMeera.data?.account_status, 'REJECTED');
+    assert.equal(
+      evaluateRouteAccess('studio', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: newUid,
+        profile: rejectedMeera.data!,
+      }).redirectTo,
+      'account-rejected'
+    );
+
+    // Existing Admin account preserved untouched
+    const adminCheck = flowMock.getProfileByAuthId(adminProfile.auth_user_id);
+    assert.equal(adminCheck?.role, 'ADMIN');
+    assert.equal(adminCheck?.account_status, 'APPROVED');
+  });
+
+  await test('27. Callback redirect, email_confirmed_at admin field, and safe recovery for missing profile (neelgagan.singh.br@gmail.com)', async () => {
+    // 1) Default auth callback route builder & URL parser
+    assert.equal(
+      buildAuthRedirectUrl('/auth/callback', 'https://neel3dspace.example.com/auth/callback'),
+      'https://neel3dspace.example.com/auth/callback'
+    );
+    assert.equal(parseRouteFromLocation('/auth/callback', '?code=pkce-recover-1', ''), 'pending-approval');
+
+    // 2) Simulated state mirroring the user's real Supabase project:
+    // - Permanent Super Admin: neelgaganat97@gmail.com (94fd4f13-09e4-4fa4-a83f-4900649b1ffc)
+    // - Failed prior registration: neelgagan.singh.br@gmail.com (Auth user exists, employee_profiles row missing)
+    const superAdminUid = '94fd4f13-09e4-4fa4-a83f-4900649b1ffc';
+    const missingEmpUid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+    const confirmedIso = '2026-05-01T10:15:00.000Z';
+
+    const dbProfiles: EmployeeProfile[] = [
+      {
+        id: 'prof-super-admin-real',
+        auth_user_id: superAdminUid,
+        full_name: 'Neelgagan B R',
+        employee_id: 'ADMIN-001',
+        username: 'neelgagan.admin',
+        email: 'neelgaganat97@gmail.com',
+        mobile: '+91 90000 00001',
+        role: 'ADMIN',
+        account_status: 'APPROVED',
+        approved_at: '2026-01-01T00:00:00.000Z',
+        approved_by: superAdminUid,
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+        email_confirmed_at: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+
+    let activeUid = missingEmpUid;
+    let activeEmail = 'neelgagan.singh.br@gmail.com';
+    let receivedRecoveryArgs: Record<string, unknown> = {};
+    let simulateDuplicateUsername = false;
+    let simulateRpcMissing = false;
+
+    const makeSession = (uid: string, email: string): Session =>
+      ({
+        access_token: `token-${uid}`,
+        refresh_token: `refresh-${uid}`,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        user: {
+          id: uid,
+          email,
+          email_confirmed_at: confirmedIso,
+          user_metadata: {
+            full_name: 'Neelgagan Singh',
+          },
+        } as unknown as User,
+      }) as Session;
+
+    const recoveryClient = {
+      auth: {
+        getSession: async () => ({ data: { session: makeSession(activeUid, activeEmail) }, error: null }),
+        refreshSession: async () => ({ data: { session: makeSession(activeUid, activeEmail) }, error: null }),
+      },
+      rpc: async (fn: string, params?: Record<string, unknown>) => {
+        if (fn === 'ensure_own_employee_profile') {
+          if (simulateRpcMissing) {
+            return {
+              status: 404,
+              data: null,
+              error: { code: 'PGRST202', message: 'Could not find the function public.ensure_own_employee_profile' },
+            };
+          }
+          if (simulateDuplicateUsername) {
+            return {
+              status: 409,
+              data: null,
+              error: { code: '23505', message: 'duplicate key value violates unique constraint "employee_profiles_username_key"' },
+            };
+          }
+          receivedRecoveryArgs = params ?? {};
+          const existing = dbProfiles.find((p) => p.auth_user_id === activeUid);
+          if (existing) {
+            return { status: 200, data: { ...existing }, error: null };
+          }
+          const created: EmployeeProfile = {
+            id: 'prof-recovered-emp-1',
+            auth_user_id: activeUid,
+            full_name: String(params?.p_full_name || 'Neelgagan Singh'),
+            employee_id: String(params?.p_employee_id || 'EMP-47AC10'),
+            username: String(params?.p_username || 'neelgagan.singh.br'),
+            email: activeEmail,
+            mobile: String(params?.p_mobile || '+91 98765 44332'),
+            role: 'EMPLOYEE',
+            account_status: 'PENDING',
+            approved_at: null,
+            approved_by: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            email_confirmed_at: confirmedIso,
+          };
+          dbProfiles.push(created);
+          return { status: 200, data: { ...created }, error: null };
+        }
+
+        if (fn === 'admin_list_employee_profiles') {
+          if (activeUid !== superAdminUid) {
+            return {
+              status: 403,
+              data: null,
+              error: { code: '42501', message: 'Forbidden: Approved administrator privileges required.' },
+            };
+          }
+          return { status: 200, data: dbProfiles.map((p) => ({ ...p })), error: null };
+        }
+
+        if (fn === 'admin_get_employee_profile') {
+          if (activeUid !== superAdminUid) {
+            return {
+              status: 403,
+              data: null,
+              error: { code: '42501', message: 'Forbidden: Approved administrator privileges required.' },
+            };
+          }
+          const found = dbProfiles.find((p) => p.id === params?.p_profile_id);
+          return found
+            ? { status: 200, data: { ...found }, error: null }
+            : { status: 404, data: null, error: { message: 'Not found' } };
+        }
+
+        if (fn === 'admin_update_employee_status') {
+          if (activeUid !== superAdminUid) {
+            return {
+              status: 403,
+              data: null,
+              error: { code: '42501', message: 'Forbidden: Approved administrator privileges required.' },
+            };
+          }
+          const found = dbProfiles.find((p) => p.id === params?.p_profile_id);
+          if (!found) return { status: 404, data: null, error: { message: 'Not found' } };
+          found.account_status = params?.p_new_status as AccountStatus;
+          if (found.account_status === 'APPROVED') {
+            found.approved_at = new Date().toISOString();
+            found.approved_by = superAdminUid;
+          }
+          return { status: 200, data: { ...found }, error: null };
+        }
+
+        return { status: 404, data: null, error: { message: `Unknown RPC ${fn}` } };
+      },
+    } as unknown as SupabaseClient;
+
+    // 3) Missing RPC reports rpcUnavailable=true cleanly without crashing session bootstrap
+    simulateRpcMissing = true;
+    const missingRpcRes = await ensureOwnEmployeeProfile(recoveryClient);
+    assert.equal(missingRpcRes.ok, true);
+    assert.equal(missingRpcRes.data, null);
+    assert.equal(missingRpcRes.rpcUnavailable, true);
+    simulateRpcMissing = false;
+
+    // 4) Duplicate username returns structured field error
+    simulateDuplicateUsername = true;
+    const dupRes = await ensureOwnEmployeeProfile(recoveryClient, 5000, {
+      fullName: 'Neelgagan Singh',
+      employeeId: 'EMP-2027',
+      username: 'neelgagan.admin',
+      mobile: '+91 98765 44332',
+    });
+    assert.equal(dupRes.ok, false);
+    assert.equal(dupRes.fieldErrors?.username !== undefined, true);
+    simulateDuplicateUsername = false;
+
+    // 5) Safe profile recovery for neelgagan.singh.br@gmail.com creates strictly EMPLOYEE + PENDING
+    const recovered = await ensureOwnEmployeeProfile(recoveryClient, 5000, {
+      fullName: 'Neelgagan Singh',
+      employeeId: 'emp-2027',
+      username: 'Neelgagan.Singh',
+      mobile: '+91 98765 44332',
+    });
+    assert.equal(recovered.ok, true);
+    assert.equal(receivedRecoveryArgs.p_employee_id, 'EMP-2027');
+    assert.equal(receivedRecoveryArgs.p_username, 'neelgagan.singh');
+    assert.equal(recovered.data?.auth_user_id, missingEmpUid);
+    assert.equal(recovered.data?.role, 'EMPLOYEE');
+    assert.equal(recovered.data?.account_status, 'PENDING');
+    assert.equal(recovered.data?.approved_at, null);
+    assert.equal(recovered.data?.approved_by, null);
+
+    // 6) Idempotency: retrying recovery never creates a duplicate row
+    const retryRecovered = await ensureOwnEmployeeProfile(recoveryClient);
+    assert.equal(retryRecovered.ok, true);
+    assert.equal(dbProfiles.filter((p) => p.auth_user_id === missingEmpUid).length, 1);
+
+    // 7) Pending employee is blocked from /admin and Studio
+    assert.equal(
+      evaluateRouteAccess('studio', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: missingEmpUid,
+        profile: recovered.data!,
+      }).redirectTo,
+      'pending-approval'
+    );
+    assert.equal(
+      evaluateRouteAccess('admin', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: missingEmpUid,
+        profile: recovered.data!,
+      }).allowed,
+      false
+    );
+
+    // 8) Super Admin (neelgaganat97@gmail.com / 94fd4f13-09e4-4fa4-a83f-4900649b1ffc) views directory with email_confirmed_at
+    activeUid = superAdminUid;
+    activeEmail = 'neelgaganat97@gmail.com';
+    const superAdminProfile = dbProfiles[0];
+    assert.equal(isApprovedAdmin(superAdminProfile, superAdminUid), true);
+
+    const listRes = await fetchAllEmployeeProfiles(superAdminProfile, recoveryClient);
+    assert.equal(listRes.ok, true);
+    const pendingRec = listRes.data!.find((p) => p.email === 'neelgagan.singh.br@gmail.com');
+    assert.ok(pendingRec);
+    assert.equal(pendingRec!.account_status, 'PENDING');
+    assert.equal(pendingRec!.email_confirmed_at, confirmedIso);
+
+    const detailRes = await adminGetEmployeeProfile(pendingRec!.id, superAdminProfile, recoveryClient);
+    assert.equal(detailRes.ok, true);
+    assert.equal(detailRes.data?.email_confirmed_at, confirmedIso);
+
+    // 9) Super Admin approves -> employee gains Studio access but stays blocked from /admin
+    const approvedRec = await adminUpdateEmployeeStatus(pendingRec!, 'APPROVED', superAdminProfile, recoveryClient);
+    assert.equal(approvedRec.ok, true);
+    assert.equal(approvedRec.data?.account_status, 'APPROVED');
+    assert.equal(approvedRec.data?.approved_by, superAdminUid);
+    assert.ok(approvedRec.data?.approved_at);
+
+    assert.equal(
+      evaluateRouteAccess('studio', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: missingEmpUid,
+        profile: approvedRec.data!,
+      }).allowed,
+      true
+    );
+    assert.equal(
+      evaluateRouteAccess('admin', {
+        isAuthenticated: true,
+        isLoading: false,
+        authUserId: missingEmpUid,
+        profile: approvedRec.data!,
+      }).allowed,
+      false
+    );
+
+    // 10) Super Admin profile remains completely intact
+    assert.equal(dbProfiles[0].auth_user_id, superAdminUid);
+    assert.equal(dbProfiles[0].role, 'ADMIN');
+    assert.equal(dbProfiles[0].account_status, 'APPROVED');
+  });
+
+  console.log(`\nALL ${passed}/27 AUTHENTICATION & AUTHORIZATION SCENARIOS PASSED.`);
 }
 
 runTests().catch((err) => {

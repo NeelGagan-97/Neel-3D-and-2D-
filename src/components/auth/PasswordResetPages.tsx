@@ -315,15 +315,6 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
         </div>
       ) : (
         <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-gutter-lg">
-          {!isConfigured && (
-            <div
-              role="alert"
-              className="p-gutter-md rounded-md bg-warning/15 border border-warning text-on-surface text-body-sm"
-            >
-              Supabase authentication is not configured in this environment.
-            </div>
-          )}
-
           {error && (
             <div
               role="alert"
