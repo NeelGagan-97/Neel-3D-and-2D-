@@ -10,9 +10,6 @@ interface LoginPageProps {
   onClearNotice?: () => void;
 }
 
-const LOGIN_PREVIEW_IMAGE =
-  '/assets/aistudio/RzZiKv9xT1og5t19AMydaa74VOh5lwtt9R8cSp0YKJ7_asIgIMQHEugMB-irmkmZjD5Vb2Gc1l48413n4wVduaWTyLMZ0NwG1zhzFy_kjaOVETDUnjkDdqboLQVoPBf2CVVRY-RaifFSuXRvU2EECjLUEJV67HkosAZzkD-5Px0dbQ6gVdXK1hNP7i06o9Sm_4f423635.jpg';
-
 export const LoginPage: React.FC<LoginPageProps> = ({
   onNavigateRoute,
   intendedRoute,
@@ -175,20 +172,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               </p>
             </div>
 
-            {/* Embedded 3D Architectural Visualization Card */}
+            {/* Engine Info Card */}
             <div className="rounded-2xl overflow-hidden border border-white/[0.09] bg-[#110F1D] shadow-[0_24px_60px_rgba(0,0,0,0.55)]">
-              <div className="relative aspect-[16/10] w-full overflow-hidden bg-[#0E0C18]">
-                <img
-                  src={LOGIN_PREVIEW_IMAGE}
-                  alt="Abstract 3D architectural interior visualization with ambient royal purple and electric violet lighting"
-                  className="w-full h-full object-cover object-center"
-                />
-                <div
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[#110F1D] via-transparent to-transparent opacity-80"
-                />
-              </div>
-              <div className="px-4 py-3 bg-[#110F1D] border-t border-white/[0.06] flex items-center justify-between gap-3">
+              <div className="px-4 py-3 bg-[#110F1D] flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="material-symbols-outlined text-[#A78BFA] text-[16px] shrink-0" aria-hidden="true">
                     deployed_code
