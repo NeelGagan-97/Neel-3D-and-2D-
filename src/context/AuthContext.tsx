@@ -22,7 +22,13 @@ import {
 } from '../services/authService';
 import { EmployeeProfile, EmployeeRegistrationInput } from '../types/auth';
 import { isApprovedAdmin, isApprovedUser } from '../utils/authValidation';
-import { isRecoveryUrl } from '../utils/router';
+import {
+  clearAuthUrlParams,
+  isRecoveryUrl,
+  parseAuthErrorFromUrl,
+  parseRecoveryCode,
+  parseRecoveryTokenHash,
+} from '../utils/router';
 
 interface AuthContextValue {
   isConfigured: boolean;
@@ -33,6 +39,7 @@ interface AuthContextValue {
   profileLoading: boolean;
   profileError: string | null;
   isRecoveryMode: boolean;
+  recoveryError: string | null;
   sessionNotice: string | null;
   isAuthenticated: boolean;
   isApproved: boolean;
@@ -44,6 +51,7 @@ interface AuthContextValue {
   sendPasswordReset: (email: string) => Promise<AuthActionResult>;
   resetPassword: (password: string, confirmPassword: string) => Promise<AuthActionResult>;
   clearSessionNotice: () => void;
+  clearRecoveryError: () => void;
   exitRecoveryMode: () => void;
 }
 
@@ -64,8 +72,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [isRecoveryMode, setIsRecoveryMode] = useState<boolean>(() =>
     typeof window !== 'undefined'
-      ? isRecoveryUrl(window.location.search, window.location.hash)
+      ? isRecoveryUrl(
+          window.location.search,
+          window.location.hash,
+          window.location.pathname
+        )
       : false
+  );
+  const [recoveryError, setRecoveryError] = useState<string | null>(() =>
+    typeof window !== 'undefined'
+      ? parseAuthErrorFromUrl(window.location.search, window.location.hash)
+      : null
   );
 
   // Deduplication refs to prevent redundant profile queries and re-subscriptions
@@ -78,9 +95,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   } | null>(null);
   const manualSignOutRef = useRef<boolean>(false);
   const hadActiveSessionRef = useRef<boolean>(false);
+  const isRecoveryModeRef = useRef<boolean>(isRecoveryMode);
+  const recoveryExchangeAttemptedRef = useRef<boolean>(false);
 
   profileRef.current = profile;
   profileErrorRef.current = profileError;
+  isRecoveryModeRef.current = isRecoveryMode;
 
   const loadProfileForUser = useCallback(
     async (userId: string, force = false): Promise<EmployeeProfile | null> => {
@@ -137,19 +157,86 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const initSession = async () => {
       try {
+        const urlSearch = typeof window !== 'undefined' ? window.location.search : '';
+        const urlHash = typeof window !== 'undefined' ? window.location.hash : '';
+        const urlPath = typeof window !== 'undefined' ? window.location.pathname : '';
+
+        const urlError = parseAuthErrorFromUrl(urlSearch, urlHash);
+        if (urlError) {
+          if (isMounted) {
+            setRecoveryError(urlError);
+            isRecoveryModeRef.current = false;
+            setIsRecoveryMode(false);
+          }
+          clearAuthUrlParams();
+        }
+
+        // Handle token_hash recovery links (e.g. /reset-password?token_hash=...&type=recovery)
+        const tokenHash = parseRecoveryTokenHash(urlSearch);
+        if (tokenHash && !recoveryExchangeAttemptedRef.current) {
+          recoveryExchangeAttemptedRef.current = true;
+          const { data: otpData, error: otpError } = await client.auth.verifyOtp({
+            token_hash: tokenHash,
+            type: 'recovery',
+          });
+          if (!isMounted) return;
+          if (otpError) {
+            setRecoveryError(
+              'This password reset link is invalid or has expired. Please request a new recovery link.'
+            );
+            isRecoveryModeRef.current = false;
+            setIsRecoveryMode(false);
+          } else if (otpData.session) {
+            isRecoveryModeRef.current = true;
+            setIsRecoveryMode(true);
+            setRecoveryError(null);
+            setSession(otpData.session);
+            setUser(otpData.session.user);
+            hadActiveSessionRef.current = true;
+            clearAuthUrlParams();
+            return;
+          }
+        }
+
         const { data, error } = await client.auth.getSession();
         if (!isMounted) return;
 
-        if (error) {
-          setSession(null);
-          setUser(null);
-          setProfile(null);
-          setSessionNotice('Your session could not be verified. Please sign in again.');
+        let currentSession = data.session;
+
+        // Handle PKCE recovery callback (/reset-password?code=...) if not yet exchanged
+        const recoveryCode = parseRecoveryCode(urlPath, urlSearch);
+        if (!currentSession && recoveryCode && !recoveryExchangeAttemptedRef.current) {
+          recoveryExchangeAttemptedRef.current = true;
+          const { data: exchangeData, error: exchangeError } =
+            await client.auth.exchangeCodeForSession(recoveryCode);
+          if (!isMounted) return;
+          if (exchangeError) {
+            setRecoveryError(
+              'This password reset link is invalid or has expired. Please request a new recovery link.'
+            );
+            isRecoveryModeRef.current = false;
+            setIsRecoveryMode(false);
+          } else if (exchangeData.session) {
+            currentSession = exchangeData.session;
+            isRecoveryModeRef.current = true;
+            setIsRecoveryMode(true);
+            setRecoveryError(null);
+            clearAuthUrlParams();
+          }
+        }
+
+        if (error && !currentSession) {
+          if (!isRecoveryModeRef.current) {
+            setSession(null);
+            setUser(null);
+            setProfile(null);
+            setSessionNotice('Your session could not be verified. Please sign in again.');
+          }
           return;
         }
 
-        const currentSession = data.session;
-        if (currentSession && isSessionExpired(currentSession)) {
+        // Never destroy an active password recovery session during initialization
+        if (currentSession && isSessionExpired(currentSession) && !isRecoveryModeRef.current) {
           await client.auth.signOut();
           if (!isMounted) return;
           setSession(null);
@@ -164,10 +251,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         if (currentSession?.user) {
           hadActiveSessionRef.current = true;
+          if (isRecoveryUrl(urlSearch, urlHash, urlPath)) {
+            isRecoveryModeRef.current = true;
+            setIsRecoveryMode(true);
+            setRecoveryError(null);
+            clearAuthUrlParams();
+          }
           await loadProfileForUser(currentSession.user.id);
         } else {
           loadedUserIdRef.current = null;
           setProfile(null);
+          // If the URL looked like a recovery link but produced no session, clear stale flag
+          if (isRecoveryModeRef.current && !isRecoveryUrl(urlSearch, urlHash, urlPath)) {
+            isRecoveryModeRef.current = false;
+            setIsRecoveryMode(false);
+          }
         }
       } finally {
         if (isMounted) {
@@ -182,7 +280,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!isMounted) return;
 
       if (event === 'PASSWORD_RECOVERY') {
+        isRecoveryModeRef.current = true;
         setIsRecoveryMode(true);
+        setRecoveryError(null);
+        if (nextSession) {
+          hadActiveSessionRef.current = true;
+          setSession(nextSession);
+          setUser(nextSession.user);
+          clearAuthUrlParams();
+        }
+        return;
       }
 
       if (event === 'SIGNED_OUT') {
@@ -190,6 +297,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const wasManual = manualSignOutRef.current;
         manualSignOutRef.current = false;
         hadActiveSessionRef.current = false;
+        isRecoveryModeRef.current = false;
         loadedUserIdRef.current = null;
         inFlightProfileRef.current = null;
         setSession(null);
@@ -203,7 +311,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      if (nextSession && isSessionExpired(nextSession)) {
+      if (nextSession && isSessionExpired(nextSession) && !isRecoveryModeRef.current) {
         hadActiveSessionRef.current = false;
         loadedUserIdRef.current = null;
         setSession(null);
@@ -222,7 +330,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (loadedUserIdRef.current !== nextSession.user.id) {
           void loadProfileForUser(nextSession.user.id);
         }
-      } else {
+      } else if (!isRecoveryModeRef.current) {
         loadedUserIdRef.current = null;
         setProfile(null);
       }
@@ -237,9 +345,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const handleSignIn = useCallback(
     async (email: string, password: string): Promise<AuthActionResult<LoginResult>> => {
       setSessionNotice(null);
+      setRecoveryError(null);
       const res = await signInWithEmail(email, password);
       if (res.ok && res.data) {
         hadActiveSessionRef.current = true;
+        isRecoveryModeRef.current = false;
+        setIsRecoveryMode(false);
         setSession(res.data.session);
         setUser(res.data.user);
         loadedUserIdRef.current = res.data.user.id;
@@ -273,6 +384,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const handleSignOut = useCallback(async () => {
     manualSignOutRef.current = true;
     hadActiveSessionRef.current = false;
+    isRecoveryModeRef.current = false;
     loadedUserIdRef.current = null;
     inFlightProfileRef.current = null;
     await signOutUser();
@@ -281,6 +393,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setProfile(null);
     setProfileError(null);
     setIsRecoveryMode(false);
+    setRecoveryError(null);
     setSessionNotice(null);
   }, []);
 
@@ -297,7 +410,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     async (password: string, confirmPassword: string) => {
       const res = await updateUserPassword(password, confirmPassword);
       if (res.ok) {
+        clearAuthUrlParams();
+        // End the temporary recovery session cleanly so the user can sign in fresh on /login
+        manualSignOutRef.current = true;
+        hadActiveSessionRef.current = false;
+        isRecoveryModeRef.current = false;
+        loadedUserIdRef.current = null;
+        inFlightProfileRef.current = null;
+        await signOutUser();
+        setSession(null);
+        setUser(null);
+        setProfile(null);
+        setProfileError(null);
         setIsRecoveryMode(false);
+        setRecoveryError(null);
+        setSessionNotice(null);
       }
       return res;
     },
@@ -314,6 +441,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       profileLoading,
       profileError,
       isRecoveryMode,
+      recoveryError,
       sessionNotice,
       isAuthenticated: Boolean(session && user),
       isApproved: isApprovedUser(profile),
@@ -325,7 +453,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       sendPasswordReset: handleSendPasswordReset,
       resetPassword: handleResetPassword,
       clearSessionNotice: () => setSessionNotice(null),
-      exitRecoveryMode: () => setIsRecoveryMode(false),
+      clearRecoveryError: () => setRecoveryError(null),
+      exitRecoveryMode: () => {
+        isRecoveryModeRef.current = false;
+        setIsRecoveryMode(false);
+      },
     }),
     [
       session,
@@ -335,6 +467,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       profileLoading,
       profileError,
       isRecoveryMode,
+      recoveryError,
       sessionNotice,
       handleSignIn,
       handleRegister,

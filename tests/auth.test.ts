@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import {
   adminUpdateEmployeeStatus,
+  buildAuthRedirectUrl,
   fetchAllEmployeeProfiles,
   fetchEmployeeProfile,
   registerEmployee,
@@ -16,7 +17,13 @@ import {
   evaluateRouteAccess,
   resolvePostLoginRoute,
 } from '../src/utils/authValidation';
-import { parseRouteFromLocation } from '../src/utils/router';
+import {
+  isRecoveryUrl,
+  parseAuthErrorFromUrl,
+  parseRecoveryCode,
+  parseRecoveryTokenHash,
+  parseRouteFromLocation,
+} from '../src/utils/router';
 
 /**
  * In-memory Supabase harness mirroring the exact public.employee_profiles schema,
@@ -36,6 +43,7 @@ class RlsMockSupabase {
   private currentSession: Session | null = null;
   private requireEmailConfirmation = false;
   public resetEmailsSent: string[] = [];
+  public resetRedirects: string[] = [];
 
   constructor() {
     // Seed existing approved administrator: Neelgagan B R (preserved across all tests)
@@ -208,8 +216,11 @@ class RlsMockSupabase {
         return { error: null };
       },
 
-      async resetPasswordForEmail(email: string) {
+      async resetPasswordForEmail(email: string, options?: { redirectTo?: string }) {
         self.resetEmailsSent.push(email);
+        if (options?.redirectTo) {
+          self.resetRedirects.push(options.redirectTo);
+        }
         return { data: {}, error: null };
       },
 
@@ -534,12 +545,51 @@ async function runTests() {
     assert.match(res.error ?? '', /Invalid email or password/i);
   });
 
-  // 7. Password reset flow
+  // 7. Password reset flow (non-localhost redirectTo, implicit/PKCE/token_hash recovery, updateUser)
   await test('7. Password reset request & password update', async () => {
-    const reqRes = await requestPasswordReset('aarav@neel3dspace.com', sb, 'https://app.test/reset-password');
+    const deployedOriginResetUrl = buildAuthRedirectUrl(
+      '/reset-password',
+      'https://neel-3d-and-2d.neelgaganat97.workers.dev/reset-password'
+    );
+    assert.equal(
+      deployedOriginResetUrl,
+      'https://neel-3d-and-2d.neelgaganat97.workers.dev/reset-password'
+    );
+    assert.equal(deployedOriginResetUrl?.includes('localhost'), false);
+
+    const reqRes = await requestPasswordReset(
+      'aarav@neel3dspace.com',
+      sb,
+      deployedOriginResetUrl
+    );
     assert.equal(reqRes.ok, true);
     assert.ok(mock.resetEmailsSent.includes('aarav@neel3dspace.com'));
-    assert.equal(parseRouteFromLocation('/reset-password', '', '#access_token=abc&type=recovery'), 'reset-password');
+    assert.ok(
+      mock.resetRedirects.includes('https://neel-3d-and-2d.neelgaganat97.workers.dev/reset-password')
+    );
+
+    // Implicit, PKCE, and token_hash recovery URL detection
+    assert.equal(
+      parseRouteFromLocation('/reset-password', '', '#access_token=abc&type=recovery'),
+      'reset-password'
+    );
+    assert.equal(
+      parseRouteFromLocation('/reset-password', '?code=pkce-code-123', ''),
+      'reset-password'
+    );
+    assert.equal(
+      isRecoveryUrl('?code=pkce-code-123', '', '/reset-password'),
+      true
+    );
+    assert.equal(parseRecoveryCode('/reset-password', '?code=pkce-code-123'), 'pkce-code-123');
+    assert.equal(
+      parseRecoveryTokenHash('?token_hash=th_999&type=recovery'),
+      'th_999'
+    );
+    assert.match(
+      parseAuthErrorFromUrl('', '#error=access_denied&error_code=otp_expired') ?? '',
+      /expired/i
+    );
 
     await signInWithEmail('aarav@neel3dspace.com', 'Password123', sb);
     const badUpdate = await updateUserPassword('NewPass123', 'Mismatch123', sb);
@@ -818,7 +868,7 @@ async function runTests() {
     assert.equal(parseRouteFromLocation('/'), 'login');
     assert.equal(parseRouteFromLocation('/home'), 'home');
 
-    for (const url of ['/admin', '/studio', '/summary', '/employee-dashboard']) {
+    for (const url of ['/home', '/admin', '/studio', '/summary', '/employee-dashboard']) {
       const parsed = parseRouteFromLocation(url);
       const dec = evaluateRouteAccess(parsed, {
         isAuthenticated: false,

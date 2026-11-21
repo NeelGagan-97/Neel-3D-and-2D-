@@ -106,7 +106,9 @@ export default function App() {
     if (isAuthBusy) return;
     if (!accessDecision.allowed && accessDecision.redirectTo) {
       if (accessDecision.reason === 'unauthenticated') {
-        if (
+        if (route === 'home') {
+          setIntendedRoute('home');
+        } else if (
           route === 'studio' ||
           route === 'summary' ||
           route === 'employee-dashboard' ||
@@ -365,7 +367,6 @@ export default function App() {
   );
 
   const isPublicRoute =
-    route === 'home' ||
     route === 'login' ||
     route === 'register' ||
     route === 'forgot-password' ||
@@ -404,7 +405,14 @@ export default function App() {
   } else if (route === 'forgot-password') {
     content = <ForgotPasswordPage onNavigateRoute={(r) => navigateRoute(r)} />;
   } else if (route === 'reset-password') {
-    content = <ResetPasswordPage onNavigateRoute={(r) => navigateRoute(r)} />;
+    content = (
+      <ResetPasswordPage
+        onNavigateRoute={(r) => navigateRoute(r)}
+        onResetSuccess={() =>
+          setRouteNotice('Your password has been updated. Sign in with your new password.')
+        }
+      />
+    );
   } else if (
     route === 'pending-approval' ||
     route === 'account-rejected' ||

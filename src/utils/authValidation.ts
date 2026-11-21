@@ -212,7 +212,6 @@ export interface RouteAccessDecision {
 }
 
 const PUBLIC_ROUTES = new Set<AppRoute>([
-  'home',
   'login',
   'register',
   'forgot-password',
@@ -220,6 +219,7 @@ const PUBLIC_ROUTES = new Set<AppRoute>([
 ]);
 
 const PROTECTED_DESIGN_ROUTES = new Set<AppRoute>([
+  'home',
   'studio',
   'summary',
   'employee-dashboard',
@@ -238,11 +238,6 @@ export function evaluateRouteAccess(
 
   // Always allow password reset page when in recovery mode or unauthenticated recovery link
   if (route === 'reset-password') {
-    return { allowed: true };
-  }
-
-  // Public homepage is always accessible
-  if (route === 'home') {
     return { allowed: true };
   }
 

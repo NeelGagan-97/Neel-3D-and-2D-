@@ -58,7 +58,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         intendedRoute &&
         profile?.account_status === 'APPROVED' &&
         (intendedRoute !== 'admin' || profile.role === 'ADMIN') &&
-        (intendedRoute === 'studio' ||
+        (intendedRoute === 'home' ||
+          intendedRoute === 'studio' ||
           intendedRoute === 'summary' ||
           intendedRoute === 'employee-dashboard' ||
           intendedRoute === 'admin')
@@ -77,11 +78,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     <div className="min-h-screen flex flex-col bg-[#08070E] text-on-surface">
       <header className="sticky top-0 z-30 bg-[#0C0A15]/95 backdrop-blur-md border-b border-white/[0.07]">
         <div className="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-gutter-sm min-h-16 flex items-center justify-between gap-gutter-md">
-          <button
-            type="button"
-            onClick={() => onNavigateRoute('home')}
-            className="flex items-center gap-gutter-sm text-left cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#8B5CF6] rounded-sm"
-          >
+          <div className="flex items-center gap-gutter-sm text-left">
             <div className="w-9 h-9 rounded-md bg-gradient-to-br from-[#8B5CF6] to-[#6D28D9] border border-[#A78BFA]/40 shadow-[0_0_18px_rgba(139,92,246,0.45)] flex items-center justify-center shrink-0">
               <span className="material-symbols-outlined text-white text-[20px]" aria-hidden="true">
                 deployed_code
@@ -95,17 +92,17 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 EMPLOYEE ACCESS PORTAL
               </span>
             </div>
-          </button>
+          </div>
 
           <button
             type="button"
-            onClick={() => onNavigateRoute('home')}
+            onClick={() => onNavigateRoute('register')}
             className="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-xs rounded-md border border-white/10 bg-white/[0.03] text-slate-300 hover:text-white hover:border-[#8B5CF6]/50 font-label text-label-md transition-colors cursor-pointer whitespace-nowrap"
           >
             <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-              arrow_back
+              person_add
             </span>
-            <span>Back to Home</span>
+            <span>Register</span>
           </button>
         </div>
       </header>

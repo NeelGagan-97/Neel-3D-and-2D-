@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { AppRoute } from '../../types/auth';
 import {
@@ -62,8 +62,8 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({
             <p className="text-body-md text-on-surface-variant">
               If an account exists for{' '}
               <span className="font-mono text-on-surface">{email.trim().toLowerCase()}</span>, a
-              password reset link has been sent to that inbox. Open the link to choose a new
-              password.
+              password reset link has been sent to that inbox. Open the link from your email to
+              choose a new password.
             </p>
           </div>
           <button
@@ -124,13 +124,23 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({
 
 interface ResetPasswordPageProps {
   onNavigateRoute: (route: AppRoute) => void;
+  onResetSuccess?: () => void;
 }
 
 export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
   onNavigateRoute,
+  onResetSuccess,
 }) => {
-  const { resetPassword, isConfigured, isAuthenticated, isRecoveryMode, exitRecoveryMode } =
-    useAuth();
+  const {
+    resetPassword,
+    isConfigured,
+    isAuthenticated,
+    isRecoveryMode,
+    authLoading,
+    recoveryError,
+    clearRecoveryError,
+    exitRecoveryMode,
+  } = useAuth();
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -139,12 +149,24 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [completed, setCompleted] = useState(false);
 
-  const canUpdatePassword = isAuthenticated || isRecoveryMode;
+  const canUpdatePassword = !recoveryError && (isAuthenticated || isRecoveryMode);
+
+  // Automatically redirect to the login page after a successful password update
+  useEffect(() => {
+    if (!completed) return;
+    const timer = window.setTimeout(() => {
+      exitRecoveryMode();
+      onResetSuccess?.();
+      onNavigateRoute('login');
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [completed, exitRecoveryMode, onNavigateRoute, onResetSuccess]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setFieldErrors({});
+    clearRecoveryError();
 
     const validation = validateResetPasswordInput(password, confirmPassword);
     if (!validation.valid) {
@@ -175,22 +197,25 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
     >
       {completed ? (
         <div className="flex flex-col gap-gutter-lg">
-          <div className="p-gutter-lg rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-gutter-xs">
+          <div
+            role="status"
+            className="p-gutter-lg rounded-md bg-surface-container-low border border-success/50 flex flex-col gap-gutter-xs"
+          >
             <div className="flex items-center gap-gutter-xs text-success font-label text-label-md">
               <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
                 check_circle
               </span>
-              <span>Password Updated</span>
+              <span>Password Updated Successfully</span>
             </div>
             <p className="text-body-md text-on-surface-variant">
-              Your password has been successfully updated. You can now sign in with your new
-              password.
+              Your password has been updated. Redirecting you to the Sign In page...
             </p>
           </div>
           <button
             type="button"
             onClick={() => {
               exitRecoveryMode();
+              onResetSuccess?.();
               onNavigateRoute('login');
             }}
             className="w-full py-gutter-sm px-gutter-lg rounded-md bg-primary text-on-primary hover:bg-on-primary-container font-label text-label-md cursor-pointer"
@@ -198,16 +223,44 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
             Continue to Sign In
           </button>
         </div>
+      ) : authLoading ? (
+        <div className="flex flex-col items-center justify-center gap-gutter-md py-gutter-xl text-center">
+          <span
+            className="material-symbols-outlined text-primary text-[28px] animate-spin"
+            aria-hidden="true"
+          >
+            progress_activity
+          </span>
+          <p className="font-body text-body-md text-on-surface-variant">
+            Verifying your password recovery link...
+          </p>
+        </div>
       ) : !canUpdatePassword ? (
         <div className="flex flex-col gap-gutter-lg">
-          <div className="p-gutter-md rounded-md bg-secondary-container/30 border border-secondary text-body-sm text-on-surface-variant">
-            No active password recovery session was detected. Open the password reset link directly
-            from your email, or request a new recovery email.
+          <div
+            role="alert"
+            className="p-gutter-md rounded-md bg-error/15 border border-error text-body-sm text-on-surface"
+          >
+            {recoveryError ??
+              'No active password recovery session was detected. Open the password reset link directly from your email, or request a new recovery email.'}
           </div>
-          <div className="flex items-center justify-end gap-gutter-sm">
+          <div className="flex items-center justify-between gap-gutter-sm">
             <button
               type="button"
-              onClick={() => onNavigateRoute('forgot-password')}
+              onClick={() => {
+                clearRecoveryError();
+                onNavigateRoute('login');
+              }}
+              className="px-gutter-md py-gutter-sm rounded-md border border-outline text-on-surface-variant hover:text-on-surface font-label text-label-md cursor-pointer"
+            >
+              Back to Sign In
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                clearRecoveryError();
+                onNavigateRoute('forgot-password');
+              }}
               className="px-gutter-lg py-gutter-sm rounded-md bg-primary text-on-primary hover:bg-on-primary-container font-label text-label-md cursor-pointer"
             >
               Request Reset Link
@@ -235,7 +288,10 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
                 type={showPassword ? 'text' : 'password'}
                 autoComplete="new-password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (fieldErrors.password) setFieldErrors((p) => ({ ...p, password: '' }));
+                }}
                 placeholder="Min 8 chars, A-Z, a-z, 0-9"
                 disabled={submitting}
                 className={`w-full pl-gutter-md pr-11 py-gutter-sm rounded-md bg-surface-container-low border text-body-md text-on-surface focus:outline-none focus:border-primary ${
@@ -270,7 +326,12 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
               type={showPassword ? 'text' : 'password'}
               autoComplete="new-password"
               value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
+              onChange={(e) => {
+                setConfirmPassword(e.target.value);
+                if (fieldErrors.confirmPassword) {
+                  setFieldErrors((p) => ({ ...p, confirmPassword: '' }));
+                }
+              }}
               placeholder="Re-enter new password"
               disabled={submitting}
               className={`w-full px-gutter-md py-gutter-sm rounded-md bg-surface-container-low border text-body-md text-on-surface focus:outline-none focus:border-primary ${

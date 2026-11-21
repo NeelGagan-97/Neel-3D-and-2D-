@@ -1,32 +1,48 @@
 import React from 'react';
+import { useAuth } from '../../context/AuthContext';
 import { AppRoute } from '../../types/auth';
 
 interface AuthLayoutProps {
   title: string;
-  subtitle: string;
+  subtitle?: string;
   onNavigateRoute: (route: AppRoute) => void;
-  isConfigured: boolean;
+  isConfigured?: boolean;
   maxWidthClass?: string;
   backgroundImageSrc?: string;
-  children: React.ReactNode;
+  children?: React.ReactNode;
 }
+
+const DEFAULT_AUTH_BACKGROUND_IMAGE =
+  '/assets/aistudio/give_more_pictures_like_this_347a3638_2K_0d4ccf75.png';
 
 export const AuthLayout: React.FC<AuthLayoutProps> = ({
   title,
-  subtitle,
   onNavigateRoute,
-  isConfigured,
   maxWidthClass = 'max-w-lg',
-  backgroundImageSrc,
+  backgroundImageSrc = DEFAULT_AUTH_BACKGROUND_IMAGE,
   children,
 }) => {
+  const { isAuthenticated, isApproved, signOut } = useAuth();
+  const backLabel = isAuthenticated && isApproved ? 'Back to Home' : 'Back to Sign In';
+
+  const handleBackAction = async () => {
+    if (isAuthenticated && isApproved) {
+      onNavigateRoute('home');
+      return;
+    }
+    if (isAuthenticated) {
+      await signOut();
+    }
+    onNavigateRoute('login');
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-surface text-on-surface">
       <header className="sticky top-0 z-30 bg-surface-container border-b border-outline-variant">
         <div className="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-gutter-sm min-h-16 flex items-center justify-between gap-gutter-md">
           <button
             type="button"
-            onClick={() => onNavigateRoute('home')}
+            onClick={() => void handleBackAction()}
             className="flex items-center gap-gutter-sm text-left cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary rounded-sm"
           >
             <div className="w-9 h-9 rounded-md bg-primary-container border border-primary flex items-center justify-center shrink-0">
@@ -46,22 +62,18 @@ export const AuthLayout: React.FC<AuthLayoutProps> = ({
 
           <button
             type="button"
-            onClick={() => onNavigateRoute('home')}
+            onClick={() => void handleBackAction()}
             className="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-xs rounded-sm border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-outline font-label text-label-md transition-colors cursor-pointer whitespace-nowrap"
           >
             <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
               arrow_back
             </span>
-            <span>Back to Home</span>
+            <span>{backLabel}</span>
           </button>
         </div>
       </header>
 
-      <main
-        className={`relative flex-1 flex items-center justify-center px-gutter-lg py-gutter-2xl overflow-hidden ${
-          backgroundImageSrc ? '' : 'cad-grid'
-        }`}
-      >
+      <main className="relative flex-1 flex items-center justify-center px-gutter-lg py-gutter-2xl overflow-hidden bg-[#08070E]">
         {backgroundImageSrc && (
           <>
             <img
@@ -72,44 +84,18 @@ export const AuthLayout: React.FC<AuthLayoutProps> = ({
             />
             <div
               aria-hidden="true"
-              className="absolute inset-0 bg-gradient-to-b from-surface/55 via-surface/35 to-surface/65 pointer-events-none"
+              className="absolute inset-0 bg-gradient-to-b from-[#08070E]/55 via-[#08070E]/35 to-[#08070E]/68 pointer-events-none"
             />
           </>
         )}
         <div
-          className={`relative z-10 w-full ${maxWidthClass} rounded-xl p-gutter-xl sm:p-gutter-2xl border ${
-            backgroundImageSrc
-              ? 'bg-surface-container/88 backdrop-blur-md border-outline/80 shadow-2xl'
-              : 'bg-surface-container border-outline-variant'
-          }`}
+          className={`relative z-10 w-full ${maxWidthClass} rounded-xl p-gutter-xl sm:p-gutter-2xl border bg-[#110F1D]/88 backdrop-blur-xl border-white/[0.1] shadow-[0_24px_80px_rgba(0,0,0,0.7)]`}
         >
-          <div className="flex flex-col gap-gutter-xs mb-gutter-xl">
+          <div className={`flex flex-col gap-gutter-xs ${children ? 'mb-gutter-xl' : 'items-center text-center'}`}>
             <h1 className="font-headline text-headline-md text-on-surface text-balance">
               {title}
             </h1>
-            <p className="font-body text-body-md text-on-surface-variant">
-              {subtitle}
-            </p>
           </div>
-
-          {!isConfigured && (
-            <div
-              role="alert"
-              className="mb-gutter-lg p-gutter-md rounded-md bg-secondary-container/40 border border-secondary text-on-secondary-container text-body-sm flex flex-col gap-1"
-            >
-              <div className="flex items-center gap-gutter-xs font-label text-label-md text-secondary">
-                <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                  settings_alert
-                </span>
-                <span>Supabase Configuration Required</span>
-              </div>
-              <p className="text-on-surface-variant">
-                Set <code className="font-mono text-on-surface">VITE_SUPABASE_URL</code> and{' '}
-                <code className="font-mono text-on-surface">VITE_SUPABASE_ANON_KEY</code> (or{' '}
-                <code className="font-mono text-on-surface">VITE_SUPABASE_PUBLISHABLE_KEY</code>) in your environment settings to connect live authentication.
-              </p>
-            </div>
-          )}
 
           {children}
         </div>

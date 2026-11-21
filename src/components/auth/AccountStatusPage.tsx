@@ -89,6 +89,16 @@ export const AccountStatusPage: React.FC<AccountStatusPageProps> = ({
     onNavigateRoute('login');
   };
 
+  if (variant === 'profile-missing') {
+    return (
+      <AuthLayout
+        title={cfg.title}
+        onNavigateRoute={onNavigateRoute}
+        isConfigured={isConfigured}
+      />
+    );
+  }
+
   return (
     <AuthLayout
       title={cfg.title}

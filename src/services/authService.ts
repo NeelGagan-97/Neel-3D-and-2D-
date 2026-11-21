@@ -40,6 +40,35 @@ function getClient(client?: SupabaseClient | null): SupabaseClient | null {
   return client ?? defaultSupabaseClient;
 }
 
+/**
+ * Resolves a valid redirect URL for Supabase Auth emails (password reset, email confirmation).
+ * Prefers explicit override, then optional VITE_APP_URL, then the live browser origin.
+ * Never hardcodes localhost.
+ */
+export function buildAuthRedirectUrl(
+  path: '/login' | '/reset-password',
+  explicitRedirectTo?: string
+): string | undefined {
+  if (explicitRedirectTo?.trim()) {
+    return explicitRedirectTo.trim();
+  }
+
+  const configuredOrigin =
+    typeof import.meta !== 'undefined' && import.meta.env
+      ? (import.meta.env.VITE_APP_URL as string | undefined)?.trim()
+      : undefined;
+
+  if (configuredOrigin && /^https?:\/\//i.test(configuredOrigin)) {
+    return `${configuredOrigin.replace(/\/+$/, '')}${path}`;
+  }
+
+  if (typeof window !== 'undefined' && window.location?.origin && window.location.origin !== 'null') {
+    return `${window.location.origin.replace(/\/+$/, '')}${path}`;
+  }
+
+  return undefined;
+}
+
 function mapSignUpError(message: string): {
   error: string;
   fieldErrors: Record<string, string>;
@@ -104,6 +133,15 @@ function mapAuthError(message: string): string {
   }
   if (lower.includes('database error saving new user')) {
     return 'Registration could not be completed because the email address, username, or Employee ID may already be registered. Please check your details and try again.';
+  }
+  if (lower.includes('different from the old password') || lower.includes('same password')) {
+    return 'Your new password must be different from your previous password.';
+  }
+  if (lower.includes('auth session missing') || lower.includes('session missing')) {
+    return 'Your password recovery session is missing or expired. Please request a new password reset link.';
+  }
+  if (lower.includes('otp_expired') || lower.includes('expired')) {
+    return 'Your recovery link or session has expired. Please request a new reset link or sign in again.';
   }
   if (lower.includes('rate limit') || lower.includes('too many requests')) {
     return 'Too many attempts. Please wait a moment before trying again.';
@@ -186,9 +224,7 @@ export async function registerEmployee(
   const trimmedMobile = input.mobile.trim();
 
   // Create Supabase Auth user with registration metadata consumed by the auth.users trigger
-  const redirectUrl =
-    emailRedirectTo ??
-    (typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined);
+  const redirectUrl = buildAuthRedirectUrl('/login', emailRedirectTo);
 
   const { data: signUpData, error: signUpError } = await sb.auth.signUp({
     email: normalizedEmail,
@@ -369,13 +405,12 @@ export async function requestPasswordReset(
     };
   }
 
-  const targetRedirect =
-    redirectTo ??
-    (typeof window !== 'undefined' ? `${window.location.origin}/reset-password` : undefined);
+  const targetRedirect = buildAuthRedirectUrl('/reset-password', redirectTo);
 
-  const { error } = await sb.auth.resetPasswordForEmail(normalizeEmail(email), {
-    redirectTo: targetRedirect,
-  });
+  const { error } = await sb.auth.resetPasswordForEmail(
+    normalizeEmail(email),
+    targetRedirect ? { redirectTo: targetRedirect } : undefined
+  );
 
   if (error) {
     return { ok: false, error: mapAuthError(error.message) };
