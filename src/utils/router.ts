@@ -42,7 +42,8 @@ export function isRecoveryUrl(
 
   if (cleanPath === '/reset-password') {
     const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
-    if (params.has('code') || params.has('token_hash')) {
+    const hashParams = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash);
+    if (params.has('code') || params.has('token_hash') || hashParams.has('access_token')) {
       return true;
     }
   }

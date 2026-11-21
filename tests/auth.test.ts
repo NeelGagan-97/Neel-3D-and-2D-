@@ -112,6 +112,15 @@ class RlsMockSupabase {
     };
   }
 
+  expireCurrentSession() {
+    if (this.currentSession) {
+      this.currentSession = {
+        ...this.currentSession,
+        expires_at: Math.floor(Date.now() / 1000) - 60,
+      };
+    }
+  }
+
   asClient(): SupabaseClient {
     const self = this;
 
@@ -591,13 +600,48 @@ async function runTests() {
       /expired/i
     );
 
+    // 7a. Missing recovery session must be rejected cleanly
+    await signOutUser(sb);
+    const missingSessionRes = await updateUserPassword('NewPass123', 'NewPass123', sb);
+    assert.equal(missingSessionRes.ok, false);
+    assert.match(missingSessionRes.error ?? '', /missing or expired/i);
+
+    // 7b. Empty passwords must be rejected cleanly with field errors
+    const bothEmpty = await updateUserPassword('', '', sb);
+    assert.equal(bothEmpty.ok, false);
+    assert.ok(bothEmpty.fieldErrors?.password);
+    assert.ok(bothEmpty.fieldErrors?.confirmPassword);
+
+    const confirmEmpty = await updateUserPassword('NewPass123', '', sb);
+    assert.equal(confirmEmpty.ok, false);
+    assert.ok(confirmEmpty.fieldErrors?.confirmPassword);
+
+    // 7c. Short password (< 8 characters) must be rejected cleanly
+    const shortPass = await updateUserPassword('short7!', 'short7!', sb);
+    assert.equal(shortPass.ok, false);
+    assert.match(shortPass.fieldErrors?.password ?? '', /at least 8 characters/i);
+
+    // 7d. Mismatched passwords must be rejected cleanly
     await signInWithEmail('aarav@neel3dspace.com', 'Password123', sb);
     const badUpdate = await updateUserPassword('NewPass123', 'Mismatch123', sb);
     assert.equal(badUpdate.ok, false);
+    assert.match(badUpdate.fieldErrors?.confirmPassword ?? '', /do not match/i);
 
+    // 7e. Expired recovery session must be rejected cleanly
+    mock.expireCurrentSession();
+    const expiredSessionRes = await updateUserPassword('NewPass123', 'NewPass123', sb);
+    assert.equal(expiredSessionRes.ok, false);
+    assert.match(expiredSessionRes.error ?? '', /expired/i);
+
+    // 7f. Valid active recovery session updates password cleanly without destroying session prematurely
+    await signInWithEmail('aarav@neel3dspace.com', 'Password123', sb);
     const goodUpdate = await updateUserPassword('NewPass123', 'NewPass123', sb);
     assert.equal(goodUpdate.ok, true);
+
+    // Sign out temporary recovery session and verify login with new password works (old password rejected)
     await signOutUser(sb);
+    const oldPassLogin = await signInWithEmail('aarav@neel3dspace.com', 'Password123', sb);
+    assert.equal(oldPassLogin.ok, false);
 
     const relogin = await signInWithEmail('aarav@neel3dspace.com', 'NewPass123', sb);
     assert.equal(relogin.ok, true);

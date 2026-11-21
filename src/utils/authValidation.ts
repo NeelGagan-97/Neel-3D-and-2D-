@@ -136,10 +136,13 @@ export function validateResetPasswordInput(
   confirmPassword: string
 ): AuthValidationResult {
   const fieldErrors: Record<string, string> = {};
-  const passwordErr = validatePasswordStrength(password);
-  if (passwordErr) {
-    fieldErrors.password = passwordErr;
+
+  if (!password) {
+    fieldErrors.password = 'New password is required.';
+  } else if (password.length < 8) {
+    fieldErrors.password = 'Password must be at least 8 characters long.';
   }
+
   if (!confirmPassword) {
     fieldErrors.confirmPassword = 'Please confirm your new password.';
   } else if (password !== confirmPassword) {

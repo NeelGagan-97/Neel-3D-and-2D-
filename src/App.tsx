@@ -409,7 +409,7 @@ export default function App() {
       <ResetPasswordPage
         onNavigateRoute={(r) => navigateRoute(r)}
         onResetSuccess={() =>
-          setRouteNotice('Your password has been updated. Sign in with your new password.')
+          setRouteNotice('Password updated successfully. Sign in with your new password.')
         }
       />
     );

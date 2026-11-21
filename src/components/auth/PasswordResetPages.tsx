@@ -133,57 +133,106 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
 }) => {
   const {
     resetPassword,
+    completePasswordReset,
     isConfigured,
     isAuthenticated,
     isRecoveryMode,
     authLoading,
     recoveryError,
     clearRecoveryError,
-    exitRecoveryMode,
   } = useAuth();
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [redirecting, setRedirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [completed, setCompleted] = useState(false);
 
-  const canUpdatePassword = !recoveryError && (isAuthenticated || isRecoveryMode);
+  const submittingRef = React.useRef(false);
+  const redirectingRef = React.useRef(false);
+  const onNavigateRouteRef = React.useRef(onNavigateRoute);
+  const onResetSuccessRef = React.useRef(onResetSuccess);
+  onNavigateRouteRef.current = onNavigateRoute;
+  onResetSuccessRef.current = onResetSuccess;
+
+  const hasValidRecoverySession = !recoveryError && isAuthenticated;
+
+  const finishAndRedirectToLogin = React.useCallback(async () => {
+    if (redirectingRef.current) return;
+    redirectingRef.current = true;
+    setRedirecting(true);
+    try {
+      await completePasswordReset();
+    } finally {
+      onResetSuccessRef.current?.();
+      onNavigateRouteRef.current('login');
+    }
+  }, [completePasswordReset]);
 
   // Automatically redirect to the login page after a successful password update
   useEffect(() => {
     if (!completed) return;
     const timer = window.setTimeout(() => {
-      exitRecoveryMode();
-      onResetSuccess?.();
-      onNavigateRoute('login');
+      void finishAndRedirectToLogin();
     }, 1800);
     return () => window.clearTimeout(timer);
-  }, [completed, exitRecoveryMode, onNavigateRoute, onResetSuccess]);
+  }, [completed, finishAndRedirectToLogin]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (submittingRef.current || submitting) {
+      return;
+    }
+
     setError(null);
     setFieldErrors({});
     clearRecoveryError();
 
-    const validation = validateResetPasswordInput(password, confirmPassword);
-    if (!validation.valid) {
-      setFieldErrors(validation.fieldErrors);
-      setError('Please correct your new password entries.');
+    if (!isConfigured) {
+      setError(
+        'Supabase authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
+      );
       return;
     }
 
+    const validation = validateResetPasswordInput(password, confirmPassword);
+    if (!validation.valid) {
+      setFieldErrors(validation.fieldErrors);
+      const firstMessage =
+        validation.fieldErrors.password ||
+        validation.fieldErrors.confirmPassword ||
+        'Please correct your new password entries.';
+      setError(firstMessage);
+      return;
+    }
+
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const res = await resetPassword(password, confirmPassword);
       if (!res.ok) {
-        setError(res.error ?? 'Unable to update password. Request a fresh recovery link.');
+        if (res.fieldErrors) {
+          setFieldErrors(res.fieldErrors);
+        }
+        setError(res.error ?? 'Unable to update password. Please request a fresh recovery link.');
         return;
       }
+      setPassword('');
+      setConfirmPassword('');
       setCompleted(true);
+    } catch (err) {
+      if (typeof import.meta !== 'undefined' && import.meta.env?.DEV) {
+        console.error('[ResetPasswordPage] Password update failed unexpectedly:', err);
+      }
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'An unexpected error occurred while updating your password. Please try again.'
+      );
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -205,22 +254,19 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
               <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
                 check_circle
               </span>
-              <span>Password Updated Successfully</span>
+              <span>Password updated successfully.</span>
             </div>
             <p className="text-body-md text-on-surface-variant">
-              Your password has been updated. Redirecting you to the Sign In page...
+              Redirecting you to the Sign In page so you can sign in with your new password...
             </p>
           </div>
           <button
             type="button"
-            onClick={() => {
-              exitRecoveryMode();
-              onResetSuccess?.();
-              onNavigateRoute('login');
-            }}
-            className="w-full py-gutter-sm px-gutter-lg rounded-md bg-primary text-on-primary hover:bg-on-primary-container font-label text-label-md cursor-pointer"
+            disabled={redirecting}
+            onClick={() => void finishAndRedirectToLogin()}
+            className="w-full py-gutter-sm px-gutter-lg rounded-md bg-primary text-on-primary hover:bg-on-primary-container disabled:opacity-50 font-label text-label-md cursor-pointer"
           >
-            Continue to Sign In
+            {redirecting ? 'Redirecting to Sign In...' : 'Continue to Sign In'}
           </button>
         </div>
       ) : authLoading ? (
@@ -235,7 +281,7 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
             Verifying your password recovery link...
           </p>
         </div>
-      ) : !canUpdatePassword ? (
+      ) : !hasValidRecoverySession ? (
         <div className="flex flex-col gap-gutter-lg">
           <div
             role="alert"
@@ -269,6 +315,15 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
         </div>
       ) : (
         <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-gutter-lg">
+          {!isConfigured && (
+            <div
+              role="alert"
+              className="p-gutter-md rounded-md bg-warning/15 border border-warning text-on-surface text-body-sm"
+            >
+              Supabase authentication is not configured in this environment.
+            </div>
+          )}
+
           {error && (
             <div
               role="alert"
@@ -291,8 +346,9 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
                 onChange={(e) => {
                   setPassword(e.target.value);
                   if (fieldErrors.password) setFieldErrors((p) => ({ ...p, password: '' }));
+                  if (error) setError(null);
                 }}
-                placeholder="Min 8 chars, A-Z, a-z, 0-9"
+                placeholder="Minimum 8 characters"
                 disabled={submitting}
                 className={`w-full pl-gutter-md pr-11 py-gutter-sm rounded-md bg-surface-container-low border text-body-md text-on-surface focus:outline-none focus:border-primary ${
                   fieldErrors.password ? 'border-error' : 'border-outline'
@@ -331,6 +387,7 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
                 if (fieldErrors.confirmPassword) {
                   setFieldErrors((p) => ({ ...p, confirmPassword: '' }));
                 }
+                if (error) setError(null);
               }}
               placeholder="Re-enter new password"
               disabled={submitting}
@@ -345,10 +402,18 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
 
           <button
             type="submit"
-            disabled={submitting || !isConfigured}
+            disabled={submitting}
             className="w-full inline-flex items-center justify-center gap-gutter-sm bg-primary text-on-primary px-gutter-xl py-gutter-md rounded-md font-label text-label-lg hover:bg-on-primary-container disabled:opacity-50 cursor-pointer"
           >
-            {submitting ? 'Updating Password...' : 'Update Password'}
+            {submitting && (
+              <span
+                className="material-symbols-outlined text-[18px] animate-spin"
+                aria-hidden="true"
+              >
+                progress_activity
+              </span>
+            )}
+            <span>{submitting ? 'Updating Password...' : 'Update Password'}</span>
           </button>
         </form>
       )}

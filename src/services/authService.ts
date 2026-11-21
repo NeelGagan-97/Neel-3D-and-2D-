@@ -40,6 +40,10 @@ function getClient(client?: SupabaseClient | null): SupabaseClient | null {
   return client ?? defaultSupabaseClient;
 }
 
+function isDevEnvironment(): boolean {
+  return Boolean(typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.DEV);
+}
+
 /**
  * Resolves a valid redirect URL for Supabase Auth emails (password reset, email confirmation).
  * Prefers explicit override, then optional VITE_APP_URL, then the live browser origin.
@@ -134,8 +138,20 @@ function mapAuthError(message: string): string {
   if (lower.includes('database error saving new user')) {
     return 'Registration could not be completed because the email address, username, or Employee ID may already be registered. Please check your details and try again.';
   }
-  if (lower.includes('different from the old password') || lower.includes('same password')) {
+  if (
+    lower.includes('different from the old password') ||
+    lower.includes('same password') ||
+    lower.includes('same_password')
+  ) {
     return 'Your new password must be different from your previous password.';
+  }
+  if (
+    lower.includes('weak password') ||
+    lower.includes('weak_password') ||
+    lower.includes('password should be at least') ||
+    lower.includes('password is too weak')
+  ) {
+    return 'Your password is too weak. Choose a stronger password with at least 8 characters.';
   }
   if (lower.includes('auth session missing') || lower.includes('session missing')) {
     return 'Your password recovery session is missing or expired. Please request a new password reset link.';
@@ -148,6 +164,9 @@ function mapAuthError(message: string): string {
   }
   if (lower.includes('jwt expired') || lower.includes('session')) {
     return 'Your session has expired. Please sign in again.';
+  }
+  if (lower.includes('failed to fetch') || lower.includes('network')) {
+    return 'Network error while contacting authentication server. Please check your connection and try again.';
   }
   return message || 'Authentication request failed. Please try again.';
 }
@@ -426,9 +445,13 @@ export async function updateUserPassword(
 ): Promise<AuthActionResult> {
   const validation = validateResetPasswordInput(password, confirmPassword);
   if (!validation.valid) {
+    const firstError =
+      validation.fieldErrors.password ||
+      validation.fieldErrors.confirmPassword ||
+      'Please check your new password entries.';
     return {
       ok: false,
-      error: 'Please check your new password entries.',
+      error: firstError,
       fieldErrors: validation.fieldErrors,
     };
   }
@@ -441,12 +464,64 @@ export async function updateUserPassword(
     };
   }
 
-  const { error } = await sb.auth.updateUser({ password });
-  if (error) {
-    return { ok: false, error: mapAuthError(error.message) };
-  }
+  try {
+    const { data: sessionData, error: sessionError } = await sb.auth.getSession();
+    if (sessionError) {
+      if (isDevEnvironment()) {
+        console.error('[Auth] getSession failed before password update:', sessionError);
+      }
+      return {
+        ok: false,
+        error: mapAuthError(sessionError.message),
+      };
+    }
 
-  return { ok: true };
+    const activeSession = sessionData?.session ?? null;
+    if (!activeSession) {
+      if (isDevEnvironment()) {
+        console.warn('[Auth] Password update aborted: no active Supabase recovery session.');
+      }
+      return {
+        ok: false,
+        error:
+          'Your password recovery session is missing or expired. Please request a new password reset link.',
+      };
+    }
+
+    if (activeSession.expires_at && activeSession.expires_at * 1000 <= Date.now()) {
+      if (isDevEnvironment()) {
+        console.warn('[Auth] Password update aborted: recovery session has expired.');
+      }
+      return {
+        ok: false,
+        error:
+          'Your password recovery session has expired. Please request a new password reset link.',
+      };
+    }
+
+    const { error } = await sb.auth.updateUser({ password });
+    if (error) {
+      if (isDevEnvironment()) {
+        console.error('[Auth] supabase.auth.updateUser failed:', {
+          status: (error as { status?: number }).status,
+          code: (error as { code?: string }).code,
+          message: error.message,
+        });
+      }
+      return { ok: false, error: mapAuthError(error.message) };
+    }
+
+    return { ok: true };
+  } catch (err) {
+    if (isDevEnvironment()) {
+      console.error('[Auth] Unexpected exception during password update:', err);
+    }
+    const message =
+      err instanceof Error
+        ? err.message
+        : 'Unable to update your password due to an unexpected error.';
+    return { ok: false, error: mapAuthError(message) };
+  }
 }
 
 /**
