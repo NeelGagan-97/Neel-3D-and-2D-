@@ -1,6 +1,8 @@
 {
-  "name": "Ananya Space Designer",
+  "name": "Neel 3D space",
   "description": "Precision architectural floor planning paired with real-time 3D residential visualization, electrical placement, connected load calculation, and automated Bill of Quantities.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

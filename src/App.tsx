@@ -1,18 +1,50 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AccountStatusPage } from './components/auth/AccountStatusPage';
+import { AdminDashboardPage } from './components/auth/AdminDashboardPage';
+import { EmployeeDashboardPage } from './components/auth/EmployeeDashboardPage';
+import { LoginPage } from './components/auth/LoginPage';
+import {
+  ForgotPasswordPage,
+  ResetPasswordPage,
+} from './components/auth/PasswordResetPages';
+import { RegisterPage } from './components/auth/RegisterPage';
 import { DesignStudioPage } from './components/DesignStudioPage';
 import { HomePage } from './components/HomePage';
 import { ProjectCreationInput } from './components/ProjectCreationModal';
 import { ProjectSummaryPage } from './components/ProjectSummaryPage';
+import { useAuth } from './context/AuthContext';
+import { RouteNavigationProvider } from './context/RouteNavigationContext';
 import { INITIAL_PROJECTS } from './data/presets';
 import { projectStorage } from './services/projectStorage';
+import { AppRoute } from './types/auth';
 import { ProjectData, ScreenId, SiteConfig, ViewMode } from './types/design';
+import { evaluateRouteAccess, isApprovedUser } from './utils/authValidation';
+import { parseRouteFromLocation, syncBrowserPath } from './utils/router';
 
 export default function App() {
+  const {
+    isAuthenticated,
+    authLoading,
+    profileLoading,
+    profile,
+    isRecoveryMode,
+  } = useAuth();
+
   const [projects, setProjects] = useState<ProjectData[]>(() => projectStorage.loadAll());
   const [activeProjectId, setActiveProjectId] = useState<string>(
     () => projectStorage.loadAll()[0]?.id ?? INITIAL_PROJECTS[0].id
   );
-  const [screen, setScreen] = useState<ScreenId>('home');
+  const [route, setRoute] = useState<AppRoute>(() =>
+    typeof window !== 'undefined'
+      ? parseRouteFromLocation(
+          window.location.pathname,
+          window.location.search,
+          window.location.hash
+        )
+      : 'login'
+  );
+  const [intendedRoute, setIntendedRoute] = useState<AppRoute | null>(null);
+  const [routeNotice, setRouteNotice] = useState<string | null>(null);
   const [studioInitialView, setStudioInitialView] = useState<ViewMode>('3d');
 
   // Undo / Redo stacks for the active project
@@ -24,16 +56,83 @@ export default function App() {
     [projects, activeProjectId]
   );
 
-  // Autosave through repository (ready for Cloudflare D1/R2 sync later)
+  // Autosave through repository
   useEffect(() => {
     projectStorage.saveAll(projects);
   }, [projects]);
 
-  const handleNavigate = useCallback((target: ScreenId, initialView?: ViewMode) => {
-    if (initialView) setStudioInitialView(initialView);
-    setScreen(target);
+  const navigateRoute = useCallback((target: AppRoute, replace = false) => {
+    setRoute(target);
+    syncBrowserPath(target, replace);
     window.scrollTo({ top: 0, behavior: 'instant' });
   }, []);
+
+  // Listen to browser Back / Forward navigation (direct URL access)
+  useEffect(() => {
+    const onPopState = () => {
+      const next = parseRouteFromLocation(
+        window.location.pathname,
+        window.location.search,
+        window.location.hash
+      );
+      setRoute(next);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  // Route into password reset screen when Supabase emits PASSWORD_RECOVERY
+  useEffect(() => {
+    if (isRecoveryMode && route !== 'reset-password') {
+      navigateRoute('reset-password', true);
+    }
+  }, [isRecoveryMode, route, navigateRoute]);
+
+  const isAuthBusy = authLoading || profileLoading;
+
+  // Enforce route guards reactively (covers direct URL visits, logout, expiry, and status changes)
+  const accessDecision = useMemo(
+    () =>
+      evaluateRouteAccess(route, {
+        isAuthenticated,
+        isLoading: isAuthBusy,
+        profile,
+        isRecoveryMode,
+      }),
+    [route, isAuthenticated, isAuthBusy, profile, isRecoveryMode]
+  );
+
+  useEffect(() => {
+    if (isAuthBusy) return;
+    if (!accessDecision.allowed && accessDecision.redirectTo) {
+      if (accessDecision.reason === 'unauthenticated') {
+        if (
+          route === 'studio' ||
+          route === 'summary' ||
+          route === 'employee-dashboard' ||
+          route === 'admin'
+        ) {
+          setIntendedRoute(route);
+          setRouteNotice(
+            'Sign in with an approved Neel 3D Space account to access protected design tools.'
+          );
+        }
+      } else if (accessDecision.reason === 'unauthorized-admin') {
+        setRouteNotice(
+          'Administrator privileges are required to view the Admin Dashboard.'
+        );
+      }
+      navigateRoute(accessDecision.redirectTo, true);
+    }
+  }, [isAuthBusy, accessDecision, route, navigateRoute]);
+
+  const handleNavigate = useCallback(
+    (target: ScreenId, initialView?: ViewMode) => {
+      if (initialView) setStudioInitialView(initialView);
+      navigateRoute(target);
+    },
+    [navigateRoute]
+  );
 
   const handleOpenProject = useCallback(
     (projectId: string, target: ScreenId, initialView?: ViewMode) => {
@@ -43,10 +142,9 @@ export default function App() {
         setRedoStack([]);
       }
       if (initialView) setStudioInitialView(initialView);
-      setScreen(target);
-      window.scrollTo({ top: 0, behavior: 'instant' });
+      navigateRoute(target);
     },
-    [activeProjectId]
+    [activeProjectId, navigateRoute]
   );
 
   const handleSwitchProject = useCallback((projectId: string) => {
@@ -106,17 +204,30 @@ export default function App() {
 
   /**
    * Phase 1 -> Phase 2: Creates a new project with a unique ID and NO auto-generated rooms.
-   * Opens Design Studio directly at Site Dimension Configuration (siteConfigured: false).
+   * Requires an authenticated APPROVED account before entering Design Studio.
    */
   const handleCreateProject = useCallback(
     (input: ProjectCreationInput) => {
+      if (!isAuthenticated || !isApprovedUser(profile)) {
+        setIntendedRoute('studio');
+        setRouteNotice(
+          'Sign in with an approved Neel 3D Space account to create a new space in Design Studio.'
+        );
+        navigateRoute(isAuthenticated ? evaluateRouteAccess('studio', {
+          isAuthenticated,
+          isLoading: false,
+          profile,
+        }).redirectTo ?? 'login' : 'login');
+        return;
+      }
+
       const uid = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const id = `proj-${uid}`;
       const isFeet = input.units === 'ft';
 
       const newProject: ProjectData = {
         id,
-        refCode: `ASD-2026-${String(projects.length + 1).padStart(3, '0')}`,
+        refCode: `N3D-2026-${String(projects.length + 1).padStart(3, '0')}`,
         name: input.name,
         projectType: input.projectType,
         status: 'Active',
@@ -128,7 +239,7 @@ export default function App() {
           length: isFeet ? 40 : 12,
           width: isFeet ? 30 : 10,
           ceilingHeight: isFeet ? 10 : 3,
-          wallThickness: isFeet ? 0.5 : 0.15, // 6 inches or 0.15m
+          wallThickness: isFeet ? 0.5 : 0.15,
           units: input.units,
           floors: 1,
         },
@@ -146,15 +257,11 @@ export default function App() {
       setUndoStack([]);
       setRedoStack([]);
       setStudioInitialView('2d');
-      setScreen('studio');
-      window.scrollTo({ top: 0, behavior: 'instant' });
+      navigateRoute('studio');
     },
-    [projects.length]
+    [projects.length, isAuthenticated, profile, navigateRoute]
   );
 
-  /**
-   * Phase 2 Completion: Locks exact site dimensions and reveals the completely blank 2D canvas.
-   */
   const handleCompleteSiteConfig = useCallback(
     (site: SiteConfig) => {
       setProjects((prev) =>
@@ -174,9 +281,6 @@ export default function App() {
     [activeProjectId]
   );
 
-  /**
-   * Phase 8: Save As — creates an independent cloned project with a unique ID and new name.
-   */
   const handleSaveAsProject = useCallback(
     (newName: string) => {
       const source = projects.find((p) => p.id === activeProjectId);
@@ -185,7 +289,7 @@ export default function App() {
       const cloned: ProjectData = {
         ...JSON.parse(JSON.stringify(source)),
         id,
-        refCode: `ASD-2026-${String(projects.length + 1).padStart(3, '0')}`,
+        refCode: `N3D-2026-${String(projects.length + 1).padStart(3, '0')}`,
         name: newName,
         status: 'Saved',
         updatedAt: new Date().toISOString(),
@@ -198,20 +302,31 @@ export default function App() {
     [projects, activeProjectId]
   );
 
-  /**
-   * Phase 8: Import Project JSON — restores a previously downloaded project file into the workspace.
-   */
   const handleImportProject = useCallback(
     (rawJson: string): { ok: boolean; error?: string } => {
+      if (!isAuthenticated || !isApprovedUser(profile)) {
+        setIntendedRoute('studio');
+        setRouteNotice('Sign in with an approved account to import projects into Design Studio.');
+        navigateRoute(
+          isAuthenticated
+            ? evaluateRouteAccess('studio', {
+                isAuthenticated,
+                isLoading: false,
+                profile,
+              }).redirectTo ?? 'login'
+            : 'login'
+        );
+        return { ok: false, error: 'Approved employee sign-in is required to import projects.' };
+      }
+
       try {
         const imported = projectStorage.parseImportedJson(rawJson);
         if (!imported) {
           return {
             ok: false,
-            error: 'Invalid Ananya Space Designer project JSON file.',
+            error: 'Invalid Neel 3D Space project JSON file.',
           };
         }
-        // Ensure imported project gets a fresh unique ID if it collides
         const collides = projects.some((p) => p.id === imported.id);
         const ready: ProjectData = collides
           ? { ...imported, id: `proj-imp-${Date.now()}` }
@@ -222,7 +337,7 @@ export default function App() {
         setUndoStack([]);
         setRedoStack([]);
         setStudioInitialView('2d');
-        setScreen('studio');
+        navigateRoute('studio');
         return { ok: true };
       } catch (err) {
         return {
@@ -231,7 +346,7 @@ export default function App() {
         };
       }
     },
-    [projects]
+    [projects, isAuthenticated, profile, navigateRoute]
   );
 
   const handleDeleteProject = useCallback(
@@ -249,8 +364,76 @@ export default function App() {
     [activeProjectId]
   );
 
-  if (screen === 'studio') {
+  const isPublicRoute =
+    route === 'home' ||
+    route === 'login' ||
+    route === 'register' ||
+    route === 'forgot-password' ||
+    route === 'reset-password';
+
+  // Show loading screen when verifying session/profile for protected routes (prevents unauthorized flash)
+  if ((isAuthBusy && !isPublicRoute) || (!isAuthBusy && !accessDecision.allowed)) {
     return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-surface text-on-surface gap-gutter-md p-gutter-xl">
+        <span className="material-symbols-outlined text-primary text-[32px] animate-spin" aria-hidden="true">
+          progress_activity
+        </span>
+        <p className="font-mono text-mono-md text-on-surface-variant">
+          {isAuthBusy ? 'Verifying session and employee permissions...' : 'Redirecting...'}
+        </p>
+      </div>
+    );
+  }
+
+  let content: React.ReactNode;
+
+  if (route === 'login') {
+    content = (
+      <LoginPage
+        onNavigateRoute={(r) => {
+          setIntendedRoute(null);
+          navigateRoute(r);
+        }}
+        intendedRoute={intendedRoute}
+        notice={routeNotice}
+        onClearNotice={() => setRouteNotice(null)}
+      />
+    );
+  } else if (route === 'register') {
+    content = <RegisterPage onNavigateRoute={(r) => navigateRoute(r)} />;
+  } else if (route === 'forgot-password') {
+    content = <ForgotPasswordPage onNavigateRoute={(r) => navigateRoute(r)} />;
+  } else if (route === 'reset-password') {
+    content = <ResetPasswordPage onNavigateRoute={(r) => navigateRoute(r)} />;
+  } else if (
+    route === 'pending-approval' ||
+    route === 'account-rejected' ||
+    route === 'account-suspended' ||
+    route === 'profile-missing'
+  ) {
+    content = <AccountStatusPage variant={route} onNavigateRoute={(r) => navigateRoute(r)} />;
+  } else if (route === 'admin') {
+    content = (
+      <AdminDashboardPage
+        onNavigate={handleNavigate}
+        onNavigateRoute={(r) => navigateRoute(r)}
+      />
+    );
+  } else if (route === 'employee-dashboard') {
+    content = (
+      <EmployeeDashboardPage
+        projects={projects}
+        activeProjectId={activeProject.id}
+        notice={routeNotice}
+        onClearNotice={() => setRouteNotice(null)}
+        onNavigate={handleNavigate}
+        onNavigateRoute={(r) => navigateRoute(r)}
+        onOpenProject={handleOpenProject}
+        onCreateProject={handleCreateProject}
+      />
+    );
+  } else if (route === 'studio') {
+    content = (
       <DesignStudioPage
         key={`${activeProject.id}-${activeProject.siteConfigured ? 'ready' : 'setup'}`}
         projects={projects.length > 0 ? projects : [activeProject]}
@@ -269,10 +452,8 @@ export default function App() {
         onSaveProject={handleSaveProject}
       />
     );
-  }
-
-  if (screen === 'summary') {
-    return (
+  } else if (route === 'summary') {
+    content = (
       <ProjectSummaryPage
         project={activeProject}
         onNavigate={(s) => handleNavigate(s)}
@@ -280,17 +461,26 @@ export default function App() {
         onUpdateProject={handleUpdateProject}
       />
     );
+  } else {
+    content = (
+      <HomePage
+        projects={projects}
+        activeProjectId={activeProject.id}
+        onNavigate={handleNavigate}
+        onOpenProject={handleOpenProject}
+        onCreateProject={handleCreateProject}
+        onImportProject={handleImportProject}
+        onDeleteProject={handleDeleteProject}
+      />
+    );
   }
 
   return (
-    <HomePage
-      projects={projects}
-      activeProjectId={activeProject.id}
-      onNavigate={handleNavigate}
-      onOpenProject={handleOpenProject}
-      onCreateProject={handleCreateProject}
-      onImportProject={handleImportProject}
-      onDeleteProject={handleDeleteProject}
-    />
+    <RouteNavigationProvider
+      activeRoute={route}
+      navigateRoute={(target) => navigateRoute(target)}
+    >
+      {content}
+    </RouteNavigationProvider>
   );
 }
