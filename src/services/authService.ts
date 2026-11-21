@@ -4,6 +4,8 @@ import {
   AccountStatus,
   EmployeeProfile,
   EmployeeRegistrationInput,
+  EmployeeRole,
+  ProfileErrorKind,
 } from '../types/auth';
 import {
   isApprovedAdmin,
@@ -20,6 +22,8 @@ export interface AuthActionResult<T = void> {
   ok: boolean;
   data?: T;
   error?: string;
+  errorKind?: ProfileErrorKind;
+  errorCode?: string;
   fieldErrors?: Record<string, string>;
 }
 
@@ -34,6 +38,8 @@ export interface LoginResult {
   user: User;
   session: Session;
   profile: EmployeeProfile | null;
+  profileError?: string | null;
+  profileErrorKind?: ProfileErrorKind | null;
 }
 
 function getClient(client?: SupabaseClient | null): SupabaseClient | null {
@@ -171,8 +177,127 @@ function mapAuthError(message: string): string {
   return message || 'Authentication request failed. Please try again.';
 }
 
+function normalizeEmployeeProfileRow(raw: unknown): EmployeeProfile | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = raw as Record<string, unknown>;
+  const authUserId = typeof row.auth_user_id === 'string' ? row.auth_user_id.trim() : '';
+  if (!authUserId) return null;
+
+  const rawRole = typeof row.role === 'string' ? row.role.trim().toUpperCase() : '';
+  const rawStatus =
+    typeof row.account_status === 'string' ? row.account_status.trim().toUpperCase() : '';
+
+  const role: EmployeeRole =
+    rawRole === 'ADMIN' || rawRole === 'EMPLOYEE' ? rawRole : 'EMPLOYEE';
+  const accountStatus: AccountStatus =
+    rawStatus === 'APPROVED' ||
+    rawStatus === 'PENDING' ||
+    rawStatus === 'REJECTED' ||
+    rawStatus === 'SUSPENDED'
+      ? rawStatus
+      : 'PENDING';
+
+  return {
+    id: typeof row.id === 'string' ? row.id : authUserId,
+    auth_user_id: authUserId,
+    full_name: typeof row.full_name === 'string' ? row.full_name : '',
+    employee_id: typeof row.employee_id === 'string' ? row.employee_id : '',
+    username: typeof row.username === 'string' ? row.username : '',
+    email: typeof row.email === 'string' ? row.email : '',
+    mobile: typeof row.mobile === 'string' ? row.mobile : '',
+    role,
+    account_status: accountStatus,
+    approved_at: typeof row.approved_at === 'string' ? row.approved_at : null,
+    approved_by: typeof row.approved_by === 'string' ? row.approved_by : null,
+    created_at: typeof row.created_at === 'string' ? row.created_at : '',
+    updated_at: typeof row.updated_at === 'string' ? row.updated_at : '',
+  };
+}
+
+function classifyProfileFetchError(err: unknown): {
+  error: string;
+  errorKind: ProfileErrorKind;
+  errorCode?: string;
+} {
+  const errObj =
+    err && typeof err === 'object'
+      ? (err as { code?: string; message?: string; details?: string; hint?: string })
+      : null;
+  const code = typeof errObj?.code === 'string' ? errObj.code.trim() : undefined;
+  const rawMessage =
+    typeof errObj?.message === 'string'
+      ? errObj.message
+      : err instanceof Error
+        ? err.message
+        : 'Unable to load your employee profile.';
+  const lower = rawMessage.toLowerCase();
+
+  if (
+    code === '42P17' ||
+    lower.includes('infinite recursion')
+  ) {
+    return {
+      error: `Database RLS policy error (${code ?? '42P17'}): Infinite recursion detected while reading public.employee_profiles. Verify that SELECT RLS policies use auth.uid() = auth_user_id without recursive subqueries.`,
+      errorKind: 'rls',
+      errorCode: code,
+    };
+  }
+
+  if (
+    code === '42501' ||
+    lower.includes('permission denied') ||
+    lower.includes('row-level security') ||
+    lower.includes('rls')
+  ) {
+    return {
+      error: `Permission denied (${code ?? '42501'}) while reading public.employee_profiles. Ensure authenticated users have SELECT access with policy auth.uid() = auth_user_id.`,
+      errorKind: 'rls',
+      errorCode: code,
+    };
+  }
+
+  if (
+    code === 'PGRST301' ||
+    lower.includes('jwt') ||
+    lower.includes('unauthorized') ||
+    lower.includes('not authenticated') ||
+    lower.includes('invalid token')
+  ) {
+    return {
+      error: `Authentication error while loading your employee profile (${code ?? 'AUTH'}): ${rawMessage}`,
+      errorKind: 'auth',
+      errorCode: code,
+    };
+  }
+
+  if (
+    lower.includes('failed to fetch') ||
+    lower.includes('networkerror') ||
+    lower.includes('load failed') ||
+    lower.includes('network') ||
+    lower.includes('timeout')
+  ) {
+    return {
+      error:
+        'Network error while loading your employee profile from Supabase. Check your connection and retry.',
+      errorKind: 'network',
+      errorCode: code,
+    };
+  }
+
+  return {
+    error: code
+      ? `Database error (${code}) while loading your employee profile: ${rawMessage}`
+      : `Database error while loading your employee profile: ${rawMessage}`,
+    errorKind: 'database',
+    errorCode: code,
+  };
+}
+
 /**
- * Fetches a single employee_profiles record by Supabase Auth user UUID.
+ * Fetches a single public.employee_profiles record by Supabase Auth user UUID
+ * using `.eq('auth_user_id', authUserId)` (never `.eq('id', authUserId)`).
+ * Distinguishes database/RLS/network errors from a genuinely missing profile row.
  * Never fabricates an admin or fallback profile.
  */
 export async function fetchEmployeeProfile(
@@ -184,28 +309,69 @@ export async function fetchEmployeeProfile(
     return {
       ok: false,
       error: 'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.',
+      errorKind: 'auth',
     };
   }
 
-  const { data, error } = await sb
-    .from('employee_profiles')
-    .select(
-      'id, auth_user_id, full_name, employee_id, username, email, mobile, role, account_status, approved_at, approved_by, created_at, updated_at'
-    )
-    .eq('auth_user_id', authUserId)
-    .maybeSingle();
+  try {
+    const { data, error } = await sb
+      .from('employee_profiles')
+      .select('*')
+      .eq('auth_user_id', authUserId)
+      .maybeSingle();
 
-  if (error) {
+    if (error) {
+      const classified = classifyProfileFetchError(error);
+      if (isDevEnvironment()) {
+        console.error('[Auth] fetchEmployeeProfile failed:', {
+          authUserId,
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          errorKind: classified.errorKind,
+        });
+      }
+      return {
+        ok: false,
+        error: classified.error,
+        errorKind: classified.errorKind,
+        errorCode: classified.errorCode,
+      };
+    }
+
+    if (!data) {
+      return {
+        ok: true,
+        data: null,
+      };
+    }
+
+    const normalized = normalizeEmployeeProfileRow(data);
+    if (!normalized) {
+      return {
+        ok: false,
+        error: 'Employee profile record returned incomplete identity data.',
+        errorKind: 'database',
+      };
+    }
+
+    return {
+      ok: true,
+      data: normalized,
+    };
+  } catch (err) {
+    const classified = classifyProfileFetchError(err);
+    if (isDevEnvironment()) {
+      console.error('[Auth] fetchEmployeeProfile threw exception:', err);
+    }
     return {
       ok: false,
-      error: error.message || 'Unable to load your employee profile.',
+      error: classified.error,
+      errorKind: classified.errorKind,
+      errorCode: classified.errorCode,
     };
   }
-
-  return {
-    ok: true,
-    data: (data as EmployeeProfile | null) ?? null,
-  };
 }
 
 /**
@@ -367,14 +533,17 @@ export async function signInWithEmail(
     };
   }
 
-  const profileRes = await fetchEmployeeProfile(data.user.id, sb);
+  const authenticatedUser = data.session.user ?? data.user;
+  const profileRes = await fetchEmployeeProfile(authenticatedUser.id, sb);
   if (!profileRes.ok) {
     return {
       ok: true,
       data: {
-        user: data.user,
+        user: authenticatedUser,
         session: data.session,
         profile: null,
+        profileError: profileRes.error ?? 'Unable to load your employee profile.',
+        profileErrorKind: profileRes.errorKind ?? 'database',
       },
     };
   }
@@ -382,9 +551,11 @@ export async function signInWithEmail(
   return {
     ok: true,
     data: {
-      user: data.user,
+      user: authenticatedUser,
       session: data.session,
       profile: profileRes.data ?? null,
+      profileError: null,
+      profileErrorKind: null,
     },
   };
 }
@@ -549,9 +720,7 @@ export async function fetchAllEmployeeProfiles(
 
   const { data, error } = await sb
     .from('employee_profiles')
-    .select(
-      'id, auth_user_id, full_name, employee_id, username, email, mobile, role, account_status, approved_at, approved_by, created_at, updated_at'
-    )
+    .select('*')
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -561,9 +730,15 @@ export async function fetchAllEmployeeProfiles(
     };
   }
 
+  const normalizedRows = Array.isArray(data)
+    ? data
+        .map((row) => normalizeEmployeeProfileRow(row))
+        .filter((row): row is EmployeeProfile => row !== null)
+    : [];
+
   return {
     ok: true,
-    data: (data as EmployeeProfile[]) ?? [],
+    data: normalizedRows,
   };
 }
 

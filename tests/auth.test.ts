@@ -924,7 +924,99 @@ async function runTests() {
     }
   });
 
-  console.log(`\nALL ${passed}/20 AUTHENTICATION & AUTHORIZATION SCENARIOS PASSED.`);
+  // 21. Profile lookup uses auth_user_id (distinct from profile.id) and distinguishes DB/RLS/network errors from missing profile
+  await test('21. Profile query uses auth_user_id and never disguises RLS/DB/network errors as missing profile', async () => {
+    const adminAuthUid = '94fd4f13-09e4-4fa4-a83f-4900649b1ffc';
+    const distinctProfilePk = '22222222-2222-4222-8222-222222222222';
+    mock.seedAccount(
+      {
+        id: adminAuthUid,
+        email: 'neelgaganat97@gmail.com',
+        password: 'AdminNewPassword1',
+        confirmed: true,
+      },
+      {
+        id: distinctProfilePk,
+        auth_user_id: adminAuthUid,
+        full_name: 'Neelgagan B R',
+        employee_id: 'ADM-097',
+        username: 'neelgaganat97',
+        email: 'neelgaganat97@gmail.com',
+        mobile: '+91 98765 00097',
+        role: 'ADMIN',
+        account_status: 'APPROVED',
+        approved_at: '2026-01-01T00:00:00.000Z',
+        approved_by: adminAuthUid,
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      }
+    );
+
+    const loginRes = await signInWithEmail('neelgaganat97@gmail.com', 'AdminNewPassword1', sb);
+    assert.equal(loginRes.ok, true);
+    assert.equal(loginRes.data?.profileError ?? null, null);
+    assert.equal(loginRes.data?.profile?.auth_user_id, adminAuthUid);
+    assert.equal(loginRes.data?.profile?.id, distinctProfilePk);
+    assert.equal(loginRes.data?.profile?.role, 'ADMIN');
+    assert.equal(loginRes.data?.profile?.account_status, 'APPROVED');
+    assert.equal(resolvePostLoginRoute(loginRes.data!.profile), 'admin');
+
+    // Simulate RLS permission error (42501) and infinite recursion error (42P17)
+    const rlsClient = {
+      auth: sb.auth,
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({
+              data: null,
+              error: {
+                code: '42P17',
+                message: 'infinite recursion detected in policy for relation "employee_profiles"',
+              },
+            }),
+          }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    const rlsLogin = await signInWithEmail('neelgaganat97@gmail.com', 'AdminNewPassword1', rlsClient);
+    assert.equal(rlsLogin.ok, true);
+    assert.equal(rlsLogin.data?.profile, null);
+    assert.equal(rlsLogin.data?.profileErrorKind, 'rls');
+    assert.match(rlsLogin.data?.profileError ?? '', /42P17|infinite recursion/i);
+
+    // Route guard MUST return reason: 'profile-error' and NEVER redirect to 'profile-missing'
+    const errorGuard = evaluateRouteAccess('admin', {
+      isAuthenticated: true,
+      isLoading: false,
+      profile: null,
+      profileError: rlsLogin.data?.profileError,
+    });
+    assert.equal(errorGuard.allowed, false);
+    assert.equal(errorGuard.reason, 'profile-error');
+    assert.equal(errorGuard.redirectTo, undefined);
+
+    // Simulate network exception during profile fetch
+    const netClient = {
+      auth: sb.auth,
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => {
+              throw new TypeError('Failed to fetch');
+            },
+          }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    const netRes = await fetchEmployeeProfile(adminAuthUid, netClient);
+    assert.equal(netRes.ok, false);
+    assert.equal(netRes.errorKind, 'network');
+    assert.match(netRes.error ?? '', /network error/i);
+  });
+
+  console.log(`\nALL ${passed}/21 AUTHENTICATION & AUTHORIZATION SCENARIOS PASSED.`);
 }
 
 runTests().catch((err) => {

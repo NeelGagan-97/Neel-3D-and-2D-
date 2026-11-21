@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { AppRoute } from '../../types/auth';
+import { AppRoute, ProfileErrorKind } from '../../types/auth';
 import { resolvePostLoginRoute } from '../../utils/authValidation';
 import { AuthLayout } from './AuthLayout';
 
@@ -62,7 +62,8 @@ export const AccountStatusPage: React.FC<AccountStatusPageProps> = ({
   variant,
   onNavigateRoute,
 }) => {
-  const { user, profile, profileError, isConfigured, refreshProfile, signOut } = useAuth();
+  const { user, profile, profileError, profileErrorKind, isConfigured, refreshProfile, signOut } =
+    useAuth();
   const [checking, setChecking] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
 
@@ -73,12 +74,14 @@ export const AccountStatusPage: React.FC<AccountStatusPageProps> = ({
     setFeedback(null);
     try {
       const updated = await refreshProfile();
-      const destination = resolvePostLoginRoute(updated);
-      if (destination !== variant) {
-        onNavigateRoute(destination);
-      } else {
-        setFeedback('Status checked — your account state has not changed yet.');
+      if (updated) {
+        const destination = resolvePostLoginRoute(updated);
+        if (destination !== variant) {
+          onNavigateRoute(destination);
+          return;
+        }
       }
+      setFeedback('Status checked — your account state has not changed yet.');
     } finally {
       setChecking(false);
     }
@@ -88,6 +91,17 @@ export const AccountStatusPage: React.FC<AccountStatusPageProps> = ({
     await signOut();
     onNavigateRoute('login');
   };
+
+  // Never disguise an RLS, network, auth, or database error as "Employee Profile Not Found"
+  if (variant === 'profile-missing' && profileError) {
+    return (
+      <ProfileLoadErrorPage
+        error={profileError}
+        errorKind={profileErrorKind}
+        onNavigateRoute={onNavigateRoute}
+      />
+    );
+  }
 
   if (variant === 'profile-missing') {
     return (
@@ -188,6 +202,131 @@ export const AccountStatusPage: React.FC<AccountStatusPageProps> = ({
           <button
             type="button"
             onClick={handleSignOut}
+            className="inline-flex items-center gap-gutter-xs px-gutter-lg py-gutter-sm rounded-md bg-primary text-on-primary hover:bg-on-primary-container font-label text-label-md cursor-pointer"
+          >
+            <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+              logout
+            </span>
+            <span>Sign Out</span>
+          </button>
+        </div>
+      </div>
+    </AuthLayout>
+  );
+};
+
+interface ProfileLoadErrorPageProps {
+  error: string;
+  errorKind: ProfileErrorKind | null;
+  onNavigateRoute: (route: AppRoute) => void;
+}
+
+const PROFILE_ERROR_META: Record<
+  ProfileErrorKind,
+  { title: string; statusLabel: string; icon: string }
+> = {
+  rls: {
+    title: 'Profile Access Permission Error',
+    statusLabel: 'RLS PERMISSION ERROR',
+    icon: 'gpp_maybe',
+  },
+  network: {
+    title: 'Unable to Reach Authentication Server',
+    statusLabel: 'NETWORK ERROR',
+    icon: 'wifi_off',
+  },
+  auth: {
+    title: 'Session Verification Error',
+    statusLabel: 'AUTHENTICATION ERROR',
+    icon: 'key_off',
+  },
+  database: {
+    title: 'Unable to Load Employee Profile',
+    statusLabel: 'DATABASE ERROR',
+    icon: 'database_off',
+  },
+};
+
+export const ProfileLoadErrorPage: React.FC<ProfileLoadErrorPageProps> = ({
+  error,
+  errorKind,
+  onNavigateRoute,
+}) => {
+  const { user, isConfigured, refreshProfile, signOut } = useAuth();
+  const [retrying, setRetrying] = useState(false);
+
+  const meta = PROFILE_ERROR_META[errorKind ?? 'database'];
+
+  const handleRetry = async () => {
+    setRetrying(true);
+    try {
+      const updated = await refreshProfile();
+      if (updated) {
+        onNavigateRoute(resolvePostLoginRoute(updated));
+      }
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+    onNavigateRoute('login');
+  };
+
+  return (
+    <AuthLayout
+      title={meta.title}
+      onNavigateRoute={onNavigateRoute}
+      isConfigured={isConfigured}
+    >
+      <div className="flex flex-col gap-gutter-lg">
+        <div
+          role="alert"
+          className="p-gutter-lg rounded-lg bg-error/15 border border-error flex flex-col gap-gutter-md"
+        >
+          <div className="flex items-center gap-gutter-sm font-label text-label-lg text-error">
+            <span className="material-symbols-outlined text-[22px]" aria-hidden="true">
+              {meta.icon}
+            </span>
+            <span>{meta.statusLabel}</span>
+          </div>
+
+          <p className="font-body text-body-md text-on-surface">{error}</p>
+
+          {user && (
+            <dl className="pt-gutter-md border-t border-error/30 grid grid-cols-1 gap-gutter-xs text-body-sm">
+              <div>
+                <dt className="text-on-surface-variant">Signed-in Email</dt>
+                <dd className="font-mono text-on-surface truncate">{user.email ?? '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-on-surface-variant">Auth User ID</dt>
+                <dd className="font-mono text-on-surface truncate">{user.id}</dd>
+              </div>
+            </dl>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-gutter-sm">
+          <button
+            type="button"
+            onClick={() => void handleRetry()}
+            disabled={retrying}
+            className="inline-flex items-center gap-gutter-xs px-gutter-lg py-gutter-sm rounded-md bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-md disabled:opacity-50 cursor-pointer"
+          >
+            <span
+              className={`material-symbols-outlined text-[18px] ${retrying ? 'animate-spin' : ''}`}
+              aria-hidden="true"
+            >
+              refresh
+            </span>
+            <span>{retrying ? 'Retrying...' : 'Retry Profile Load'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void handleSignOut()}
             className="inline-flex items-center gap-gutter-xs px-gutter-lg py-gutter-sm rounded-md bg-primary text-on-primary hover:bg-on-primary-container font-label text-label-md cursor-pointer"
           >
             <span className="material-symbols-outlined text-[18px]" aria-hidden="true">

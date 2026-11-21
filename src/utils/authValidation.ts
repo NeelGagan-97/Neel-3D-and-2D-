@@ -198,6 +198,7 @@ export interface RouteAccessContext {
   isAuthenticated: boolean;
   isLoading: boolean;
   profile: EmployeeProfile | null;
+  profileError?: string | null;
   isRecoveryMode?: boolean;
 }
 
@@ -211,6 +212,7 @@ export interface RouteAccessDecision {
     | 'rejected'
     | 'suspended'
     | 'missing-profile'
+    | 'profile-error'
     | 'already-authenticated';
 }
 
@@ -244,6 +246,14 @@ export function evaluateRouteAccess(
     return { allowed: true };
   }
 
+  // Authenticated user whose profile query failed (RLS, network, or DB error) — never treat as missing profile
+  if (ctx.isAuthenticated && !ctx.isRecoveryMode && !ctx.profile && ctx.profileError) {
+    return {
+      allowed: false,
+      reason: 'profile-error',
+    };
+  }
+
   // Auth entry routes (login, register, forgot-password)
   if (route === 'login' || route === 'register' || route === 'forgot-password') {
     if (ctx.isAuthenticated && !ctx.isRecoveryMode) {
@@ -268,7 +278,7 @@ export function evaluateRouteAccess(
     return { allowed: true };
   }
 
-  // Authenticated user without an employee_profiles row
+  // Authenticated user genuinely without an employee_profiles row (no DB/RLS error)
   if (!ctx.profile) {
     if (route === 'profile-missing') {
       return { allowed: true };

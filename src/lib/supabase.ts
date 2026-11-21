@@ -37,6 +37,9 @@ export function getSupabaseConfigStatus(): {
  */
 export const supabase: SupabaseClient | null = isSupabaseConfigured
   ? createClient(supabaseUrl, supabaseAnonKey, {
+      db: {
+        schema: 'public',
+      },
       auth: {
         persistSession: true,
         autoRefreshToken: true,

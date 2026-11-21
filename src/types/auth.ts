@@ -2,6 +2,8 @@ export type EmployeeRole = 'ADMIN' | 'EMPLOYEE';
 
 export type AccountStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'SUSPENDED';
 
+export type ProfileErrorKind = 'rls' | 'network' | 'auth' | 'database';
+
 /**
  * Mirrors existing public.employee_profiles schema exactly.
  * Do not invent extra columns.

@@ -20,7 +20,7 @@ import {
   signOutUser,
   updateUserPassword,
 } from '../services/authService';
-import { EmployeeProfile, EmployeeRegistrationInput } from '../types/auth';
+import { EmployeeProfile, EmployeeRegistrationInput, ProfileErrorKind } from '../types/auth';
 import { isApprovedAdmin, isApprovedUser } from '../utils/authValidation';
 import {
   clearAuthUrlParams,
@@ -38,6 +38,7 @@ interface AuthContextValue {
   authLoading: boolean;
   profileLoading: boolean;
   profileError: string | null;
+  profileErrorKind: ProfileErrorKind | null;
   isRecoveryMode: boolean;
   recoveryError: string | null;
   sessionNotice: string | null;
@@ -70,6 +71,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [authLoading, setAuthLoading] = useState<boolean>(isSupabaseConfigured);
   const [profileLoading, setProfileLoading] = useState<boolean>(false);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileErrorKind, setProfileErrorKind] = useState<ProfileErrorKind | null>(null);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [isRecoveryMode, setIsRecoveryMode] = useState<boolean>(() =>
     typeof window !== 'undefined'
@@ -96,6 +98,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   } | null>(null);
   const manualSignOutRef = useRef<boolean>(false);
   const hadActiveSessionRef = useRef<boolean>(false);
+  const signingInRef = useRef<boolean>(false);
   const isRecoveryModeRef = useRef<boolean>(isRecoveryMode);
   const recoveryExchangeAttemptedRef = useRef<boolean>(false);
 
@@ -115,6 +118,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       setProfileLoading(true);
       setProfileError(null);
+      setProfileErrorKind(null);
 
       const promise = (async () => {
         const res = await fetchEmployeeProfile(userId);
@@ -124,12 +128,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           profileErrorRef.current = null;
           setProfile(res.data ?? null);
           setProfileError(null);
+          setProfileErrorKind(null);
           return res.data ?? null;
         }
+        loadedUserIdRef.current = null;
         profileRef.current = null;
         profileErrorRef.current = res.error ?? 'Unable to load your employee profile.';
         setProfile(null);
         setProfileError(res.error ?? 'Unable to load your employee profile.');
+        setProfileErrorKind(res.errorKind ?? 'database');
         return null;
       })();
 
@@ -187,6 +194,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUser(null);
         setProfile(null);
         setProfileError(null);
+        setProfileErrorKind(null);
+        setProfileLoading(false);
         setIsRecoveryMode(false);
         if (wasLoggedIn && !wasManual) {
           setSessionNotice('Your session has expired. Please sign in again.');
@@ -205,6 +214,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         if (nextSession?.user && loadedUserIdRef.current !== nextSession.user.id) {
           const uid = nextSession.user.id;
+          setProfileLoading(true);
           window.setTimeout(() => {
             if (isMounted) void loadProfileForUser(uid);
           }, 0);
@@ -218,6 +228,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setSession(null);
         setUser(null);
         setProfile(null);
+        setProfileError(null);
+        setProfileErrorKind(null);
+        setProfileLoading(false);
         setSessionNotice('Your session has expired. Please sign in again.');
         return;
       }
@@ -227,16 +240,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (nextSession?.user) {
         hadActiveSessionRef.current = true;
-        // Skip profile fetch during password recovery and defer outside onAuthStateChange callback
+        // Skip profile fetch during password recovery.
+        // Mark profileLoading synchronously so route guards never flash 'profile-missing' before the profile fetch finishes.
         if (!isRecoveryModeRef.current && loadedUserIdRef.current !== nextSession.user.id) {
-          const uid = nextSession.user.id;
-          window.setTimeout(() => {
-            if (isMounted) void loadProfileForUser(uid);
-          }, 0);
+          setProfileLoading(true);
+          // When handleSignIn is actively running, let handleSignIn complete its authoritative profile query
+          if (!signingInRef.current) {
+            const uid = nextSession.user.id;
+            window.setTimeout(() => {
+              if (isMounted) void loadProfileForUser(uid);
+            }, 0);
+          }
         }
       } else if (!isRecoveryModeRef.current) {
         loadedUserIdRef.current = null;
         setProfile(null);
+        setProfileError(null);
+        setProfileErrorKind(null);
+        setProfileLoading(false);
       }
     });
 
@@ -403,18 +424,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     async (email: string, password: string): Promise<AuthActionResult<LoginResult>> => {
       setSessionNotice(null);
       setRecoveryError(null);
-      const res = await signInWithEmail(email, password);
-      if (res.ok && res.data) {
-        hadActiveSessionRef.current = true;
-        isRecoveryModeRef.current = false;
-        setIsRecoveryMode(false);
-        setSession(res.data.session);
-        setUser(res.data.user);
-        loadedUserIdRef.current = res.data.user.id;
-        setProfile(res.data.profile);
-        setProfileError(null);
+      setProfileError(null);
+      setProfileErrorKind(null);
+      signingInRef.current = true;
+      setProfileLoading(true);
+      try {
+        const res = await signInWithEmail(email, password);
+        if (res.ok && res.data) {
+          hadActiveSessionRef.current = true;
+          isRecoveryModeRef.current = false;
+          setIsRecoveryMode(false);
+          setSession(res.data.session);
+          setUser(res.data.user);
+          if (res.data.profileError) {
+            loadedUserIdRef.current = null;
+            profileRef.current = null;
+            profileErrorRef.current = res.data.profileError;
+            setProfile(null);
+            setProfileError(res.data.profileError);
+            setProfileErrorKind(res.data.profileErrorKind ?? 'database');
+          } else {
+            loadedUserIdRef.current = res.data.user.id;
+            profileRef.current = res.data.profile;
+            profileErrorRef.current = null;
+            setProfile(res.data.profile);
+            setProfileError(null);
+            setProfileErrorKind(null);
+          }
+        }
+        return res;
+      } finally {
+        signingInRef.current = false;
+        setProfileLoading(false);
       }
-      return res;
     },
     []
   );
@@ -431,6 +473,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           loadedUserIdRef.current = res.data.user.id;
           setProfile(res.data.profile);
           setProfileError(null);
+          setProfileErrorKind(null);
         }
       }
       return res;
@@ -449,6 +492,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
     setProfile(null);
     setProfileError(null);
+    setProfileErrorKind(null);
+    setProfileLoading(false);
     setIsRecoveryMode(false);
     setRecoveryError(null);
     setSessionNotice(null);
@@ -504,6 +549,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
     setProfile(null);
     setProfileError(null);
+    setProfileErrorKind(null);
     setIsRecoveryMode(false);
     setRecoveryError(null);
     setSessionNotice(null);
@@ -531,6 +577,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       authLoading,
       profileLoading,
       profileError,
+      profileErrorKind,
       isRecoveryMode,
       recoveryError,
       sessionNotice,
@@ -555,6 +602,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       authLoading,
       profileLoading,
       profileError,
+      profileErrorKind,
       isRecoveryMode,
       recoveryError,
       sessionNotice,

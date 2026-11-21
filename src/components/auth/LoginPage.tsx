@@ -50,6 +50,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         return;
       }
 
+      if (res.data.profileError) {
+        // Profile query failed (RLS, network, or DB error) — let the dedicated error screen render instead of misrouting to profile-missing
+        setFormError(res.data.profileError);
+        return;
+      }
+
       const profile = res.data.profile;
       const defaultDestination = resolvePostLoginRoute(profile);
 

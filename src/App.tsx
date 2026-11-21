@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AccountStatusPage } from './components/auth/AccountStatusPage';
+import { AccountStatusPage, ProfileLoadErrorPage } from './components/auth/AccountStatusPage';
 import { AdminDashboardPage } from './components/auth/AdminDashboardPage';
 import { EmployeeDashboardPage } from './components/auth/EmployeeDashboardPage';
 import { LoginPage } from './components/auth/LoginPage';
@@ -27,6 +27,8 @@ export default function App() {
     authLoading,
     profileLoading,
     profile,
+    profileError,
+    profileErrorKind,
     isRecoveryMode,
   } = useAuth();
 
@@ -97,9 +99,10 @@ export default function App() {
         isAuthenticated,
         isLoading: isAuthBusy,
         profile,
+        profileError,
         isRecoveryMode,
       }),
-    [route, isAuthenticated, isAuthBusy, profile, isRecoveryMode]
+    [route, isAuthenticated, isAuthBusy, profile, profileError, isRecoveryMode]
   );
 
   useEffect(() => {
@@ -371,6 +374,23 @@ export default function App() {
     route === 'register' ||
     route === 'forgot-password' ||
     route === 'reset-password';
+
+  // Dedicated error screen for RLS / network / database / auth errors while fetching employee_profiles
+  // Never mislabels a database or permission failure as "Employee Profile Not Found"
+  if (!isAuthBusy && isAuthenticated && !isRecoveryMode && !profile && profileError) {
+    return (
+      <RouteNavigationProvider
+        activeRoute={route}
+        navigateRoute={(target) => navigateRoute(target)}
+      >
+        <ProfileLoadErrorPage
+          error={profileError}
+          errorKind={profileErrorKind}
+          onNavigateRoute={(r) => navigateRoute(r)}
+        />
+      </RouteNavigationProvider>
+    );
+  }
 
   // Show loading screen when verifying session/profile for protected routes (prevents unauthorized flash)
   if ((isAuthBusy && !isPublicRoute) || (!isAuthBusy && !accessDecision.allowed)) {
