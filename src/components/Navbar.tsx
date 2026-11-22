@@ -1,9 +1,9 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useRouteNavigation } from '../context/RouteNavigationContext';
 import { AppRoute } from '../types/auth';
 import { ScreenId } from '../types/design';
-import { canViewAdminNavigation, resolvePostLoginRoute } from '../utils/authValidation';
+import { canViewAdminNavigation } from '../utils/authValidation';
 
 interface NavbarProps {
   activeScreen: ScreenId;
@@ -24,6 +24,9 @@ export const Navbar: React.FC<NavbarProps> = ({
 }) => {
   const { isAuthenticated, isApproved, authLoading, profileLoading, user, profile, signOut } =
     useAuth();
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
+
   const showAdminNav = canViewAdminNavigation({
     isAuthenticated,
     isLoading: authLoading || profileLoading,
@@ -31,6 +34,26 @@ export const Navbar: React.FC<NavbarProps> = ({
     profile,
   });
   const routeCtx = useRouteNavigation();
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(event.target as Node)) {
+        setAccountMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setAccountMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [accountMenuOpen]);
 
   const currentRoute: AppRoute = activeRoute ?? routeCtx?.activeRoute ?? activeScreen;
   const goRoute = (target: AppRoute) => {
@@ -50,11 +73,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   ];
 
   const handleLogout = async () => {
+    setAccountMenuOpen(false);
     await signOut();
     goRoute('login');
   };
-
-  const accountRoute: AppRoute = resolvePostLoginRoute(profile, user?.id ?? null);
 
   return (
     <header className="sticky top-0 z-30 bg-surface-container border-b border-outline-variant no-print">
@@ -148,30 +170,65 @@ export const Navbar: React.FC<NavbarProps> = ({
         </nav>
 
         <div className="flex items-center gap-gutter-xs sm:gap-gutter-sm shrink-0">
+          {rightSlot && (
+            <div className={compact ? 'hidden lg:flex items-center gap-gutter-sm shrink-0' : 'hidden md:flex items-center gap-gutter-sm shrink-0'}>
+              {rightSlot}
+            </div>
+          )}
+
           {isAuthenticated ? (
-            <div className="flex items-center gap-gutter-xs sm:gap-gutter-sm">
+            <div ref={accountMenuRef} className="relative">
               <button
                 type="button"
-                onClick={() => goRoute(accountRoute)}
-                title={profile ? `${profile.full_name} (${profile.role} · ${profile.account_status})` : 'Account Status'}
-                className="hidden sm:inline-flex items-center gap-1.5 px-gutter-sm py-gutter-xs rounded-sm border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-outline font-label text-label-sm cursor-pointer whitespace-nowrap max-w-[170px]"
+                aria-haspopup="menu"
+                aria-expanded={accountMenuOpen}
+                onClick={() => setAccountMenuOpen((open) => !open)}
+                title={profile ? `${profile.full_name} (${profile.role} · ${profile.account_status})` : 'Account'}
+                className="inline-flex items-center gap-1.5 px-gutter-sm py-gutter-xs rounded-sm border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-outline font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap max-w-[200px]"
               >
                 <span className="material-symbols-outlined text-[16px] text-primary shrink-0" aria-hidden="true">
                   {showAdminNav ? 'admin_panel_settings' : 'account_circle'}
                 </span>
                 <span className="truncate">{profile?.full_name ?? 'Account'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleLogout()}
-                title="Sign Out"
-                className="inline-flex items-center gap-1 px-gutter-sm py-gutter-xs rounded-sm border border-outline-variant text-on-surface-variant hover:text-error hover:border-error font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap"
-              >
-                <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
-                  logout
+                <span
+                  className={`material-symbols-outlined text-[16px] shrink-0 transition-transform ${
+                    accountMenuOpen ? 'rotate-180' : ''
+                  }`}
+                  aria-hidden="true"
+                >
+                  expand_more
                 </span>
-                <span className={compact ? 'hidden xl:inline' : 'hidden sm:inline'}>Sign Out</span>
               </button>
+
+              {accountMenuOpen && (
+                <div
+                  role="menu"
+                  aria-label="Account options"
+                  className="absolute right-0 mt-2 w-56 rounded-md bg-surface-container border border-outline shadow-xl py-1.5 z-50"
+                >
+                  {profile && (
+                    <div className="px-gutter-md py-gutter-xs border-b border-outline-variant mb-1">
+                      <p className="font-label text-label-sm text-on-surface truncate">
+                        {profile.full_name}
+                      </p>
+                      <p className="font-mono text-mono-sm text-on-surface-variant truncate">
+                        {profile.email}
+                      </p>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => void handleLogout()}
+                    className="w-full px-gutter-md py-gutter-sm text-left inline-flex items-center gap-gutter-sm font-label text-label-md text-error hover:bg-error/10 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+                      logout
+                    </span>
+                    <span>Log Out</span>
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex items-center gap-gutter-xs">
@@ -191,12 +248,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                   Register
                 </button>
               )}
-            </div>
-          )}
-
-          {rightSlot && (
-            <div className={compact ? 'hidden lg:flex items-center gap-gutter-sm shrink-0' : 'hidden md:flex items-center gap-gutter-sm shrink-0'}>
-              {rightSlot}
             </div>
           )}
         </div>
