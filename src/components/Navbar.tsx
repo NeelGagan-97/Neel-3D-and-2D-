@@ -105,8 +105,8 @@ export const Navbar: React.FC<NavbarProps> = ({
             </span>
           </div>
           <div className={compact ? 'flex items-baseline gap-gutter-md min-w-0' : 'flex flex-col min-w-0'}>
-            <span className="font-headline text-title-sm text-on-surface tracking-wide uppercase whitespace-nowrap">
-              NEEL 3D SPACE
+            <span className="font-headline text-title-sm text-on-surface tracking-wide whitespace-nowrap">
+              Blue Space
             </span>
             <span
               className={`font-mono text-mono-sm text-on-surface-variant tracking-wider uppercase whitespace-nowrap ${

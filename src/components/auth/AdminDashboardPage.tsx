@@ -65,7 +65,6 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
     profileLoading,
     user,
     profile: currentAdmin,
-    signOut,
   } = useAuth();
   const isVerifiedAdmin =
     isAuthenticated &&
@@ -199,11 +198,6 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
     }
   };
 
-  const handleSignOut = async () => {
-    await signOut();
-    onNavigateRoute('login');
-  };
-
   const filterTabs: { id: StatusFilter; label: string; count: number }[] = [
     { id: 'ALL', label: 'All', count: stats.total },
     { id: 'PENDING', label: 'Pending', count: stats.pending },
@@ -279,16 +273,6 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
                 view_in_ar
               </span>
               <span>3D Design Studio</span>
-            </button>
-            <button
-              type="button"
-              onClick={handleSignOut}
-              className="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-sm rounded-md border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-outline font-label text-label-md cursor-pointer whitespace-nowrap"
-            >
-              <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                logout
-              </span>
-              <span>Sign Out</span>
             </button>
           </div>
         </section>
