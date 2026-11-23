@@ -2388,40 +2388,6 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 </div>
               </details>
             </div>
-
-            {/* PROPERTIES INSPECTOR DROPDOWN TRIGGER */}
-            <button
-              type="button"
-              onClick={() => {
-                setOpenToolbarDropdown(null);
-                setOpenDrawer((prev) => (prev === 'properties' ? null : 'properties'));
-              }}
-              aria-expanded={openDrawer === 'properties'}
-              title="Toggle Properties Inspector Dropdown"
-              className={`flex items-center gap-1.5 px-gutter-sm py-1.5 rounded-md border cursor-pointer select-none transition-colors ${
-                openDrawer === 'properties'
-                  ? 'bg-surface-container-high border-primary'
-                  : 'bg-surface-container border-outline-variant hover:bg-surface-container-high'
-              }`}
-            >
-              <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
-                tune
-              </span>
-              <span className="font-label text-label-sm text-on-surface uppercase tracking-wider whitespace-nowrap">
-                Properties Inspector
-              </span>
-              <span className="px-1.5 py-0.5 rounded-full bg-primary-container text-primary font-mono text-[10px] uppercase whitespace-nowrap">
-                {inspectorBadgeLabel}
-              </span>
-              <span
-                className={`material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle ${
-                  openDrawer === 'properties' ? 'rotate-180' : ''
-                }`}
-                aria-hidden="true"
-              >
-                expand_more
-              </span>
-            </button>
           </div>
 
           {/* Multi-Floor Level Switcher Strip (1st Floor, 2nd Floor, 3rd Floor + Elevated) */}
@@ -2505,13 +2471,39 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   <span>Copy {formatFloorLabel(activeFloor - 1)}</span>
                 </button>
               )}
-              <span className="font-mono text-[11px] text-on-surface-variant hidden sm:inline">
-                {viewMode === '3d' && floorView3D === 'all' && totalFloors > 1
-                  ? `Elevated · All ${totalFloors} Floors`
-                  : activeFloor === 1
-                    ? 'Ground Level (0)'
-                    : `Elev. +${formatLength((activeFloor - 1) * siteToMeters(project.site).ceilingM, units, 1)}`}
-              </span>
+              {/* PROPERTIES INSPECTOR DROPDOWN TRIGGER */}
+              <button
+                type="button"
+                onClick={() => {
+                  setOpenToolbarDropdown(null);
+                  setOpenDrawer((prev) => (prev === 'properties' ? null : 'properties'));
+                }}
+                aria-expanded={openDrawer === 'properties'}
+                title="Toggle Properties Inspector Dropdown"
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-sm border cursor-pointer select-none transition-colors ${
+                  openDrawer === 'properties'
+                    ? 'bg-surface-container-high border-primary'
+                    : 'bg-surface-container-low border-outline-variant hover:border-primary hover:bg-surface-container-high'
+                }`}
+              >
+                <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
+                  tune
+                </span>
+                <span className="font-label text-label-sm text-on-surface uppercase tracking-wider whitespace-nowrap">
+                  Properties Inspector
+                </span>
+                <span className="px-1.5 py-0.5 rounded-full bg-primary-container text-primary font-mono text-[10px] uppercase whitespace-nowrap">
+                  {inspectorBadgeLabel}
+                </span>
+                <span
+                  className={`material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle ${
+                    openDrawer === 'properties' ? 'rotate-180' : ''
+                  }`}
+                  aria-hidden="true"
+                >
+                  expand_more
+                </span>
+              </button>
             </div>
           </div>
 
@@ -2787,7 +2779,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         <aside
           onPointerDown={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.stopPropagation()}
-          className="absolute right-2 top-[46px] z-40 w-[308px] max-w-[calc(100%-16px)] max-h-[calc(100%-56px)] bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-md flex flex-col gap-gutter-md overflow-y-auto"
+          className="absolute right-2 top-[88px] z-40 w-[308px] max-w-[calc(100%-16px)] max-h-[calc(100%-96px)] bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-md flex flex-col gap-gutter-md overflow-y-auto"
         >
           <div className="flex items-center justify-between gap-2 border-b border-outline-variant pb-gutter-sm">
             <span className="font-label text-label-sm text-on-surface-variant uppercase tracking-wider">
