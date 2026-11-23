@@ -75,7 +75,7 @@ export const HomePage: React.FC<HomePageProps> = ({
 
       <main className="flex-1">
         {/* Hero Section */}
-        <section className="border-b border-outline-variant bg-surface-container-low">
+        <section className="border-b border-outline-variant bg-surface-container-low overflow-x-clip">
           <div className="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-section">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-gutter-2xl items-center">
               <div className="lg:col-span-5 flex flex-col gap-gutter-lg">
@@ -148,7 +148,7 @@ export const HomePage: React.FC<HomePageProps> = ({
               </div>
 
               <div className="lg:col-span-7">
-                <div className="bg-surface-container border border-outline rounded-xl overflow-hidden">
+                <div className="bg-surface-container border border-outline rounded-xl overflow-hidden lg:translate-x-4 xl:translate-x-6">
                   <div className="px-gutter-lg py-gutter-sm border-b border-outline-variant bg-surface-container-high flex items-center justify-between gap-gutter-sm">
                     <div className="flex items-center gap-gutter-sm min-w-0">
                       <span className="material-symbols-outlined text-primary text-[18px]" aria-hidden="true">

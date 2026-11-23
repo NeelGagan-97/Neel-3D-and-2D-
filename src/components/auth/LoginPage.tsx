@@ -152,7 +152,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
               {/* Frosted Glass Sign-In Card */}
               <div className="lg:col-span-5 flex items-center justify-center lg:justify-end">
-                <div className="relative w-full max-w-[430px] rounded-2xl bg-[#0D0B18]/82 backdrop-blur-xl border border-white/15 shadow-[0_24px_80px_rgba(0,0,0,0.68)] p-7 sm:p-9">
+                <div className="relative w-full max-w-[430px] lg:translate-x-6 xl:translate-x-8 rounded-2xl bg-[#0D0B18]/82 backdrop-blur-xl border border-white/15 shadow-[0_24px_80px_rgba(0,0,0,0.68)] p-7 sm:p-9">
                   <div className="flex flex-col gap-1.5 mb-7">
                     <h2 className="font-headline text-2xl sm:text-[26px] font-bold tracking-tight text-white">
                       Welcome Back
