@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CATALOG_MAP,
   CIRCUITS,
@@ -25,6 +25,8 @@ import {
   ScreenId,
   SelectedEntity,
   SiteConfig,
+  StudioEntityRef,
+  StudioFocusTarget,
   UnitSystem,
   ViewMode,
 } from '../types/design';
@@ -44,8 +46,30 @@ import {
   toMeters,
   validateRoomPlacement,
 } from '../utils/geometry';
+import {
+  copyEntitiesToClipboard,
+  deleteEntitiesFromProject,
+  duplicateEntitiesInProject,
+  FindCategoryFilter,
+  FURNITURE_MAP,
+  generateUniqueEntityId,
+  getEntityFocusPoint,
+  isEditableEventTarget,
+  pasteClipboardIntoProject,
+  pruneSelectionToProject,
+  resolve3DWalkCommand,
+  resolveStudioShortcut,
+  rotateEntitiesInProject,
+  searchStudioComponents,
+  selectAllEntitiesOnFloor,
+  StudioClipboard,
+  StudioSearchResult,
+  toggleEntityInSelection,
+} from '../utils/studioEditor';
+import { CanvasContextMenu, CanvasContextMenuItem } from './CanvasContextMenu';
 import { CreateRoomModal } from './CreateRoomModal';
 import { DrawingInstructionsModal } from './DrawingInstructionsModal';
+import { FindComponentPanel } from './FindComponentPanel';
 import { FloorPlan2D } from './FloorPlan2D';
 import { Navbar } from './Navbar';
 import { SiteConfigStep } from './SiteConfigStep';
@@ -60,6 +84,7 @@ interface DesignStudioPageProps {
   onNavigate: (screen: ScreenId) => void;
   onSwitchProject: (projectId: string) => void;
   onUpdateProject: (updater: (prev: ProjectData) => ProjectData, recordHistory?: boolean) => void;
+  onRecordSnapshot?: () => void;
   onCompleteSiteConfig: (site: SiteConfig) => void;
   onSaveAsProject: (newName: string) => void;
   onImportProject: (rawJson: string) => { ok: boolean; error?: string };
@@ -90,6 +115,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   onNavigate,
   onSwitchProject,
   onUpdateProject,
+  onRecordSnapshot,
   onCompleteSiteConfig,
   onSaveAsProject,
   onImportProject,
@@ -107,9 +133,14 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const [lightingMode, setLightingMode] = useState<LightingMode>('daylight');
   const [zoom, setZoom] = useState<number>(100);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [canvasContextMenu, setCanvasContextMenu] = useState<{ x: number; y: number } | null>(null);
   const showGrid = true;
   const snapEnabled = true;
   const [activeTool, setActiveTool] = useState<CanvasTool>('select');
+
+  useEffect(() => {
+    setCanvasContextMenu(null);
+  }, [viewMode, activeFloor, project.id]);
 
   const totalFloors = Math.max(1, Math.min(5, Math.round(project.site.floors || 1)));
 
@@ -124,8 +155,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     [project, activeFloor]
   );
 
-  const [selectedEntity, setSelectedEntity] = useState<SelectedEntity>(() =>
-    project.rooms[0] ? { kind: 'room', id: project.rooms[0].id } : null
+  // Multi-selection state (length 1 -> single entity inspector; length > 1 -> multi-selection inspector)
+  const [selectedEntities, setSelectedEntities] = useState<StudioEntityRef[]>(() =>
+    project.rooms[0] ? [{ kind: 'room', id: project.rooms[0].id }] : []
   );
   const [allSelected, setAllSelected] = useState<boolean>(false);
   const [pendingPlaceItem, setPendingPlaceItem] = useState<ElectricalItemType | null>(null);
@@ -135,6 +167,48 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     roomType?: RoomType;
   } | null>(null);
 
+  // Simulink-style Clipboard & Find Component state
+  const [clipboard, setClipboard] = useState<StudioClipboard | null>(null);
+  const pasteStepRef = useRef<number>(1);
+  const [findOpen, setFindOpen] = useState<boolean>(false);
+  const [findQuery, setFindQuery] = useState<string>('');
+  const [findCategory, setFindCategory] = useState<FindCategoryFilter>('all');
+  const [findActiveIndex, setFindActiveIndex] = useState<number>(0);
+  const [focusTarget, setFocusTarget] = useState<StudioFocusTarget | null>(null);
+
+  // Tracks whether a text/number inspector edit session already recorded an undo snapshot
+  const inspectorSnapshotGuardRef = useRef<string | null>(null);
+  const ensureInspectorSnapshot = (fieldKey: string) => {
+    if (inspectorSnapshotGuardRef.current !== fieldKey) {
+      inspectorSnapshotGuardRef.current = fieldKey;
+      onRecordSnapshot?.();
+    }
+  };
+  const resetInspectorSnapshotGuard = () => {
+    inspectorSnapshotGuardRef.current = null;
+  };
+
+  // Convenience setters that keep selectedEntities & allSelected synchronized
+  const setSelectedEntity = useCallback((entity: SelectedEntity, additive = false) => {
+    resetInspectorSnapshotGuard();
+    if (!entity) {
+      setSelectedEntities([]);
+      return;
+    }
+    setSelectedEntities((prev) => toggleEntityInSelection(prev, entity, additive));
+  }, []);
+
+  // Automatically prune deleted/undone entities from selection so Inspector never references stale IDs
+  useEffect(() => {
+    setSelectedEntities((prev) => {
+      const pruned = pruneSelectionToProject(prev, project);
+      return pruned.length === prev.length ? prev : pruned;
+    });
+  }, [project]);
+
+  const selectedEntity: SelectedEntity =
+    selectedEntities.length === 1 ? selectedEntities[0] : null;
+
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [openDrawer, setOpenDrawer] = useState<'tools' | 'rooms' | 'site' | 'electrical' | null>(null);
   const [showSaveAsModal, setShowSaveAsModal] = useState(false);
@@ -143,20 +217,20 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const [inspectorWarning, setInspectorWarning] = useState<string | null>(null);
-  const [statusMessage, setStatusMessage] = useState<{
+  const [, setStatusMessage] = useState<{
     text: string;
     tone: 'info' | 'warning';
   }>(() => ({
     text:
       project.rooms.length === 0
         ? 'Blank site ready — click anywhere inside the site boundary to create a room'
-        : 'Select any room to edit dimensions, or click empty space to add a room',
+        : 'Ctrl+F Find · Ctrl+Z/Y Undo/Redo · Ctrl+C/V/D Copy/Paste/Duplicate · Shift+Click Multi-Select',
     tone: 'info',
   }));
 
-  const notify = (text: string, tone: 'info' | 'warning' = 'info') => {
+  const notify = useCallback((text: string, tone: 'info' | 'warning' = 'info') => {
     setStatusMessage({ text, tone });
-  };
+  }, []);
 
   const metrics = useMemo(() => computeProjectMetrics(project), [project]);
   const units = project.site.units;
@@ -182,67 +256,347 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     return project.points.find((p) => p.id === selectedEntity.id) ?? null;
   }, [project.points, selectedEntity]);
 
-  // Keyboard shortcuts for 2D SVG Floor Plan: Ctrl+A (Select All), Escape (Clear), Delete (Clear All Selected)
+  const selectedFurniture = useMemo(() => {
+    if (selectedEntity?.kind !== 'furniture') return null;
+    return project.furniture.find((f) => f.id === selectedEntity.id) ?? null;
+  }, [project.furniture, selectedEntity]);
+
+  // Live Find Component search results across placed canvas entities + component library
+  const findResults = useMemo(
+    () => (findOpen ? searchStudioComponents(project, findQuery, findCategory) : []),
+    [findOpen, project, findQuery, findCategory]
+  );
+
+  // Keep active search index in bounds when query or filter changes
   useEffect(() => {
-    if (project.siteConfigured === false || viewMode !== '2d') return;
+    if (!findOpen) return;
+    setFindActiveIndex(0);
+  }, [findQuery, findCategory, findOpen]);
+
+  const highlightedIds = useMemo(() => {
+    const set = new Set<string>();
+    if (!findOpen) return set;
+    findResults.forEach((res) => {
+      if (res.source === 'placed' && res.entity) {
+        set.add(res.entity.id);
+      }
+    });
+    return set;
+  }, [findOpen, findResults]);
+
+  const activeHighlightId = useMemo(() => {
+    if (!findOpen || findResults.length === 0) return null;
+    const clampedIdx = Math.max(0, Math.min(findActiveIndex, findResults.length - 1));
+    const active = findResults[clampedIdx];
+    return active?.source === 'placed' && active.entity ? active.entity.id : null;
+  }, [findOpen, findResults, findActiveIndex]);
+
+  // --- Simulink-Style Selection & Clipboard Operations (Work in BOTH 2D & 3D) ---
+
+  const getActiveSelectionForOp = useCallback((): StudioEntityRef[] => {
+    if (allSelected) {
+      return selectAllEntitiesOnFloor(project, activeFloor);
+    }
+    return selectedEntities;
+  }, [allSelected, project, activeFloor, selectedEntities]);
+
+  const handleSelectAll = useCallback(() => {
+    const allOnFloor = selectAllEntitiesOnFloor(project, activeFloor);
+    setSelectedEntities(allOnFloor);
+    setAllSelected(true);
+    setInspectorWarning(null);
+    notify(
+      allOnFloor.length > 0
+        ? `Selected all ${allOnFloor.length} components on ${formatFloorLabel(activeFloor)} — Ctrl+C Copy, Ctrl+D Duplicate, Delete to remove, Esc to clear`
+        : `${formatFloorLabel(activeFloor)} has no components to select yet`
+    );
+  }, [project, activeFloor, notify]);
+
+  const handleCopySelection = useCallback(() => {
+    const targets = getActiveSelectionForOp();
+    const clip = copyEntitiesToClipboard(project, targets, activeFloor);
+    if (!clip) {
+      notify('Select one or more components first before copying (Ctrl+C)', 'warning');
+      return;
+    }
+    const count =
+      clip.points.length +
+      clip.rooms.length +
+      clip.customWalls.length +
+      clip.openings.length +
+      clip.furniture.length;
+    setClipboard(clip);
+    pasteStepRef.current = 1;
+    notify(`Copied ${count} component${count === 1 ? '' : 's'} to clipboard — press Ctrl+V to paste`);
+  }, [getActiveSelectionForOp, project, activeFloor, notify]);
+
+  const handlePasteClipboard = useCallback(() => {
+    if (!clipboard) {
+      notify('Clipboard is empty — select a component and press Ctrl+C first', 'warning');
+      return;
+    }
+    const step = pasteStepRef.current;
+    pasteStepRef.current += 1;
+    const result = pasteClipboardIntoProject(project, clipboard, activeFloor, step);
+    if (result.pastedEntities.length === 0) return;
+
+    onUpdateProject(() => result.project, true);
+    setAllSelected(false);
+    setSelectedEntities(result.pastedEntities);
+    setInspectorWarning(null);
+    notify(
+      `Pasted ${result.pastedEntities.length} independent component${result.pastedEntities.length === 1 ? '' : 's'} onto ${formatFloorLabel(activeFloor)}`
+    );
+  }, [clipboard, project, activeFloor, onUpdateProject, notify]);
+
+  const handleDuplicateSelection = useCallback(() => {
+    const targets = getActiveSelectionForOp();
+    if (targets.length === 0) {
+      notify('Select one or more components first to duplicate (Ctrl+D)', 'warning');
+      return;
+    }
+    const result = duplicateEntitiesInProject(project, targets, activeFloor);
+    if (result.duplicatedEntities.length === 0) return;
+
+    onUpdateProject(() => result.project, true);
+    setAllSelected(false);
+    setSelectedEntities(result.duplicatedEntities);
+    setInspectorWarning(null);
+    notify(
+      `Duplicated ${result.duplicatedEntities.length} component${result.duplicatedEntities.length === 1 ? '' : 's'} with unique IDs`
+    );
+  }, [getActiveSelectionForOp, project, activeFloor, onUpdateProject, notify]);
+
+  const handleDeleteSelection = useCallback(() => {
+    const targets = getActiveSelectionForOp();
+    if (targets.length === 0 && !allSelected) return;
+
+    if (allSelected) {
+      onUpdateProject(
+        (prev) => ({
+          ...prev,
+          rooms: prev.rooms.filter((r) => getItemFloor(r) !== activeFloor),
+          customWalls: prev.customWalls.filter((w) => getItemFloor(w) !== activeFloor),
+          openings: prev.openings.filter((o) => getItemFloor(o) !== activeFloor),
+          dimensions: (prev.dimensions ?? []).filter((d) => getItemFloor(d) !== activeFloor),
+          furniture: prev.furniture.filter((f) => getItemFloor(f) !== activeFloor),
+          points: prev.points.filter((p) => getItemFloor(p) !== activeFloor),
+        }),
+        true
+      );
+      setAllSelected(false);
+      setSelectedEntities([]);
+      notify(`Cleared all components on ${formatFloorLabel(activeFloor)} (Ctrl+Z to undo)`);
+      return;
+    }
+
+    const result = deleteEntitiesFromProject(project, targets);
+    if (result.deletedCount === 0) return;
+    onUpdateProject(() => result.project, true);
+    setSelectedEntities([]);
+    setAllSelected(false);
+    notify(
+      `Deleted ${result.deletedCount} component${result.deletedCount === 1 ? '' : 's'} (Ctrl+Z to restore)`
+    );
+  }, [getActiveSelectionForOp, allSelected, project, activeFloor, onUpdateProject, notify]);
+
+  const handleRotateSelection = useCallback(() => {
+    const targets = getActiveSelectionForOp();
+    if (targets.length === 0) {
+      notify('Select one or more components to rotate 90°', 'warning');
+      return;
+    }
+    const result = rotateEntitiesInProject(project, targets, 90);
+    if (result.rotatedCount === 0) {
+      notify('Selected item cannot be rotated', 'warning');
+      return;
+    }
+    onUpdateProject(() => result.project, true);
+    notify(`Rotated ${result.rotatedCount} component${result.rotatedCount === 1 ? '' : 's'} by 90°`);
+  }, [getActiveSelectionForOp, project, onUpdateProject, notify]);
+
+  const handleFocusAndSelectEntity = useCallback(
+    (entity: StudioEntityRef, targetProject: ProjectData = project) => {
+      const focus = getEntityFocusPoint(targetProject, entity);
+      if (focus) {
+        if (focus.floor !== activeFloor) {
+          setActiveFloor(focus.floor);
+          setFloorView3D('active-only');
+        }
+        setFocusTarget({
+          x: focus.x,
+          y: focus.y,
+          z: focus.z,
+          floor: focus.floor,
+          nonce: Date.now() + Math.random(),
+        });
+      }
+      setAllSelected(false);
+      setSelectedEntities([entity]);
+      setInspectorWarning(null);
+    },
+    [project, activeFloor]
+  );
+
+  const handlePlaceFurnitureFromLibrary = useCallback(
+    (kind: FurnitureItem['kind']) => {
+      const meta = FURNITURE_MAP[kind];
+      const targetRoom =
+        (selectedRoom && getItemFloor(selectedRoom) === activeFloor ? selectedRoom : null) ??
+        floorProject.rooms[0];
+      const { lengthM, widthM } = siteToMeters(project.site);
+      const cx = targetRoom ? targetRoom.x + targetRoom.width / 2 : lengthM / 2;
+      const cy = targetRoom ? targetRoom.y + targetRoom.height / 2 : widthM / 2;
+      const existingIds = new Set(project.furniture.map((f) => f.id));
+      const newFurn: FurnitureItem = {
+        id: generateUniqueEntityId('fn', existingIds),
+        floor: activeFloor,
+        kind,
+        roomId: targetRoom?.id ?? '',
+        x: Number(cx.toFixed(2)),
+        y: Number(cy.toFixed(2)),
+        width: meta.defaultWidth,
+        depth: meta.defaultDepth,
+        rotation: 0,
+      };
+      onUpdateProject(
+        (prev) => ({
+          ...prev,
+          furniture: [...prev.furniture, newFurn],
+        }),
+        true
+      );
+      setAllSelected(false);
+      setSelectedEntities([{ kind: 'furniture', id: newFurn.id }]);
+      setFocusTarget({
+        x: newFurn.x,
+        y: newFurn.y,
+        z: 0.6,
+        floor: activeFloor,
+        nonce: Date.now() + Math.random(),
+      });
+      notify(`Placed ${meta.label} on ${formatFloorLabel(activeFloor)}`);
+    },
+    [selectedRoom, activeFloor, floorProject.rooms, project.site, project.furniture, onUpdateProject, notify]
+  );
+
+  // Global Simulink-Style Keyboard Shortcuts (Active in BOTH 2D & 3D modes, Input-Safe)
+  useEffect(() => {
+    if (project.siteConfigured === false) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (pendingRoomModal || showSaveAsModal || showGuideModal) return;
-      const target = e.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
-        return;
+      const modalBlocking = Boolean(pendingRoomModal || showSaveAsModal || showGuideModal);
+
+      // Allow Ctrl+S save even when Find input is open (prevent browser Save Page dialog)
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's' && !modalBlocking) {
+        if (!isEditableEventTarget(e.target) || findOpen) {
+          e.preventDefault();
+          onSaveProject();
+          notify(`Saved "${project.name}" to workspace`);
+          return;
+        }
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      const isEditable = isEditableEventTarget(e.target);
+
+      // 'E' / 'e' command in 3D Preview: Enter / Exit 3D Walk Mode
+      const walkCmd = resolve3DWalkCommand(e, {
+        isEditable,
+        modalBlocking,
+        viewMode,
+      });
+      if (walkCmd === 'toggle-3d-walk') {
         e.preventDefault();
-        setSelectedEntity(null);
-        setAllSelected(true);
-        setInspectorWarning(null);
-        const total =
-          floorProject.rooms.length +
-          floorProject.customWalls.length +
-          floorProject.openings.length +
-          floorProject.points.length +
-          (floorProject.dimensions?.length ?? 0);
-        setStatusMessage({
-          text:
-            total > 0
-              ? `Selected all on ${formatFloorLabel(activeFloor)} (${floorProject.rooms.length} rooms, ${floorProject.customWalls.length} walls, ${floorProject.openings.length} openings) — drag to move together, Delete to clear, or Esc to deselect`
-              : `${formatFloorLabel(activeFloor)} selected — click inside the boundary to create rooms or press Esc to deselect`,
-          tone: 'info',
-        });
-        return;
-      }
-
-      if (e.key === 'Escape') {
-        setAllSelected(false);
-        setSelectedEntity(null);
-        setPendingPlaceItem(null);
+        setCanvasContextMenu(null);
         setOpenDrawer(null);
+        setCameraMode((prev) => {
+          const next = prev === 'fps' ? 'orbit' : 'fps';
+          notify(
+            next === 'fps'
+              ? `Entered 3D Walk (1:3 Scale) on ${formatFloorLabel(activeFloor)} — navigate with W/A/S/D or Arrows`
+              : 'Exited 3D Walk back to Orbit view'
+          );
+          return next;
+        });
         return;
       }
 
-      if ((e.key === 'Delete' || e.key === 'Backspace') && allSelected) {
-        e.preventDefault();
-        onUpdateProject(
-          (prev) => ({
-            ...prev,
-            rooms: prev.rooms.filter((r) => getItemFloor(r) !== activeFloor),
-            customWalls: prev.customWalls.filter((w) => getItemFloor(w) !== activeFloor),
-            openings: prev.openings.filter((o) => getItemFloor(o) !== activeFloor),
-            dimensions: (prev.dimensions ?? []).filter((d) => getItemFloor(d) !== activeFloor),
-            furniture: prev.furniture.filter((f) => getItemFloor(f) !== activeFloor),
-            points: prev.points.filter((p) => getItemFloor(p) !== activeFloor),
-          }),
-          true
-        );
-        setAllSelected(false);
-        setSelectedEntity(null);
-        setStatusMessage({
-          text: `Cleared all selected elements on ${formatFloorLabel(activeFloor)} (click Undo to restore)`,
-          tone: 'info',
-        });
+      const action = resolveStudioShortcut(e, {
+        isEditable,
+        modalBlocking,
+      });
+      if (!action) return;
+
+      switch (action) {
+        case 'find':
+          e.preventDefault();
+          setCanvasContextMenu(null);
+          setOpenDrawer(null);
+          setFindOpen(true);
+          notify('Find Component open — type name, category, type, or ID (Esc to close)');
+          break;
+        case 'undo':
+          e.preventDefault();
+          if (canUndo) {
+            onUndo();
+            notify('Undid last action (Ctrl+Z)');
+          }
+          break;
+        case 'redo':
+          e.preventDefault();
+          if (canRedo) {
+            onRedo();
+            notify('Redid action (Ctrl+Y)');
+          }
+          break;
+        case 'copy':
+          e.preventDefault();
+          handleCopySelection();
+          break;
+        case 'paste':
+          e.preventDefault();
+          handlePasteClipboard();
+          break;
+        case 'duplicate':
+          e.preventDefault();
+          handleDuplicateSelection();
+          break;
+        case 'delete':
+          if (selectedEntities.length > 0 || allSelected) {
+            e.preventDefault();
+            handleDeleteSelection();
+          }
+          break;
+        case 'select-all':
+          e.preventDefault();
+          handleSelectAll();
+          break;
+        case 'save':
+          e.preventDefault();
+          onSaveProject();
+          notify(`Saved "${project.name}" to workspace`);
+          break;
+        case 'escape':
+          e.preventDefault();
+          if (canvasContextMenu) {
+            setCanvasContextMenu(null);
+          } else if (viewMode === '3d' && cameraMode === 'fps') {
+            setCameraMode('orbit');
+            notify('Exited 3D Walk back to Orbit view');
+          } else if (findOpen) {
+            setFindOpen(false);
+            notify('Closed Find Component');
+          } else if (openDrawer) {
+            setOpenDrawer(null);
+          } else if (pendingPlaceItem) {
+            setPendingPlaceItem(null);
+            notify('Cancelled component placement');
+          } else {
+            setAllSelected(false);
+            setSelectedEntities([]);
+            setInspectorWarning(null);
+          }
+          break;
       }
     };
 
@@ -250,18 +604,30 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     project.siteConfigured,
-    floorProject.rooms.length,
-    floorProject.customWalls.length,
-    floorProject.openings.length,
-    floorProject.points.length,
-    floorProject.dimensions?.length,
-    activeFloor,
+    project.name,
     viewMode,
+    cameraMode,
+    activeFloor,
+    canvasContextMenu,
     pendingRoomModal,
     showSaveAsModal,
     showGuideModal,
+    findOpen,
+    openDrawer,
+    pendingPlaceItem,
+    canUndo,
+    canRedo,
+    selectedEntities.length,
     allSelected,
-    onUpdateProject,
+    onUndo,
+    onRedo,
+    onSaveProject,
+    handleCopySelection,
+    handlePasteClipboard,
+    handleDuplicateSelection,
+    handleDeleteSelection,
+    handleSelectAll,
+    notify,
   ]);
 
   // PHASE 2: If this project has not configured its site yet, show Site Dimension Configuration first
@@ -840,6 +1206,15 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         setSelectedEntity(null);
       }
       notify('Deleted electrical point');
+    } else if (entity.kind === 'furniture') {
+      onUpdateProject((prev) => ({
+        ...prev,
+        furniture: prev.furniture.filter((f) => f.id !== entity.id),
+      }));
+      setSelectedEntities((prev) =>
+        prev.filter((s) => !(s.kind === 'furniture' && s.id === entity.id))
+      );
+      notify('Deleted furniture item');
     } else if (entity.kind === 'dimension') {
       onUpdateProject((prev) => ({
         ...prev,
@@ -867,6 +1242,18 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             p.id === pt.id ? { ...p, rotation: (p.rotation + 90) % 360 } : p
           ),
         }));
+        notify(`Rotated ${pt.code} 90°`);
+      }
+    } else if (entity.kind === 'furniture') {
+      const fn = project.furniture.find((f) => f.id === entity.id);
+      if (fn) {
+        onUpdateProject((prev) => ({
+          ...prev,
+          furniture: prev.furniture.map((f) =>
+            f.id === fn.id ? { ...f, rotation: (f.rotation + 90) % 360 } : f
+          ),
+        }));
+        notify(`Rotated ${fn.kind.replace('-', ' ')} 90°`);
       }
     }
   };
@@ -1139,6 +1526,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       ...prev,
       furniture: [...prev.furniture, copy],
     }));
+    setSelectedEntity({ kind: 'furniture', id: copy.id });
     notify(`Duplicated ${src.kind.replace('-', ' ')} — drag freely to position`);
     return copy;
   };
@@ -1153,6 +1541,52 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       }),
       false
     );
+  };
+
+  const handleUpdateSelectedFurniture = (
+    patch: Partial<FurnitureItem>,
+    recordHistory = true
+  ) => {
+    if (!selectedFurniture) return;
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        furniture: prev.furniture.map((f) =>
+          f.id === selectedFurniture.id ? { ...f, ...patch } : f
+        ),
+      }),
+      recordHistory
+    );
+  };
+
+  // --- Find Component Panel Navigation Handlers ---
+  const handleSelectFindResult = (result: StudioSearchResult, index: number) => {
+    setFindActiveIndex(index);
+    if (result.source === 'placed' && result.entity) {
+      handleFocusAndSelectEntity(result.entity);
+      notify(`Selected "${result.title}" (${result.badge})`);
+    } else if (result.source === 'library') {
+      if (result.libraryKind === 'electrical' && result.electricalType) {
+        handlePlaceElectrical(result.electricalType);
+        setFindOpen(false);
+      } else if (result.libraryKind === 'furniture' && result.furnitureKind) {
+        handlePlaceFurnitureFromLibrary(result.furnitureKind);
+        setFindOpen(false);
+      } else if (result.libraryKind === 'room' && result.roomType) {
+        setFindOpen(false);
+        handleOpenRoomLibraryModal(result.roomType);
+      }
+    }
+  };
+
+  const handleStepFindResult = (delta: 1 | -1) => {
+    if (findResults.length === 0) return;
+    const nextIdx = (findActiveIndex + delta + findResults.length) % findResults.length;
+    setFindActiveIndex(nextIdx);
+    const nextRes = findResults[nextIdx];
+    if (nextRes?.source === 'placed' && nextRes.entity) {
+      handleFocusAndSelectEntity(nextRes.entity);
+    }
   };
 
   const handleSiteChange = <K extends keyof SiteConfig>(field: K, value: SiteConfig[K]) => {
@@ -1242,6 +1676,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
               onSaveProject();
               notify(`Saved "${project.name}" to workspace`);
             }}
+            title="Save Project (Ctrl+S)"
             className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
           >
             <span className="material-symbols-outlined text-[15px]" aria-hidden="true">save</span>
@@ -1338,35 +1773,49 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           </div>
         </div>
 
-        {/* Right: Undo/Redo, Zoom/Fit, Grid/Snap, 2D/3D, Project Summary */}
+        {/* Right: Simulink Editing Controls (Find, Undo/Redo, Copy/Paste/Duplicate/Rotate/Delete/Select All), Zoom, 2D/3D, Summary */}
         <div className="flex flex-wrap items-center gap-gutter-xs">
-          {/* Undo / Redo */}
+          {/* Find Component (Ctrl+F) */}
+          <button
+            type="button"
+            onClick={() => {
+              setOpenDrawer(null);
+              setFindOpen((prev) => !prev);
+            }}
+            title="Find Component (Ctrl+F)"
+            aria-label="Find Component"
+            className={`inline-flex items-center gap-1 px-2 py-1 rounded-sm border font-label text-label-sm cursor-pointer whitespace-nowrap transition-colors ${
+              findOpen
+                ? 'bg-primary text-on-primary border-primary'
+                : 'bg-surface-container border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary'
+            }`}
+          >
+            <span className="material-symbols-outlined text-[15px]" aria-hidden="true">search</span>
+            <span>Find</span>
+            <span className="font-mono text-[10px] opacity-75 hidden xl:inline">Ctrl+F</span>
+          </button>
+
+          {/* Component Operations: Rotate / Delete */}
           <div className="inline-flex items-center rounded-sm border border-outline-variant bg-surface-container">
             <button
               type="button"
-              disabled={!canUndo}
-              onClick={() => {
-                onUndo();
-                notify('Undid last action');
-              }}
-              title="Undo"
-              aria-label="Undo"
-              className="px-2 py-1 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high border-r border-outline-variant disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
+              disabled={selectedEntities.length === 0 && !allSelected}
+              onClick={handleRotateSelection}
+              title="Rotate Selected 90°"
+              aria-label="Rotate Selected"
+              className="px-1.5 py-1 text-on-surface-variant hover:text-primary hover:bg-surface-container-high border-r border-outline-variant disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
             >
-              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">undo</span>
+              <span className="material-symbols-outlined text-[15px]" aria-hidden="true">rotate_right</span>
             </button>
             <button
               type="button"
-              disabled={!canRedo}
-              onClick={() => {
-                onRedo();
-                notify('Redid action');
-              }}
-              title="Redo"
-              aria-label="Redo"
-              className="px-2 py-1 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
+              disabled={selectedEntities.length === 0 && !allSelected}
+              onClick={handleDeleteSelection}
+              title="Delete Selected (Delete / Backspace)"
+              aria-label="Delete Selected"
+              className="px-1.5 py-1 text-on-surface-variant hover:text-error hover:bg-error/10 disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
             >
-              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">redo</span>
+              <span className="material-symbols-outlined text-[15px]" aria-hidden="true">delete</span>
             </button>
           </div>
 
@@ -1446,9 +1895,10 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
               </button>
               <button
                 type="button"
+                title="Enter 3D Walk Mode (Press E or e)"
                 onClick={() => {
                   setCameraMode('fps');
-                  notify(`First-Person walkthrough on ${formatFloorLabel(activeFloor)} — use WASD keys & drag to look`);
+                  notify(`First-Person walkthrough (1:3 Scale) on ${formatFloorLabel(activeFloor)} — use W/A/S/D or Arrows & drag to look`);
                 }}
                 className={`px-2 py-0.5 rounded-sm font-label text-label-sm cursor-pointer ${
                   cameraMode === 'fps' ? 'bg-surface-container-high text-primary' : 'text-on-surface-variant'
@@ -1478,16 +1928,6 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           >
             <span className="material-symbols-outlined text-[15px]" aria-hidden="true">menu_book</span>
             <span>Guide</span>
-          </button>
-
-          {/* Project Summary */}
-          <button
-            type="button"
-            onClick={() => onNavigate('summary')}
-            className="inline-flex items-center gap-1 px-gutter-md py-1 rounded-sm bg-secondary text-on-secondary font-label text-label-sm hover:bg-on-secondary-container cursor-pointer whitespace-nowrap"
-          >
-            <span className="material-symbols-outlined text-[15px]" aria-hidden="true">summarize</span>
-            <span>Project Summary</span>
           </button>
         </div>
       </div>
@@ -1788,20 +2228,6 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 </div>
               </details>
             </div>
-
-            {/* Active Tool & Live Status Pill */}
-            <div
-              className={`inline-flex items-center gap-gutter-xs px-gutter-sm py-1 rounded-sm border font-mono text-mono-sm truncate max-w-full ${
-                statusMessage.tone === 'warning'
-                  ? 'bg-secondary-container/75 border-secondary text-on-secondary-container'
-                  : 'bg-surface-container border-outline-variant text-primary'
-              }`}
-            >
-              {statusMessage.tone === 'warning' && (
-                <span className="material-symbols-outlined text-secondary text-[15px] shrink-0">warning</span>
-              )}
-              <span className="truncate">{statusMessage.text}</span>
-            </div>
           </div>
 
           {/* Multi-Floor Level Switcher Strip (1st Floor, 2nd Floor, 3rd Floor + Elevated) */}
@@ -1898,15 +2324,179 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           {/* Primary Canvas Frame */}
           <div
             className="relative flex-1 min-h-[420px] rounded-lg border border-outline bg-surface-container-low overflow-hidden"
-            onPointerDown={() => {
+            onPointerDown={(e) => {
               if (openDrawer) setOpenDrawer(null);
+              if (e.button === 0 && canvasContextMenu) setCanvasContextMenu(null);
+            }}
+            onContextMenu={(e) => {
+              if (viewMode === '2d') {
+                e.preventDefault();
+                setOpenDrawer(null);
+                setCanvasContextMenu({ x: e.clientX, y: e.clientY });
+              }
             }}
           >
+            {/* Simulink-Style Find Component Floating Search Panel (Ctrl+F) */}
+            {findOpen && (
+              <FindComponentPanel
+                query={findQuery}
+                category={findCategory}
+                results={findResults}
+                activeIndex={findActiveIndex}
+                onQueryChange={setFindQuery}
+                onCategoryChange={setFindCategory}
+                onSelectResult={handleSelectFindResult}
+                onNext={() => handleStepFindResult(1)}
+                onPrev={() => handleStepFindResult(-1)}
+                onClose={() => setFindOpen(false)}
+              />
+            )}
+
+            {/* Extensible Right-Click Canvas Context Menu (2D & 3D) */}
+            {canvasContextMenu && (
+              <CanvasContextMenu
+                x={canvasContextMenu.x}
+                y={canvasContextMenu.y}
+                headerLabel={
+                  viewMode === '3d'
+                    ? `3D Preview · ${formatFloorLabel(activeFloor)}`
+                    : `2D Canvas · ${formatFloorLabel(activeFloor)}`
+                }
+                onClose={() => setCanvasContextMenu(null)}
+                items={(
+                  [
+                    {
+                      id: 'find',
+                      label: 'Find Component',
+                      icon: 'search',
+                      shortcut: 'Ctrl+F',
+                      onSelect: () => {
+                        setOpenDrawer(null);
+                        setFindOpen(true);
+                      },
+                    },
+                    ...(viewMode === '3d'
+                      ? [
+                          {
+                            id: 'toggle-walk',
+                            label: cameraMode === 'fps' ? 'Exit 3D Walk' : 'Enter 3D Walk',
+                            icon: cameraMode === 'fps' ? '3d_rotation' : 'directions_walk',
+                            shortcut: 'E',
+                            onSelect: () => {
+                              setCameraMode((prev) => (prev === 'fps' ? 'orbit' : 'fps'));
+                            },
+                          },
+                          {
+                            id: 'switch-2d',
+                            label: 'Switch to 2D View',
+                            icon: 'grid_on',
+                            onSelect: () => setViewMode('2d'),
+                          },
+                        ]
+                      : [
+                          {
+                            id: 'fit-screen',
+                            label: 'Fit to Screen',
+                            icon: 'fit_screen',
+                            onSelect: handleFitToScreen,
+                          },
+                          {
+                            id: 'switch-3d',
+                            label: 'Switch to 3D Preview',
+                            icon: 'view_in_ar',
+                            onSelect: () => setViewMode('3d'),
+                          },
+                        ]),
+                    {
+                      id: 'copy',
+                      label: 'Copy Selected',
+                      icon: 'content_copy',
+                      shortcut: 'Ctrl+C',
+                      disabled: selectedEntities.length === 0 && !allSelected,
+                      dividerBefore: true,
+                      onSelect: handleCopySelection,
+                    },
+                    {
+                      id: 'paste',
+                      label: 'Paste',
+                      icon: 'content_paste',
+                      shortcut: 'Ctrl+V',
+                      disabled: !clipboard,
+                      onSelect: handlePasteClipboard,
+                    },
+                    {
+                      id: 'duplicate',
+                      label: 'Duplicate Selected',
+                      icon: 'control_point_duplicate',
+                      shortcut: 'Ctrl+D',
+                      disabled: selectedEntities.length === 0 && !allSelected,
+                      onSelect: handleDuplicateSelection,
+                    },
+                    {
+                      id: 'rotate',
+                      label: 'Rotate 90°',
+                      icon: 'rotate_right',
+                      disabled: selectedEntities.length === 0 && !allSelected,
+                      onSelect: handleRotateSelection,
+                    },
+                    {
+                      id: 'select-all',
+                      label: 'Select All on Floor',
+                      icon: 'select_all',
+                      shortcut: 'Ctrl+A',
+                      onSelect: handleSelectAll,
+                    },
+                    {
+                      id: 'undo',
+                      label: 'Undo',
+                      icon: 'undo',
+                      shortcut: 'Ctrl+Z',
+                      disabled: !canUndo,
+                      dividerBefore: true,
+                      onSelect: onUndo,
+                    },
+                    {
+                      id: 'redo',
+                      label: 'Redo',
+                      icon: 'redo',
+                      shortcut: 'Ctrl+Y',
+                      disabled: !canRedo,
+                      onSelect: onRedo,
+                    },
+                    {
+                      id: 'save',
+                      label: 'Save Project',
+                      icon: 'save',
+                      shortcut: 'Ctrl+S',
+                      onSelect: () => {
+                        onSaveProject();
+                        notify(`Saved "${project.name}" to workspace`);
+                      },
+                    },
+                    {
+                      id: 'delete',
+                      label: 'Delete Selected',
+                      icon: 'delete',
+                      shortcut: 'Del',
+                      danger: true,
+                      disabled: selectedEntities.length === 0 && !allSelected,
+                      dividerBefore: true,
+                      onSelect: handleDeleteSelection,
+                    },
+                  ] satisfies CanvasContextMenuItem[]
+                )}
+              />
+            )}
+
             {viewMode === '2d' ? (
               <FloorPlan2D
                 project={project}
                 activeFloor={activeFloor}
                 selectedEntity={selectedEntity}
+                selectedEntities={selectedEntities}
+                highlightedIds={highlightedIds}
+                activeHighlightId={activeHighlightId}
+                focusTarget={focusTarget}
                 allSelected={allSelected}
                 activeTool={activeTool}
                 pendingPlaceItem={pendingPlaceItem}
@@ -1916,8 +2506,8 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 panOffset={panOffset}
                 onPanChange={setPanOffset}
                 onZoomChange={setZoom}
-                onSelectEntity={(ent) => {
-                  setSelectedEntity(ent);
+                onSelectEntity={(ent, additive) => {
+                  setSelectedEntity(ent, additive);
                   if (ent) setAllSelected(false);
                   setInspectorWarning(null);
                 }}
@@ -1932,11 +2522,14 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 onRotateEntity={handleRotateEntity}
                 onMovePoint={handleMovePoint}
                 onMoveOpening={handleMoveOpening}
+                onMoveFurniture={handleMoveFurniture}
                 onDuplicatePoint={handleDuplicatePoint}
                 onDuplicateRoom={handleDuplicateRoomFree}
                 onDuplicateOpening={handleDuplicateOpening}
+                onDuplicateFurniture={handleDuplicateFurniture}
                 onDuplicateWall={handleDuplicateWall}
                 onPlacePointAt={handlePlacePointAt}
+                onRecordHistorySnapshot={onRecordSnapshot}
                 onValidationWarning={(msg) => notify(msg, 'warning')}
               />
             ) : (
@@ -1945,16 +2538,33 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 activeFloor={activeFloor}
                 floorViewMode={floorView3D}
                 selectedPointId={selectedPoint?.id ?? null}
+                selectedEntities={selectedEntities}
+                highlightedIds={highlightedIds}
+                activeHighlightId={activeHighlightId}
+                focusTarget={focusTarget}
                 cameraMode={cameraMode}
                 lightingMode={lightingMode}
                 zoom={zoom}
                 pendingPlaceItem={pendingPlaceItem}
-                onSelectPoint={(pid) => setSelectedEntity({ kind: 'point', id: pid })}
+                onSelectEntity={(ent, additive) => {
+                  setSelectedEntity(ent, additive);
+                  if (ent) setAllSelected(false);
+                  setInspectorWarning(null);
+                }}
+                onSelectPoint={(pid, additive) => {
+                  setSelectedEntity({ kind: 'point', id: pid }, additive);
+                  setAllSelected(false);
+                }}
                 onPlacePointAt={handlePlacePointAt}
                 onDuplicatePoint={handleDuplicatePoint}
                 onMovePoint={handleMovePoint}
                 onDuplicateFurniture={handleDuplicateFurniture}
                 onMoveFurniture={handleMoveFurniture}
+                onRecordHistorySnapshot={onRecordSnapshot}
+                onCanvasContextMenu={(pos) => {
+                  setOpenDrawer(null);
+                  setCanvasContextMenu(pos);
+                }}
               />
             )}
           </div>
@@ -1969,15 +2579,19 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             <span className="px-2 py-0.5 rounded-full bg-primary-container text-primary font-mono text-[11px] uppercase">
               {allSelected
                 ? 'ALL SELECTED'
-                : selectedRoom
-                  ? 'ROOM'
-                  : selectedWall
-                    ? 'WALL'
-                    : selectedOpening
-                      ? selectedOpening.kind
-                      : selectedPoint
-                        ? 'ELECTRICAL'
-                        : 'SITE'}
+                : selectedEntities.length > 1
+                  ? `${selectedEntities.length} SELECTED`
+                  : selectedRoom
+                    ? 'ROOM'
+                    : selectedWall
+                      ? 'WALL'
+                      : selectedOpening
+                        ? selectedOpening.kind
+                        : selectedPoint
+                          ? 'ELECTRICAL'
+                          : selectedFurniture
+                            ? 'FURNITURE'
+                            : 'SITE'}
             </span>
           </div>
 
@@ -1999,19 +2613,42 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   All Floor Plan Elements Selected
                 </span>
                 <span className="font-body text-body-sm text-on-surface-variant">
-                  Drag inside the 2D canvas to move all items together, or use Pan to move the entire model freely in the viewport.
+                  Drag inside the 2D canvas to move all items together, or use Copy (Ctrl+C), Duplicate (Ctrl+D), or Delete.
                 </span>
                 <div className="grid grid-cols-2 gap-1 pt-1 font-mono text-mono-sm text-on-surface">
-                  <span>Rooms: {project.rooms.length}</span>
-                  <span>Walls: {project.customWalls.length}</span>
-                  <span>Openings: {project.openings.length}</span>
-                  <span>Points: {project.points.length}</span>
+                  <span>Rooms: {floorProject.rooms.length}</span>
+                  <span>Walls: {floorProject.customWalls.length}</span>
+                  <span>Openings: {floorProject.openings.length}</span>
+                  <span>Points: {floorProject.points.length}</span>
+                  <span>Furniture: {floorProject.furniture.length}</span>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-gutter-xs">
+                <button
+                  type="button"
+                  onClick={handleCopySelection}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">content_copy</span>
+                  <span>Copy</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDuplicateSelection}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">control_point_duplicate</span>
+                  <span>Duplicate</span>
+                </button>
               </div>
 
               <button
                 type="button"
-                onClick={() => setAllSelected(false)}
+                onClick={() => {
+                  setAllSelected(false);
+                  setSelectedEntities([]);
+                }}
                 className="w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[15px]">deselect</span>
@@ -2029,6 +2666,72 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </div>
           )}
 
+          {/* 0B. MULTI-SELECTION INSPECTOR (Shift+Click / Paste Multi) */}
+          {!allSelected && selectedEntities.length > 1 && (
+            <div className="flex flex-col gap-gutter-sm">
+              <div className="p-gutter-sm rounded-md bg-primary-container/25 border border-primary flex flex-col gap-1.5">
+                <span className="font-label text-label-md text-primary">
+                  {selectedEntities.length} Components Selected
+                </span>
+                <span className="font-body text-body-sm text-on-surface-variant">
+                  Use Shift+Click to add or remove items. Perform batch Copy, Duplicate, Rotate, or Delete.
+                </span>
+                <div className="grid grid-cols-2 gap-1 pt-1 font-mono text-mono-sm text-on-surface">
+                  <span>Points: {selectedEntities.filter((s) => s.kind === 'point').length}</span>
+                  <span>Rooms: {selectedEntities.filter((s) => s.kind === 'room').length}</span>
+                  <span>Furniture: {selectedEntities.filter((s) => s.kind === 'furniture').length}</span>
+                  <span>Openings: {selectedEntities.filter((s) => s.kind === 'opening').length}</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-gutter-xs">
+                <button
+                  type="button"
+                  onClick={handleCopySelection}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">content_copy</span>
+                  <span>Copy</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDuplicateSelection}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">control_point_duplicate</span>
+                  <span>Duplicate</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleRotateSelection}
+                className="w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[15px]">rotate_right</span>
+                <span>Rotate Selected 90°</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedEntities([])}
+                className="w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[15px]">deselect</span>
+                <span>Clear Selection (Esc)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleDeleteSelection}
+                className="w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-low border border-error text-error hover:bg-error/15 font-label text-label-sm cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[15px]">delete</span>
+                <span>Delete {selectedEntities.length} Selected</span>
+              </button>
+            </div>
+          )}
+
           {/* 1. ROOM INSPECTOR (PHASE 5) */}
           {selectedRoom && (
             <div className="flex flex-col gap-gutter-sm">
@@ -2037,7 +2740,11 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 <input
                   type="text"
                   value={selectedRoom.name}
-                  onChange={(e) => handleUpdateRoom(selectedRoom.id, { name: e.target.value }, false)}
+                  onBlur={resetInspectorSnapshotGuard}
+                  onChange={(e) => {
+                    ensureInspectorSnapshot(`room-name-${selectedRoom.id}`);
+                    handleUpdateRoom(selectedRoom.id, { name: e.target.value }, false);
+                  }}
                   className="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-1.5 font-body text-body-md text-on-surface focus:border-primary focus:outline-none"
                 />
               </label>
@@ -2394,15 +3101,24 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </div>
           )}
 
-          {/* 4. ELECTRICAL POINT INSPECTOR (Preserved) */}
+          {/* 4. ELECTRICAL POINT INSPECTOR (History-Safe & Simulink Actions) */}
           {selectedPoint && (
             <div className="flex flex-col gap-gutter-sm">
+              <div className="px-gutter-sm py-1 rounded-sm bg-surface-container-low border border-outline-variant flex items-center justify-between font-mono text-[11px]">
+                <span className="text-on-surface-variant">ID / Code</span>
+                <span className="text-primary">{selectedPoint.code}</span>
+              </div>
+
               <label className="flex flex-col gap-1">
                 <span className="font-label text-label-sm text-on-surface-variant">Component Name</span>
                 <input
                   type="text"
                   value={selectedPoint.name}
-                  onChange={(e) => handleUpdateSelectedPoint({ name: e.target.value })}
+                  onBlur={resetInspectorSnapshotGuard}
+                  onChange={(e) => {
+                    ensureInspectorSnapshot(`pt-name-${selectedPoint.id}`);
+                    handleUpdateSelectedPoint({ name: e.target.value }, false);
+                  }}
                   className="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-1.5 font-body text-body-sm text-on-surface focus:border-primary focus:outline-none"
                 />
               </label>
@@ -2431,7 +3147,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     type="number"
                     step="0.1"
                     value={selectedPoint.x}
-                    onChange={(e) => handleUpdateSelectedPoint({ x: Number(e.target.value) || 0 })}
+                    onChange={(e) =>
+                      handleUpdateSelectedPoint({ x: Number(e.target.value) || 0 }, true)
+                    }
                     className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-mono-sm text-on-surface tabular-nums"
                   />
                 </label>
@@ -2441,7 +3159,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     type="number"
                     step="0.1"
                     value={selectedPoint.y}
-                    onChange={(e) => handleUpdateSelectedPoint({ y: Number(e.target.value) || 0 })}
+                    onChange={(e) =>
+                      handleUpdateSelectedPoint({ y: Number(e.target.value) || 0 }, true)
+                    }
                     className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-mono-sm text-on-surface tabular-nums"
                   />
                 </label>
@@ -2451,7 +3171,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     type="number"
                     step="0.05"
                     value={selectedPoint.z}
-                    onChange={(e) => handleUpdateSelectedPoint({ z: Number(e.target.value) || 0.4 })}
+                    onChange={(e) =>
+                      handleUpdateSelectedPoint({ z: Number(e.target.value) || 0.4 }, true)
+                    }
                     className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-mono-sm text-on-surface tabular-nums"
                   />
                 </label>
@@ -2488,6 +3210,25 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 </label>
               </div>
 
+              <div className="grid grid-cols-2 gap-gutter-xs">
+                <button
+                  type="button"
+                  onClick={() => handleRotateEntity({ kind: 'point', id: selectedPoint.id })}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">rotate_right</span>
+                  <span>Rotate ({selectedPoint.rotation}°)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDuplicateSelection}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">control_point_duplicate</span>
+                  <span>Duplicate</span>
+                </button>
+              </div>
+
               <button
                 type="button"
                 onClick={() => handleEraseEntity({ kind: 'point', id: selectedPoint.id })}
@@ -2499,8 +3240,114 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </div>
           )}
 
+          {/* 4B. FURNITURE INSPECTOR */}
+          {selectedFurniture && (
+            <div className="flex flex-col gap-gutter-sm">
+              <div className="px-gutter-sm py-1.5 rounded-sm bg-surface-container-low border border-outline-variant flex items-center justify-between">
+                <span className="font-label text-label-sm text-on-surface-variant">Furniture</span>
+                <span className="font-mono text-mono-sm text-primary">
+                  {FURNITURE_MAP[selectedFurniture.kind]?.label ?? selectedFurniture.kind}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-gutter-xs">
+                <label className="flex flex-col gap-1">
+                  <span className="font-label text-[11px] text-on-surface-variant">Width (m)</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min={0.3}
+                    value={selectedFurniture.width}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (!Number.isFinite(v) || v < 0.3) return;
+                      handleUpdateSelectedFurniture({ width: Number(v.toFixed(2)) }, true);
+                    }}
+                    className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-mono-sm text-on-surface tabular-nums"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="font-label text-[11px] text-on-surface-variant">Depth (m)</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min={0.3}
+                    value={selectedFurniture.depth}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (!Number.isFinite(v) || v < 0.3) return;
+                      handleUpdateSelectedFurniture({ depth: Number(v.toFixed(2)) }, true);
+                    }}
+                    className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-mono-sm text-on-surface tabular-nums"
+                  />
+                </label>
+              </div>
+
+              <div className="grid grid-cols-2 gap-gutter-xs">
+                <label className="flex flex-col gap-1">
+                  <span className="font-label text-[11px] text-on-surface-variant">X (m)</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={selectedFurniture.x}
+                    onChange={(e) =>
+                      handleUpdateSelectedFurniture({ x: Number(e.target.value) || 0 }, true)
+                    }
+                    className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-mono-sm text-on-surface tabular-nums"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="font-label text-[11px] text-on-surface-variant">Y (m)</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={selectedFurniture.y}
+                    onChange={(e) =>
+                      handleUpdateSelectedFurniture({ y: Number(e.target.value) || 0 }, true)
+                    }
+                    className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-mono-sm text-on-surface tabular-nums"
+                  />
+                </label>
+              </div>
+
+              <div className="grid grid-cols-2 gap-gutter-xs">
+                <button
+                  type="button"
+                  onClick={() => handleRotateEntity({ kind: 'furniture', id: selectedFurniture.id })}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">rotate_right</span>
+                  <span>Rotate ({selectedFurniture.rotation}°)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDuplicateSelection}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">control_point_duplicate</span>
+                  <span>Duplicate</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handleEraseEntity({ kind: 'furniture', id: selectedFurniture.id })}
+                className="w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-low border border-error text-error hover:bg-error/15 font-label text-label-sm cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[15px]">delete</span>
+                <span>Delete Furniture</span>
+              </button>
+            </div>
+          )}
+
           {/* 5. DEFAULT SITE OVERVIEW WHEN NOTHING IS SELECTED */}
-          {!allSelected && !selectedRoom && !selectedWall && !selectedOpening && !selectedPoint && (
+          {!allSelected &&
+            selectedEntities.length === 0 &&
+            !selectedRoom &&
+            !selectedWall &&
+            !selectedOpening &&
+            !selectedPoint &&
+            !selectedFurniture && (
             <div className="flex flex-col gap-gutter-md">
               <div className="p-gutter-sm rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-2">
                 <div className="flex items-center justify-between">

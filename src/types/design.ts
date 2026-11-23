@@ -208,7 +208,18 @@ export type SelectedEntity =
   | { kind: 'wall'; id: string }
   | { kind: 'opening'; id: string }
   | { kind: 'point'; id: string }
+  | { kind: 'furniture'; id: string }
   | null;
+
+export type StudioEntityRef = NonNullable<SelectedEntity>;
+
+export interface StudioFocusTarget {
+  x: number;
+  y: number;
+  z?: number;
+  floor: number;
+  nonce: number;
+}
 
 export interface ElectricalCatalogItem {
   itemType: ElectricalItemType;

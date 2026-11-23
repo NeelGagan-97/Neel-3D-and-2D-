@@ -346,6 +346,12 @@ function buildElectricalFixture(
   return group;
 }
 
+export interface SceneVisualOverlays {
+  selectedIds?: Set<string>;
+  highlightedIds?: Set<string>;
+  activeHighlightId?: string | null;
+}
+
 export function buildArchitecturalScene(
   project: ProjectData,
   textures: ArchitecturalTextureSet,
@@ -354,12 +360,16 @@ export function buildArchitecturalScene(
   cutawayWalls: boolean,
   isSoftwareGl: boolean,
   activeFloor = 1,
-  floorViewMode: FloorView3DMode = 'all'
+  floorViewMode: FloorView3DMode = 'all',
+  visualOverlays?: SceneVisualOverlays
 ): BuiltSceneHandles {
   const root = new THREE.Group();
   const clickables: THREE.Object3D[] = [];
   const fanRotors: THREE.Object3D[] = [];
   const pointAnchors = new Map<string, THREE.Vector3>();
+  const selectedIds = visualOverlays?.selectedIds;
+  const highlightedIds = visualOverlays?.highlightedIds;
+  const activeHighlightId = visualOverlays?.activeHighlightId ?? null;
 
   const { lengthM, widthM, ceilingM, wallThickM } = siteToMeters(project.site);
   const halfL = lengthM / 2;
@@ -611,6 +621,27 @@ export function buildArchitecturalScene(
       const fg = buildFurnitureGroup(f);
       fg.position.set(toWorldX(f.x), 0.03, toWorldZ(f.y));
       fg.rotation.y = -(f.rotation * Math.PI) / 180;
+
+      const isSelectedFurn = !!selectedIds?.has(f.id);
+      const isActiveFindFurn = activeHighlightId === f.id;
+      const isFindMatchFurn = !!highlightedIds?.has(f.id);
+      if (isSelectedFurn || isActiveFindFurn || isFindMatchFurn) {
+        const ringColor = isActiveFindFurn ? 0xff9d00 : isSelectedFurn ? 0x00a8ff : 0xfbbf24;
+        const radius = Math.max(f.width, f.depth) * 0.62 + 0.14;
+        const ring = new THREE.Mesh(
+          new THREE.RingGeometry(radius - 0.07, radius, 32),
+          new THREE.MeshBasicMaterial({
+            color: ringColor,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: isActiveFindFurn ? 0.95 : 0.78,
+          })
+        );
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.y = 0.04;
+        fg.add(ring);
+      }
+
       fg.traverse((child) => {
         child.userData.furnitureId = f.id;
       });
@@ -620,8 +651,16 @@ export function buildArchitecturalScene(
 
     // 6. Composite 3D Electrical Fixtures on this floor
     floorSlice.points.forEach((pt) => {
-      const isSelected = pt.id === selectedPointId;
-      const fx = buildElectricalFixture(pt, isSelected, lightingMode, isSoftwareGl, fanRotors);
+      const isSelected = pt.id === selectedPointId || !!selectedIds?.has(pt.id);
+      const isActiveFind = activeHighlightId === pt.id;
+      const isFindMatch = !!highlightedIds?.has(pt.id);
+      const fx = buildElectricalFixture(
+        pt,
+        isSelected || isActiveFind,
+        lightingMode,
+        isSoftwareGl,
+        fanRotors
+      );
       const visualY =
         cutawayWalls && !hasFloorAbove
           ? Math.min(pt.z, wallH - 0.06)
@@ -631,6 +670,24 @@ export function buildArchitecturalScene(
       const localY = Math.max(0.35, visualY);
       fx.position.set(wx, localY, wz);
       fx.rotation.y = -(pt.rotation * Math.PI) / 180;
+
+      if (isSelected || isActiveFind || isFindMatch) {
+        const haloColor = isActiveFind ? 0xff9d00 : isSelected ? 0x00a8ff : 0xfbbf24;
+        const halo = new THREE.Mesh(
+          new THREE.RingGeometry(0.34, 0.44, 28),
+          new THREE.MeshBasicMaterial({
+            color: haloColor,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: isActiveFind ? 0.96 : 0.82,
+          })
+        );
+        halo.rotation.x = -Math.PI / 2;
+        halo.position.y = 0.02;
+        halo.userData.pointId = pt.id;
+        fx.add(halo);
+      }
+
       floorGroup.add(fx);
       clickables.push(fx);
       // Store anchor in world space (including baseY floor elevation) for projected 3D pins

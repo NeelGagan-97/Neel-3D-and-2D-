@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 interface DrawingInstructionsModalProps {
   onClose: () => void;
@@ -12,6 +12,16 @@ export const DrawingInstructionsModal: React.FC<DrawingInstructionsModalProps> =
   onStartDesigning,
 }) => {
   const [activeTab, setActiveTab] = useState<GuideTab>('workflow');
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
 
   return (
     <div
@@ -38,7 +48,7 @@ export const DrawingInstructionsModal: React.FC<DrawingInstructionsModalProps> =
                 How to Work on Drawings &amp; Multi-Floor Models
               </h2>
               <p className="font-mono text-mono-sm text-on-surface-variant">
-                STEP-BY-STEP CAD WORKFLOW · 2D FLOOR PLANS · ELEVATED 3D FLOORS
+                2D CAD DRAFTING · 3D ELEVATED FLOORS · FIND, UNDO/REDO &amp; COMPONENT SHORTCUTS
               </p>
             </div>
           </div>
@@ -59,7 +69,7 @@ export const DrawingInstructionsModal: React.FC<DrawingInstructionsModalProps> =
               { id: 'workflow', label: '1. Quick Start', icon: 'rocket_launch' },
               { id: 'tools', label: '2. Drawing Tools', icon: 'design_services' },
               { id: 'multifloor', label: '3. Multi-Floor & 3D', icon: 'layers' },
-              { id: 'shortcuts', label: '4. Dismantle & Keys', icon: 'keyboard' },
+              { id: 'shortcuts', label: '4. Editing & Shortcuts', icon: 'keyboard' },
             ] as const
           ).map((tab) => {
             const isActive = activeTab === tab.id;
@@ -88,31 +98,31 @@ export const DrawingInstructionsModal: React.FC<DrawingInstructionsModalProps> =
           {activeTab === 'workflow' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-gutter-md">
               <div className="p-gutter-md rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-1.5">
-                <span className="font-mono text-mono-sm text-primary">STEP 01 · CREATE PROJECT</span>
+                <span className="font-mono text-mono-sm text-primary">STEP 01 · CREATE SITE &amp; PROJECT</span>
                 <h3 className="font-headline text-title-sm text-on-surface">Set Name, Units &amp; Plot</h3>
                 <p className="font-body text-body-sm text-on-surface-variant">
-                  Click <strong>CREATE YOUR OWN SPACE</strong>, choose Feet or Metres, then enter Site Length, Site Width, Wall Thickness, Ceiling Height, and Number of Floors (1–5).
+                  Click <strong>CREATE YOUR OWN SPACE</strong>, select Feet or Metres, then configure Site Length, Site Width, Wall Thickness, Ceiling Height, and Number of Floors (1–5).
                 </p>
               </div>
               <div className="p-gutter-md rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-1.5">
-                <span className="font-mono text-mono-sm text-primary">STEP 02 · ADD ROOMS &amp; WALLS</span>
-                <h3 className="font-headline text-title-sm text-on-surface">Draft Your 2D Floor Plan</h3>
+                <span className="font-mono text-mono-sm text-primary">STEP 02 · DRAFT ROOMS &amp; WALLS</span>
+                <h3 className="font-headline text-title-sm text-on-surface">Build Your 2D Floor Plan</h3>
                 <p className="font-body text-body-sm text-on-surface-variant">
-                  Click anywhere inside the blank site boundary — or open <strong>B. Room Library</strong> beside Drawing Tools — to place rooms with exact Length × Width dimensions.
+                  Click inside the site boundary — or open <strong>B. Room Library</strong> beside <strong>A. Drawing Tools</strong> — to place typed rooms with exact dimensions, partition walls, doors, and windows.
                 </p>
               </div>
               <div className="p-gutter-md rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-1.5">
-                <span className="font-mono text-mono-sm text-secondary">STEP 03 · DOORS, WINDOWS &amp; ELECTRICAL</span>
-                <h3 className="font-headline text-title-sm text-on-surface">Detail Openings &amp; Circuits</h3>
+                <span className="font-mono text-mono-sm text-secondary">STEP 03 · ELECTRICAL, FURNITURE &amp; FIND</span>
+                <h3 className="font-headline text-title-sm text-on-surface">Place, Search &amp; Edit Precision Layouts</h3>
                 <p className="font-body text-body-sm text-on-surface-variant">
-                  Use <strong>Add Door</strong> and <strong>Add Window</strong> to snap openings onto any wall. Open <strong>D. Electrical Library</strong> to place fans, lights, sockets, ACs, and geysers.
+                  Open <strong>D. Electrical Library</strong> to place fans, lights, switches, sockets, ACs, and geysers. Press <strong>Ctrl + F</strong> anytime to search, highlight, and jump to placed items or library components, and use <strong>Ctrl + Z / Ctrl + Y</strong> for multi-step Undo &amp; Redo.
                 </p>
               </div>
               <div className="p-gutter-md rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-1.5">
-                <span className="font-mono text-mono-sm text-secondary">STEP 04 · INSPECT 3D &amp; EXPORT</span>
-                <h3 className="font-headline text-title-sm text-on-surface">3D Preview &amp; Project Summary</h3>
+                <span className="font-mono text-mono-sm text-secondary">STEP 04 · 3D PREVIEW, SAVE &amp; BOQ</span>
+                <h3 className="font-headline text-title-sm text-on-surface">Inspect in 3D &amp; Export Deliverables</h3>
                 <p className="font-body text-body-sm text-on-surface-variant">
-                  Toggle <strong>3D Preview</strong> to inspect elevated floors in Orbit or First-Person Walk mode. Export your drawing as <strong>JSON, PDF, or PNG</strong>, or open <strong>Project Summary</strong> for BOQ &amp; load calculations.
+                  Switch to <strong>3D Preview</strong> to inspect elevated floors in Orbit or Walk mode — selection, drag-moving, copy/paste, and Undo/Redo work identically in 2D and 3D. Save with <strong>Ctrl + S</strong>, export <strong>JSON / PDF / PNG</strong>, or open <strong>Project Summary</strong> from the top navigation bar for BOQ &amp; load totals.
                 </p>
               </div>
             </div>
@@ -121,14 +131,51 @@ export const DrawingInstructionsModal: React.FC<DrawingInstructionsModalProps> =
           {activeTab === 'tools' && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-gutter-sm">
               {[
-                { icon: 'arrow_selector_tool', name: 'Select', desc: 'Click any room, wall, opening, or point to edit its exact dimensions in the right Properties Inspector. Drag rooms to reposition or resize via corner handles.' },
-                { icon: 'horizontal_rule', name: 'Draw Wall', desc: 'Click and drag on the 2D canvas to draw custom internal or external walls. Auto-snaps horizontally/vertically; hold Shift for angled walls.' },
-                { icon: 'add_box', name: 'Add Room', desc: 'Click any open spot inside the site boundary to launch the room dimension dialog and place a typed room zone.' },
-                { icon: 'door_front', name: 'Add Door / Window', desc: 'Hover near any perimeter or partition wall until the snap preview appears, then click to embed a parametric door or window.' },
-                { icon: 'straighten', name: 'Dimension', desc: 'Click and drag between any two points to place a live architectural measurement line.' },
-                { icon: 'open_with', name: 'Move & Rotate', desc: 'Drag sections freely anywhere on the canvas with Move, or click rooms/doors/windows with Rotate to turn 90°.' },
-                { icon: 'pan_tool', name: 'Pan', desc: 'Drag anywhere on the 2D canvas (even over rooms or walls) to pan the model freely inside the viewport.' },
-                { icon: 'ink_eraser', name: 'Erase', desc: 'Click any room, custom wall, door, window, dimension line, or electrical fixture to remove it (Undo restores anytime).' },
+                {
+                  icon: 'arrow_selector_tool',
+                  name: 'Select & Multi-Select',
+                  desc: 'Click any room, wall, door, window, furniture item, or electrical fixture to inspect and edit its exact properties. Hold Shift + Click to multi-select or press Ctrl + A to select the entire active floor.',
+                },
+                {
+                  icon: 'search',
+                  name: 'Find Component (Ctrl + F)',
+                  desc: 'Search placed canvas components and library catalogs by name, category, type, code, or ID. Filter by category, cycle matches with Enter / arrows, highlight on canvas, and jump straight to the component.',
+                },
+                {
+                  icon: 'horizontal_rule',
+                  name: 'Draw Wall',
+                  desc: 'Click and drag on the 2D canvas to draw custom internal or external walls. Auto-snaps horizontally and vertically; hold Shift for angled walls.',
+                },
+                {
+                  icon: 'add_box',
+                  name: 'Add Room',
+                  desc: 'Click any open area inside the site boundary to launch the room dimension dialog and place a typed room zone with finish styling.',
+                },
+                {
+                  icon: 'door_front',
+                  name: 'Add Door / Window',
+                  desc: 'Hover near any perimeter or partition wall until the snap preview appears, then click to embed a parametric door or window.',
+                },
+                {
+                  icon: 'straighten',
+                  name: 'Dimension',
+                  desc: 'Click and drag between any two points to place a live architectural measurement annotation.',
+                },
+                {
+                  icon: 'open_with',
+                  name: 'Move, Rotate & Duplicate',
+                  desc: 'Drag rooms, furniture, openings, or electrical points smoothly in 2D or 3D. Use the Rotate button to turn 90°, Ctrl + C / Ctrl + V to copy & paste, or Ctrl + D to duplicate with unique IDs.',
+                },
+                {
+                  icon: 'pan_tool',
+                  name: 'Pan & Zoom',
+                  desc: 'Drag with the Pan tool or middle mouse button to move the floor plan, scroll the mouse wheel to zoom, or click Fit in the toolbar to re-center.',
+                },
+                {
+                  icon: 'ink_eraser',
+                  name: 'Erase & Delete',
+                  desc: 'Click any item with the Erase tool — or select one or more components and press Delete / Backspace (or the toolbar trash icon). Press Ctrl + Z anytime to restore.',
+                },
               ].map((item) => (
                 <div
                   key={item.name}
@@ -154,7 +201,7 @@ export const DrawingInstructionsModal: React.FC<DrawingInstructionsModalProps> =
                   <span>Setting Number of Floors (1 to 5 Stories)</span>
                 </div>
                 <p className="font-body text-body-sm text-on-surface-variant">
-                  Choose the number of floors during Site Configuration, or adjust <strong>Floors</strong> anytime inside <strong>C. Site Parameters</strong> (or click <strong>+</strong> on the Floor Switcher bar).
+                  Choose the number of floors during Site Configuration, adjust <strong>Floors</strong> anytime inside <strong>C. Site Parameters</strong>, or click <strong>+ Floor</strong> on the Floor Switcher bar.
                 </p>
               </div>
 
@@ -162,19 +209,19 @@ export const DrawingInstructionsModal: React.FC<DrawingInstructionsModalProps> =
                 <div className="p-gutter-md rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-1">
                   <span className="font-mono text-mono-sm text-primary">SWITCHING FLOORS</span>
                   <p className="font-body text-body-sm text-on-surface-variant">
-                    Use the <strong>1st Floor / 2nd Floor / 3rd Floor</strong> level tabs above the canvas to switch your active drawing floor while working.
+                    Use the <strong>1st Floor / 2nd Floor / 3rd Floor</strong> level tabs above the canvas to switch your active floor. Selecting a search result in <strong>Find (Ctrl + F)</strong> also switches floors automatically.
                   </p>
                 </div>
                 <div className="p-gutter-md rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-1">
                   <span className="font-mono text-mono-sm text-primary">ALIGN &amp; COPY BELOW</span>
                   <p className="font-body text-body-sm text-on-surface-variant">
-                    Upper floors display a faint dashed ghost underlay of the floor below so walls align cleanly. Click <strong>Copy Floor Below</strong> to duplicate the layout as a starting point.
+                    Upper floors show a faint dashed underlay of the floor below so walls align cleanly. Click <strong>Copy Floor Below</strong> to duplicate the layout as a starting point.
                   </p>
                 </div>
                 <div className="p-gutter-md rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-1">
                   <span className="font-mono text-mono-sm text-secondary">ELEVATED 3D MODEL</span>
                   <p className="font-body text-body-sm text-on-surface-variant">
-                    In <strong>3D Preview</strong>, floors stack vertically with structural slabs and corner columns. Switch between <strong>All Floors</strong>, <strong>Up to Active</strong>, or <strong>Active Only</strong> cutaway views.
+                    In <strong>3D Preview</strong>, floors stack vertically with slabs and columns. Switch between <strong>Orbit</strong> and <strong>Walk</strong> cameras, toggle Daylight/Evening lighting, and click or drag components directly in 3D.
                   </p>
                 </div>
               </div>
@@ -185,22 +232,33 @@ export const DrawingInstructionsModal: React.FC<DrawingInstructionsModalProps> =
             <div className="flex flex-col gap-gutter-md">
               <div className="p-gutter-md rounded-md bg-surface-container-low border border-outline-variant flex flex-col gap-1.5">
                 <h3 className="font-headline text-title-sm text-on-surface">
-                  Dismantling &amp; Free Section Placement
+                  Dismantling, Multi-Select &amp; 2D/3D Editing Controls
                 </h3>
                 <p className="font-body text-body-sm text-on-surface-variant">
-                  Grab and drag any room section directly out of the floor plan to place it freely anywhere on the 2D canvas — its attached furniture and electrical points move with it and all 4 walls stay intact. You can also click <strong>Dismantle Section to Canvas</strong> in the right Properties Inspector.
+                  Drag any room section directly out of the floor plan to reposition it freely — its attached furniture and electrical points move with it and all 4 walls stay intact. All shortcuts below work across both <strong>2D View</strong> and <strong>3D Preview</strong> and pause safely while typing inside input fields.
                 </p>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-gutter-xs font-mono text-mono-sm">
                 {[
-                  { key: 'Ctrl + A / Cmd + A', action: 'Select all elements on the current floor SVG' },
-                  { key: 'Esc', action: 'Clear selection / close open dropdowns' },
-                  { key: 'Delete / Backspace', action: 'Clear selected elements when Ctrl+A is active' },
-                  { key: 'Mouse Wheel', action: 'Zoom in / out smoothly on the 2D canvas' },
-                  { key: 'Middle Mouse / Pan Tool', action: 'Move the entire floor plan freely in the viewport' },
+                  { key: 'Ctrl + F', action: 'Open Find Component search & highlight matches' },
+                  { key: 'Ctrl + Z', action: 'Undo last edit (up to 100 steps)' },
+                  { key: 'Ctrl + Y / Ctrl + Shift + Z', action: 'Redo previously undone edit' },
+                  { key: 'Ctrl + C', action: 'Copy selected component(s) with properties' },
+                  { key: 'Ctrl + V', action: 'Paste copied component(s) with unique IDs' },
+                  { key: 'Ctrl + D', action: 'Duplicate selected component(s) immediately' },
+                  { key: 'Delete / Backspace', action: 'Delete selected component(s)' },
+                  { key: 'Ctrl + A', action: 'Select all elements on the active floor' },
+                  { key: 'Shift + Click', action: 'Add or remove components in multi-selection' },
+                  { key: 'Ctrl + S', action: 'Save project to workspace' },
+                  { key: 'Escape', action: 'Close Find / drawers, cancel tool, or deselect' },
+                  { key: 'Ctrl + Left Click', action: 'Quick-duplicate an item directly on canvas' },
+                  { key: 'Mouse Wheel', action: 'Zoom in / out smoothly in 2D & 3D' },
+                  { key: 'Middle Mouse / Pan Tool', action: 'Pan the floor plan freely in the viewport' },
+                  { key: 'Right-Click Canvas', action: 'Open quick canvas options menu (2D & 3D)' },
+                  { key: 'E / e (3D Preview)', action: 'Enter or exit enlarged 1:3 3D Walk mode' },
+                  { key: 'W A S D / Arrows (3D Walk)', action: 'Navigate inside 3D Walk mode (upper or lowercase)' },
                   { key: 'Shift + Draw Wall', action: 'Draw custom angled walls freely' },
-                  { key: 'W A S D / Arrows (3D Walk)', action: 'Walk through the currently selected elevated floor' },
                 ].map((sc) => (
                   <div
                     key={sc.key}
@@ -218,7 +276,7 @@ export const DrawingInstructionsModal: React.FC<DrawingInstructionsModalProps> =
         {/* Footer */}
         <div className="px-gutter-xl py-gutter-md border-t border-outline-variant bg-surface-container-low flex items-center justify-between gap-gutter-sm">
           <span className="font-mono text-mono-sm text-on-surface-variant">
-            Tip: Open this guide anytime from Home or the Design Studio toolbar.
+            Tip: Open this guide anytime from Home or the Guide button in Design Studio.
           </span>
           <div className="flex items-center gap-gutter-sm">
             {onStartDesigning && (

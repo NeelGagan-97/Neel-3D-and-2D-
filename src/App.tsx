@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import { AccountStatusPage, ProfileLoadErrorPage } from './components/auth/AccountStatusPage';
 import { AdminDashboardPage } from './components/auth/AdminDashboardPage';
 import { AdminRouteGuard } from './components/auth/AdminRouteGuard';
@@ -21,6 +21,141 @@ import { AppRoute } from './types/auth';
 import { ProjectData, ScreenId, SiteConfig, ViewMode } from './types/design';
 import { evaluateRouteAccess, isApprovedUser } from './utils/authValidation';
 import { parseRouteFromLocation, syncBrowserPath } from './utils/router';
+import { cloneProject, MAX_HISTORY_ENTRIES } from './utils/studioEditor';
+
+interface WorkspaceState {
+  projects: ProjectData[];
+  activeProjectId: string;
+  undoStack: ProjectData[];
+  redoStack: ProjectData[];
+}
+
+type WorkspaceAction =
+  | { type: 'SWITCH_PROJECT'; projectId: string }
+  | { type: 'UPDATE_PROJECT'; updater: (prev: ProjectData) => ProjectData; recordHistory: boolean }
+  | { type: 'RECORD_SNAPSHOT' }
+  | { type: 'UNDO' }
+  | { type: 'REDO' }
+  | { type: 'CREATE_PROJECT'; project: ProjectData }
+  | { type: 'COMPLETE_SITE_CONFIG'; site: SiteConfig }
+  | { type: 'SAVE_AS_PROJECT'; project: ProjectData }
+  | { type: 'IMPORT_PROJECT'; project: ProjectData }
+  | { type: 'DELETE_PROJECT'; projectId: string };
+
+function createInitialWorkspaceState(): WorkspaceState {
+  const loaded = projectStorage.loadAll();
+  const list = loaded.length > 0 ? loaded : INITIAL_PROJECTS;
+  return {
+    projects: list,
+    activeProjectId: list[0]?.id ?? INITIAL_PROJECTS[0].id,
+    undoStack: [],
+    redoStack: [],
+  };
+}
+
+function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
+  switch (action.type) {
+    case 'SWITCH_PROJECT': {
+      if (action.projectId === state.activeProjectId) return state;
+      return {
+        ...state,
+        activeProjectId: action.projectId,
+        undoStack: [],
+        redoStack: [],
+      };
+    }
+    case 'RECORD_SNAPSHOT': {
+      const current = state.projects.find((p) => p.id === state.activeProjectId);
+      if (!current) return state;
+      return {
+        ...state,
+        undoStack: [...state.undoStack.slice(-(MAX_HISTORY_ENTRIES - 1)), cloneProject(current)],
+        redoStack: [],
+      };
+    }
+    case 'UPDATE_PROJECT': {
+      const current = state.projects.find((p) => p.id === state.activeProjectId);
+      if (!current) return state;
+      const nextRaw = action.updater(current);
+      if (nextRaw === current) return state;
+      const updated: ProjectData = {
+        ...nextRaw,
+        updatedAt: new Date().toISOString(),
+      };
+      return {
+        ...state,
+        projects: state.projects.map((p) => (p.id === state.activeProjectId ? updated : p)),
+        undoStack: action.recordHistory
+          ? [...state.undoStack.slice(-(MAX_HISTORY_ENTRIES - 1)), cloneProject(current)]
+          : state.undoStack,
+        redoStack: action.recordHistory ? [] : state.redoStack,
+      };
+    }
+    case 'UNDO': {
+      if (state.undoStack.length === 0) return state;
+      const current = state.projects.find((p) => p.id === state.activeProjectId);
+      const previous = cloneProject(state.undoStack[state.undoStack.length - 1]);
+      return {
+        ...state,
+        projects: state.projects.map((p) => (p.id === state.activeProjectId ? previous : p)),
+        undoStack: state.undoStack.slice(0, -1),
+        redoStack: current
+          ? [...state.redoStack.slice(-(MAX_HISTORY_ENTRIES - 1)), cloneProject(current)]
+          : state.redoStack,
+      };
+    }
+    case 'REDO': {
+      if (state.redoStack.length === 0) return state;
+      const current = state.projects.find((p) => p.id === state.activeProjectId);
+      const next = cloneProject(state.redoStack[state.redoStack.length - 1]);
+      return {
+        ...state,
+        projects: state.projects.map((p) => (p.id === state.activeProjectId ? next : p)),
+        undoStack: current
+          ? [...state.undoStack.slice(-(MAX_HISTORY_ENTRIES - 1)), cloneProject(current)]
+          : state.undoStack,
+        redoStack: state.redoStack.slice(0, -1),
+      };
+    }
+    case 'CREATE_PROJECT':
+    case 'SAVE_AS_PROJECT':
+    case 'IMPORT_PROJECT': {
+      return {
+        projects: [action.project, ...state.projects],
+        activeProjectId: action.project.id,
+        undoStack: [],
+        redoStack: [],
+      };
+    }
+    case 'COMPLETE_SITE_CONFIG': {
+      return {
+        ...state,
+        projects: state.projects.map((p) =>
+          p.id === state.activeProjectId
+            ? {
+                ...p,
+                site: action.site,
+                siteConfigured: true,
+                updatedAt: new Date().toISOString(),
+              }
+            : p
+        ),
+      };
+    }
+    case 'DELETE_PROJECT': {
+      const next = state.projects.filter((p) => p.id !== action.projectId);
+      const deletingActive = action.projectId === state.activeProjectId;
+      return {
+        projects: next,
+        activeProjectId: deletingActive ? next[0]?.id ?? '' : state.activeProjectId,
+        undoStack: deletingActive ? [] : state.undoStack,
+        redoStack: deletingActive ? [] : state.redoStack,
+      };
+    }
+    default:
+      return state;
+  }
+}
 
 export default function App() {
   const {
@@ -37,10 +172,12 @@ export default function App() {
     emailVerified,
   } = useAuth();
 
-  const [projects, setProjects] = useState<ProjectData[]>(() => projectStorage.loadAll());
-  const [activeProjectId, setActiveProjectId] = useState<string>(
-    () => projectStorage.loadAll()[0]?.id ?? INITIAL_PROJECTS[0].id
+  const [workspace, dispatchWorkspace] = useReducer(
+    workspaceReducer,
+    undefined,
+    createInitialWorkspaceState
   );
+  const { projects, activeProjectId, undoStack, redoStack } = workspace;
   const [route, setRoute] = useState<AppRoute>(() =>
     typeof window !== 'undefined'
       ? parseRouteFromLocation(
@@ -53,10 +190,6 @@ export default function App() {
   const [intendedRoute, setIntendedRoute] = useState<AppRoute | null>(null);
   const [routeNotice, setRouteNotice] = useState<string | null>(null);
   const [studioInitialView, setStudioInitialView] = useState<ViewMode>('3d');
-
-  // Undo / Redo stacks for the active project
-  const [undoStack, setUndoStack] = useState<ProjectData[]>([]);
-  const [redoStack, setRedoStack] = useState<ProjectData[]>([]);
 
   const activeProject = useMemo(
     () => projects.find((p) => p.id === activeProjectId) ?? projects[0] ?? INITIAL_PROJECTS[0],
@@ -170,67 +303,35 @@ export default function App() {
 
   const handleOpenProject = useCallback(
     (projectId: string, target: ScreenId, initialView?: ViewMode) => {
-      if (projectId !== activeProjectId) {
-        setActiveProjectId(projectId);
-        setUndoStack([]);
-        setRedoStack([]);
-      }
+      dispatchWorkspace({ type: 'SWITCH_PROJECT', projectId });
       if (initialView) setStudioInitialView(initialView);
       navigateRoute(target);
     },
-    [activeProjectId, navigateRoute]
+    [navigateRoute]
   );
 
   const handleSwitchProject = useCallback((projectId: string) => {
-    setActiveProjectId(projectId);
-    setUndoStack([]);
-    setRedoStack([]);
+    dispatchWorkspace({ type: 'SWITCH_PROJECT', projectId });
   }, []);
 
   const handleUpdateProject = useCallback(
     (updater: (prev: ProjectData) => ProjectData, recordHistory = true) => {
-      setProjects((prevList) => {
-        const current = prevList.find((p) => p.id === activeProjectId);
-        if (!current) return prevList;
-        if (recordHistory) {
-          setUndoStack((u) => [...u.slice(-24), current]);
-          setRedoStack([]);
-        }
-        const updated = {
-          ...updater(current),
-          updatedAt: new Date().toISOString(),
-        };
-        return prevList.map((p) => (p.id === activeProjectId ? updated : p));
-      });
+      dispatchWorkspace({ type: 'UPDATE_PROJECT', updater, recordHistory });
     },
-    [activeProjectId]
+    []
   );
 
+  const handleRecordSnapshot = useCallback(() => {
+    dispatchWorkspace({ type: 'RECORD_SNAPSHOT' });
+  }, []);
+
   const handleUndo = useCallback(() => {
-    setUndoStack((prevUndo) => {
-      if (prevUndo.length === 0) return prevUndo;
-      const previous = prevUndo[prevUndo.length - 1];
-      setProjects((prevList) => {
-        const current = prevList.find((p) => p.id === activeProjectId);
-        if (current) setRedoStack((r) => [...r, current]);
-        return prevList.map((p) => (p.id === activeProjectId ? previous : p));
-      });
-      return prevUndo.slice(0, -1);
-    });
-  }, [activeProjectId]);
+    dispatchWorkspace({ type: 'UNDO' });
+  }, []);
 
   const handleRedo = useCallback(() => {
-    setRedoStack((prevRedo) => {
-      if (prevRedo.length === 0) return prevRedo;
-      const next = prevRedo[prevRedo.length - 1];
-      setProjects((prevList) => {
-        const current = prevList.find((p) => p.id === activeProjectId);
-        if (current) setUndoStack((u) => [...u, current]);
-        return prevList.map((p) => (p.id === activeProjectId ? next : p));
-      });
-      return prevRedo.slice(0, -1);
-    });
-  }, [activeProjectId]);
+    dispatchWorkspace({ type: 'REDO' });
+  }, []);
 
   const handleSaveProject = useCallback(() => {
     projectStorage.saveAll(projects);
@@ -287,34 +388,17 @@ export default function App() {
         updatedAt: new Date().toISOString(),
       };
 
-      setProjects((prev) => [newProject, ...prev]);
-      setActiveProjectId(id);
-      setUndoStack([]);
-      setRedoStack([]);
+      dispatchWorkspace({ type: 'CREATE_PROJECT', project: newProject });
       setStudioInitialView('2d');
       navigateRoute('studio');
     },
     [projects.length, isAuthenticated, user?.id, profile, navigateRoute]
   );
 
-  const handleCompleteSiteConfig = useCallback(
-    (site: SiteConfig) => {
-      setProjects((prev) =>
-        prev.map((p) =>
-          p.id === activeProjectId
-            ? {
-                ...p,
-                site,
-                siteConfigured: true,
-                updatedAt: new Date().toISOString(),
-              }
-            : p
-        )
-      );
-      setStudioInitialView('2d');
-    },
-    [activeProjectId]
-  );
+  const handleCompleteSiteConfig = useCallback((site: SiteConfig) => {
+    dispatchWorkspace({ type: 'COMPLETE_SITE_CONFIG', site });
+    setStudioInitialView('2d');
+  }, []);
 
   const handleSaveAsProject = useCallback(
     (newName: string) => {
@@ -322,17 +406,14 @@ export default function App() {
       if (!source) return;
       const id = `proj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const cloned: ProjectData = {
-        ...JSON.parse(JSON.stringify(source)),
+        ...cloneProject(source),
         id,
         refCode: `N3D-2026-${String(projects.length + 1).padStart(3, '0')}`,
         name: newName,
         status: 'Saved',
         updatedAt: new Date().toISOString(),
       };
-      setProjects((prev) => [cloned, ...prev]);
-      setActiveProjectId(id);
-      setUndoStack([]);
-      setRedoStack([]);
+      dispatchWorkspace({ type: 'SAVE_AS_PROJECT', project: cloned });
     },
     [projects, activeProjectId]
   );
@@ -368,10 +449,7 @@ export default function App() {
           ? { ...imported, id: `proj-imp-${Date.now()}` }
           : imported;
 
-        setProjects((prev) => [ready, ...prev]);
-        setActiveProjectId(ready.id);
-        setUndoStack([]);
-        setRedoStack([]);
+        dispatchWorkspace({ type: 'IMPORT_PROJECT', project: ready });
         setStudioInitialView('2d');
         navigateRoute('studio');
         return { ok: true };
@@ -385,20 +463,9 @@ export default function App() {
     [projects, isAuthenticated, user?.id, profile, navigateRoute]
   );
 
-  const handleDeleteProject = useCallback(
-    (projectId: string) => {
-      setProjects((prev) => {
-        const next = prev.filter((p) => p.id !== projectId);
-        if (projectId === activeProjectId) {
-          setActiveProjectId(next[0]?.id ?? '');
-          setUndoStack([]);
-          setRedoStack([]);
-        }
-        return next;
-      });
-    },
-    [activeProjectId]
-  );
+  const handleDeleteProject = useCallback((projectId: string) => {
+    dispatchWorkspace({ type: 'DELETE_PROJECT', projectId });
+  }, []);
 
   const isPublicRoute =
     route === 'login' ||
@@ -535,6 +602,7 @@ export default function App() {
         onNavigate={(s) => handleNavigate(s)}
         onSwitchProject={handleSwitchProject}
         onUpdateProject={handleUpdateProject}
+        onRecordSnapshot={handleRecordSnapshot}
         onCompleteSiteConfig={handleCompleteSiteConfig}
         onSaveAsProject={handleSaveAsProject}
         onImportProject={handleImportProject}

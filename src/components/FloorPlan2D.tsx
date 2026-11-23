@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CATALOG_MAP, findRoomAtPoint, FT_TO_M, siteToMeters } from '../data/presets';
 import {
   ArchitecturalOpening,
@@ -6,9 +6,12 @@ import {
   CircuitId,
   ElectricalItemType,
   ElectricalPoint,
+  FurnitureItem,
   ProjectData,
   RoomZone,
   SelectedEntity,
+  StudioEntityRef,
+  StudioFocusTarget,
 } from '../types/design';
 import {
   extractMergedWalls,
@@ -22,12 +25,17 @@ import {
   snapCoordinateFree,
   validateRoomPlacement,
 } from '../utils/geometry';
+import { FURNITURE_MAP } from '../utils/studioEditor';
 
 interface FloorPlan2DProps {
   project: ProjectData;
   activeFloor?: number;
   selectedEntity?: SelectedEntity;
+  selectedEntities?: StudioEntityRef[];
   selectedPointId?: string | null;
+  highlightedIds?: Set<string>;
+  activeHighlightId?: string | null;
+  focusTarget?: StudioFocusTarget | null;
   allSelected?: boolean;
   activeTool?: CanvasTool;
   pendingPlaceItem?: ElectricalItemType | null;
@@ -38,8 +46,8 @@ interface FloorPlan2DProps {
   previewOnly?: boolean;
   onPanChange?: (offset: { x: number; y: number }) => void;
   onZoomChange?: (nextZoom: number) => void;
-  onSelectEntity?: (entity: SelectedEntity) => void;
-  onSelectPoint?: (pointId: string) => void;
+  onSelectEntity?: (entity: SelectedEntity, additive?: boolean) => void;
+  onSelectPoint?: (pointId: string, additive?: boolean) => void;
   onClearAllSelection?: () => void;
   onMoveAll?: (dxM: number, dyM: number) => void;
   onEmptySiteClick?: (xM: number, yM: number) => void;
@@ -55,11 +63,14 @@ interface FloorPlan2DProps {
   onRotateEntity?: (entity: NonNullable<SelectedEntity>) => void;
   onMovePoint?: (pointId: string, x: number, y: number, roomId: string) => void;
   onMoveOpening?: (openingId: string, x: number, y: number) => void;
+  onMoveFurniture?: (furnitureId: string, x: number, y: number, roomId: string) => void;
   onDuplicatePoint?: (pointId: string) => ElectricalPoint | null;
   onDuplicateRoom?: (roomId: string) => RoomZone | null;
   onDuplicateOpening?: (openingId: string) => ArchitecturalOpening | null;
+  onDuplicateFurniture?: (furnitureId: string) => FurnitureItem | null;
   onDuplicateWall?: (wallId: string) => void;
   onPlacePointAt?: (itemType: ElectricalItemType, x: number, y: number, roomId: string) => void;
+  onRecordHistorySnapshot?: () => void;
   onValidationWarning?: (message: string) => void;
 }
 
@@ -111,7 +122,11 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   project: fullProject,
   activeFloor = 1,
   selectedEntity = null,
+  selectedEntities = [],
   selectedPointId = null,
+  highlightedIds,
+  activeHighlightId = null,
+  focusTarget = null,
   allSelected = false,
   activeTool = 'select',
   pendingPlaceItem = null,
@@ -135,11 +150,14 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   onRotateEntity,
   onMovePoint,
   onMoveOpening,
+  onMoveFurniture,
   onDuplicatePoint,
   onDuplicateRoom,
   onDuplicateOpening,
+  onDuplicateFurniture,
   onDuplicateWall,
   onPlacePointAt,
+  onRecordHistorySnapshot,
   onValidationWarning,
 }) => {
   const project = useMemo(
@@ -157,12 +175,21 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     startX: number;
     startY: number;
     moved: boolean;
+    snapshotRecorded: boolean;
   } | null>(null);
   const [draggingOpening, setDraggingOpening] = useState<{
     id: string;
     startX: number;
     startY: number;
     moved: boolean;
+    snapshotRecorded: boolean;
+  } | null>(null);
+  const [draggingFurniture, setDraggingFurniture] = useState<{
+    id: string;
+    startX: number;
+    startY: number;
+    moved: boolean;
+    snapshotRecorded: boolean;
   } | null>(null);
   const [roomDrag, setRoomDrag] = useState<RoomDragState | null>(null);
   const [groupDrag, setGroupDrag] = useState<GroupDragState | null>(null);
@@ -195,20 +222,39 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   const vbW = planW + PAD * 2;
   const vbH = planH + PAD * 2;
 
+  // Auto-center viewport pan when Find Component navigates to a component in 2D
+  useEffect(() => {
+    if (previewOnly || !focusTarget || !onPanChange) return;
+    const zoomFactor = zoom / 100;
+    const targetSvgX = PAD + focusTarget.x * SCALE;
+    const targetSvgY = PAD + focusTarget.y * SCALE;
+    const cx = vbW / 2;
+    const cy = vbH / 2;
+    const nextPanX = Math.round((cx - targetSvgX) * zoomFactor);
+    const nextPanY = Math.round((cy - targetSvgY) * zoomFactor);
+    onPanChange({ x: nextPanX, y: nextPanY });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusTarget?.nonce]);
+
   // Architectural grid step in SVG units (1 ft or 0.5 m minor; 5 ft or 2 m major)
   const minorGridM = units === 'ft' ? FT_TO_M : 0.5;
   const majorGridM = units === 'ft' ? 5 * FT_TO_M : 2;
   const minorStepPx = minorGridM * SCALE;
   const majorStepPx = majorGridM * SCALE;
 
-  const activePointId =
-    selectedEntity?.kind === 'point' ? selectedEntity.id : selectedPointId;
+  const selectedEntitySet = useMemo(() => {
+    const map = new Set<string>();
+    if (selectedEntity) map.add(`${selectedEntity.kind}:${selectedEntity.id}`);
+    if (selectedPointId) map.add(`point:${selectedPointId}`);
+    selectedEntities.forEach((e) => map.add(`${e.kind}:${e.id}`));
+    return map;
+  }, [selectedEntity, selectedPointId, selectedEntities]);
+
+  const isEntitySelected = (kind: StudioEntityRef['kind'], id: string) =>
+    !previewOnly && (allSelected || selectedEntitySet.has(`${kind}:${id}`));
+
   const selectedRoomId =
     selectedEntity?.kind === 'room' ? selectedEntity.id : null;
-  const selectedWallId =
-    selectedEntity?.kind === 'wall' ? selectedEntity.id : null;
-  const selectedOpeningId =
-    selectedEntity?.kind === 'opening' ? selectedEntity.id : null;
 
   const clientToRawMeters = (clientX: number, clientY: number) => {
     const svg = svgRef.current;
@@ -427,12 +473,15 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       setHoverOpening(null);
     }
 
-    // Dragging an electrical point freely
+    // Dragging an electrical point freely (record single pre-drag snapshot for Ctrl+Z!)
     if (draggingPoint && onMovePoint) {
       const dist = Math.hypot(raw.x - draggingPoint.startX, raw.y - draggingPoint.startY);
       if (!draggingPoint.moved && dist < 0.06) return;
-      if (!draggingPoint.moved) {
-        setDraggingPoint((prev) => (prev ? { ...prev, moved: true } : null));
+      if (!draggingPoint.snapshotRecorded) {
+        onRecordHistorySnapshot?.();
+      }
+      if (!draggingPoint.moved || !draggingPoint.snapshotRecorded) {
+        setDraggingPoint((prev) => (prev ? { ...prev, moved: true, snapshotRecorded: true } : null));
       }
       const snapped = snapCoordinateFree(raw.x, raw.y, project, snapEnabled);
       const room = findRoomAtPoint(project.rooms, snapped.x, snapped.y) ?? project.rooms[0];
@@ -440,15 +489,34 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
-    // Dragging a door/window opening freely
+    // Dragging a door/window opening freely (record single pre-drag snapshot for Ctrl+Z!)
     if (draggingOpening && onMoveOpening) {
       const dist = Math.hypot(raw.x - draggingOpening.startX, raw.y - draggingOpening.startY);
       if (!draggingOpening.moved && dist < 0.06) return;
-      if (!draggingOpening.moved) {
-        setDraggingOpening((prev) => (prev ? { ...prev, moved: true } : null));
+      if (!draggingOpening.snapshotRecorded) {
+        onRecordHistorySnapshot?.();
+      }
+      if (!draggingOpening.moved || !draggingOpening.snapshotRecorded) {
+        setDraggingOpening((prev) => (prev ? { ...prev, moved: true, snapshotRecorded: true } : null));
       }
       const snapped = snapCoordinateFree(raw.x, raw.y, project, snapEnabled);
       onMoveOpening(draggingOpening.id, snapped.x, snapped.y);
+      return;
+    }
+
+    // Dragging a furniture item freely (record single pre-drag snapshot for Ctrl+Z!)
+    if (draggingFurniture && onMoveFurniture) {
+      const dist = Math.hypot(raw.x - draggingFurniture.startX, raw.y - draggingFurniture.startY);
+      if (!draggingFurniture.moved && dist < 0.06) return;
+      if (!draggingFurniture.snapshotRecorded) {
+        onRecordHistorySnapshot?.();
+      }
+      if (!draggingFurniture.moved || !draggingFurniture.snapshotRecorded) {
+        setDraggingFurniture((prev) => (prev ? { ...prev, moved: true, snapshotRecorded: true } : null));
+      }
+      const snapped = snapCoordinateFree(raw.x, raw.y, project, snapEnabled);
+      const room = findRoomAtPoint(project.rooms, snapped.x, snapped.y) ?? project.rooms[0];
+      onMoveFurniture(draggingFurniture.id, snapped.x, snapped.y, room?.id ?? '');
       return;
     }
 
@@ -605,6 +673,11 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
+    if (draggingFurniture) {
+      setDraggingFurniture(null);
+      return;
+    }
+
     if (roomDrag) {
       if (roomDrag.moved) {
         // Allow freely dismantling & placing room sections anywhere on the canvas
@@ -704,8 +777,14 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
+    if (e.shiftKey && mode === 'move') {
+      onClearAllSelection?.();
+      onSelectEntity?.({ kind: 'room', id: room.id }, true);
+      return;
+    }
+
     onClearAllSelection?.();
-    onSelectEntity?.({ kind: 'room', id: room.id });
+    onSelectEntity?.({ kind: 'room', id: room.id }, false);
 
     if (activeTool === 'select' || activeTool === 'move') {
       try {
@@ -949,8 +1028,11 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             const rw = dispW * SCALE;
             const rh = dispH * SCALE;
 
-            const isSingleSelected = !previewOnly && !allSelected && selectedRoomId === room.id;
-            const isSelected = !previewOnly && (selectedRoomId === room.id || allSelected);
+            const isSingleSelected =
+              !previewOnly && !allSelected && selectedEntities.length <= 1 && selectedRoomId === room.id;
+            const isSelected = isEntitySelected('room', room.id);
+            const isActiveFind = !previewOnly && activeHighlightId === room.id;
+            const isFindMatch = !previewOnly && !!highlightedIds?.has(room.id);
             const isInvalidDraft =
               (isBeingDragged && !roomDrag.valid) || (!!groupDrag && !groupDrag.valid);
             const dimText = `${formatLength(dispW, units, 1)} × ${formatLength(dispH, units, 1)}`;
@@ -983,19 +1065,25 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                   fill={
                     isInvalidDraft
                       ? 'rgba(255, 157, 0, 0.18)'
-                      : isSelected
-                        ? 'rgba(0, 168, 255, 0.16)'
-                        : ROOM_FILLS[room.floorFinish] ?? 'rgba(0,168,255,0.06)'
+                      : isActiveFind
+                        ? 'rgba(255, 157, 0, 0.22)'
+                        : isSelected
+                          ? 'rgba(0, 168, 255, 0.16)'
+                          : isFindMatch
+                            ? 'rgba(251, 191, 36, 0.12)'
+                            : ROOM_FILLS[room.floorFinish] ?? 'rgba(0,168,255,0.06)'
                   }
                   stroke={
-                    isInvalidDraft
+                    isInvalidDraft || isActiveFind
                       ? '#FF9D00'
                       : isSelected
                         ? '#00A8FF'
-                        : '#334C73'
+                        : isFindMatch
+                          ? '#FBBF24'
+                          : '#334C73'
                   }
-                  strokeWidth={isSelected || isInvalidDraft ? 2.5 : 1.5}
-                  strokeDasharray={isInvalidDraft ? '6,4' : undefined}
+                  strokeWidth={isActiveFind ? 3 : isSelected || isInvalidDraft || isFindMatch ? 2.5 : 1.5}
+                  strokeDasharray={isInvalidDraft || isFindMatch ? '6,4' : undefined}
                 />
 
                 {/* Room Name + Dimensions + Area */}
@@ -1077,24 +1165,126 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             );
           })}
 
-          {/* Subtle Furniture Outlines (for preloaded apartments) */}
+          {/* Interactive Furniture Items (selectable, draggable, rotatable, searchable) */}
           {project.furniture.map((f) => {
-            const fx = PAD + (f.x - f.width / 2) * SCALE;
-            const fy = PAD + (f.y - f.depth / 2) * SCALE;
+            const gdx = groupDrag ? groupDrag.dx : 0;
+            const gdy = groupDrag ? groupDrag.dy : 0;
+            const cx = PAD + (f.x + gdx) * SCALE;
+            const cy = PAD + (f.y + gdy) * SCALE;
+            const fw = f.width * SCALE;
+            const fd = f.depth * SCALE;
+            const isSelFurn = isEntitySelected('furniture', f.id);
+            const isActiveFindFurn = !previewOnly && activeHighlightId === f.id;
+            const isFindMatchFurn = !previewOnly && !!highlightedIds?.has(f.id);
+            const furnMeta = FURNITURE_MAP[f.kind];
+
             return (
-              <rect
+              <g
                 key={f.id}
-                x={fx}
-                y={fy}
-                width={f.width * SCALE}
-                height={f.depth * SCALE}
-                rx="3"
-                fill="rgba(197, 205, 216, 0.05)"
-                stroke="#2C3E5E"
-                strokeWidth="1"
-                strokeDasharray="2,2"
-                pointerEvents="none"
-              />
+                transform={`translate(${cx} ${cy}) rotate(${f.rotation || 0})`}
+                className={
+                  previewOnly || activeTool === 'pan'
+                    ? ''
+                    : activeTool === 'erase'
+                      ? 'cursor-not-allowed'
+                      : 'cursor-pointer'
+                }
+                onPointerDown={(e) => {
+                  if (
+                    previewOnly ||
+                    e.button === 1 ||
+                    activeTool === 'pan' ||
+                    activeTool === 'draw-wall' ||
+                    activeTool === 'dimension' ||
+                    pendingPlaceItem ||
+                    allSelected
+                  ) {
+                    return;
+                  }
+                  e.stopPropagation();
+                  if (activeTool === 'erase') {
+                    onEraseEntity?.({ kind: 'furniture', id: f.id });
+                    return;
+                  }
+                  if (activeTool === 'rotate') {
+                    onClearAllSelection?.();
+                    onSelectEntity?.({ kind: 'furniture', id: f.id }, false);
+                    onRotateEntity?.({ kind: 'furniture', id: f.id });
+                    return;
+                  }
+                  if ((e.ctrlKey || e.metaKey) && e.button === 0 && onDuplicateFurniture) {
+                    e.preventDefault();
+                    onClearAllSelection?.();
+                    const dup = onDuplicateFurniture(f.id);
+                    if (dup) {
+                      const raw = clientToRawMeters(e.clientX, e.clientY);
+                      setDraggingFurniture({
+                        id: dup.id,
+                        startX: raw.x,
+                        startY: raw.y,
+                        moved: false,
+                        snapshotRecorded: true,
+                      });
+                    }
+                    return;
+                  }
+                  onClearAllSelection?.();
+                  onSelectEntity?.({ kind: 'furniture', id: f.id }, e.shiftKey);
+                  if (!e.shiftKey && (activeTool === 'select' || activeTool === 'move')) {
+                    const raw = clientToRawMeters(e.clientX, e.clientY);
+                    setDraggingFurniture({
+                      id: f.id,
+                      startX: raw.x,
+                      startY: raw.y,
+                      moved: false,
+                      snapshotRecorded: false,
+                    });
+                  }
+                }}
+              >
+                <rect
+                  x={-fw / 2}
+                  y={-fd / 2}
+                  width={fw}
+                  height={fd}
+                  rx="3"
+                  fill={
+                    isActiveFindFurn
+                      ? 'rgba(255, 157, 0, 0.24)'
+                      : isSelFurn
+                        ? 'rgba(0, 168, 255, 0.18)'
+                        : isFindMatchFurn
+                          ? 'rgba(251, 191, 36, 0.14)'
+                          : 'rgba(197, 205, 216, 0.06)'
+                  }
+                  stroke={
+                    isActiveFindFurn
+                      ? '#FF9D00'
+                      : isSelFurn
+                        ? '#00A8FF'
+                        : isFindMatchFurn
+                          ? '#FBBF24'
+                          : '#334C73'
+                  }
+                  strokeWidth={isActiveFindFurn ? 2.5 : isSelFurn || isFindMatchFurn ? 2 : 1}
+                  strokeDasharray={isSelFurn || isActiveFindFurn ? undefined : '3,2'}
+                />
+                {!previewOnly && fw > 28 && fd > 18 && (
+                  <text
+                    x={0}
+                    y={0}
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fill={isActiveFindFurn ? '#FFE2B3' : isSelFurn ? '#E0F4FF' : '#94A3B8'}
+                    fontFamily="Red Hat Mono, monospace"
+                    fontSize="7.5"
+                    pointerEvents="none"
+                  >
+                    {f.kind.replace('-', ' ').toUpperCase()}
+                  </text>
+                )}
+                <title>{furnMeta?.label ?? f.kind}</title>
+              </g>
             );
           })}
 
@@ -1109,8 +1299,10 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             const y2 = PAD + (seg.y2 + gdy) * SCALE;
             const isCustom = seg.source === 'custom' && !!seg.customWallId;
             const isSelectedWall =
-              (isCustom && (selectedWallId === seg.customWallId || allSelected)) ||
+              (isCustom && isEntitySelected('wall', seg.customWallId!)) ||
               (allSelected && !previewOnly && seg.source === 'room');
+            const isActiveFindWall = isCustom && !previewOnly && activeHighlightId === seg.customWallId;
+            const isFindMatchWall = isCustom && !previewOnly && !!highlightedIds?.has(seg.customWallId!);
             const strokeW = Math.max(
               previewOnly ? 2 : 3,
               Math.min(previewOnly ? 5.5 : 8.5, seg.thickness * SCALE)
@@ -1124,11 +1316,15 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                   x2={x2}
                   y2={y2}
                   stroke={
-                    isSelectedWall
-                      ? '#00A8FF'
-                      : seg.isExterior
-                        ? '#F5F7FA'
-                        : '#CBD5E1'
+                    isActiveFindWall
+                      ? '#FF9D00'
+                      : isSelectedWall
+                        ? '#00A8FF'
+                        : isFindMatchWall
+                          ? '#FBBF24'
+                          : seg.isExterior
+                            ? '#F5F7FA'
+                            : '#CBD5E1'
                   }
                   strokeWidth={strokeW}
                   strokeLinecap="square"
@@ -1171,15 +1367,15 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                         onDuplicateWall(seg.customWallId!);
                       } else {
                         onClearAllSelection?.();
-                        onSelectEntity?.({ kind: 'wall', id: seg.customWallId! });
+                        onSelectEntity?.({ kind: 'wall', id: seg.customWallId! }, e.shiftKey);
                       }
                     }}
                   />
                 )}
-                {isSelectedWall && (
+                {(isSelectedWall || isActiveFindWall) && (
                   <>
-                    <circle cx={x1} cy={y1} r="4.5" fill="#00A8FF" stroke="#080F20" strokeWidth="1.5" />
-                    <circle cx={x2} cy={y2} r="4.5" fill="#00A8FF" stroke="#080F20" strokeWidth="1.5" />
+                    <circle cx={x1} cy={y1} r="4.5" fill={isActiveFindWall ? '#FF9D00' : '#00A8FF'} stroke="#080F20" strokeWidth="1.5" />
+                    <circle cx={x2} cy={y2} r="4.5" fill={isActiveFindWall ? '#FF9D00' : '#00A8FF'} stroke="#080F20" strokeWidth="1.5" />
                   </>
                 )}
               </g>
@@ -1229,7 +1425,9 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             const ox = PAD + (op.x + (groupDrag ? groupDrag.dx : 0)) * SCALE;
             const oy = PAD + (op.y + (groupDrag ? groupDrag.dy : 0)) * SCALE;
             const ow = op.width * SCALE;
-            const isSelectedOp = !previewOnly && (selectedOpeningId === op.id || allSelected);
+            const isSelectedOp = isEntitySelected('opening', op.id);
+            const isActiveFindOp = !previewOnly && activeHighlightId === op.id;
+            const isFindMatchOp = !previewOnly && !!highlightedIds?.has(op.id);
 
             return (
               <g
@@ -1258,7 +1456,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                     onEraseEntity?.({ kind: 'opening', id: op.id });
                   } else if (activeTool === 'rotate') {
                     onClearAllSelection?.();
-                    onSelectEntity?.({ kind: 'opening', id: op.id });
+                    onSelectEntity?.({ kind: 'opening', id: op.id }, false);
                     onRotateEntity?.({ kind: 'opening', id: op.id });
                   } else if ((e.ctrlKey || e.metaKey) && e.button === 0 && onDuplicateOpening) {
                     e.preventDefault();
@@ -1266,14 +1464,26 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                     const dup = onDuplicateOpening(op.id);
                     if (dup) {
                       const raw = clientToRawMeters(e.clientX, e.clientY);
-                      setDraggingOpening({ id: dup.id, startX: raw.x, startY: raw.y, moved: false });
+                      setDraggingOpening({
+                        id: dup.id,
+                        startX: raw.x,
+                        startY: raw.y,
+                        moved: false,
+                        snapshotRecorded: true,
+                      });
                     }
                   } else {
                     onClearAllSelection?.();
-                    onSelectEntity?.({ kind: 'opening', id: op.id });
-                    if (activeTool === 'select' || activeTool === 'move') {
+                    onSelectEntity?.({ kind: 'opening', id: op.id }, e.shiftKey);
+                    if (!e.shiftKey && (activeTool === 'select' || activeTool === 'move')) {
                       const raw = clientToRawMeters(e.clientX, e.clientY);
-                      setDraggingOpening({ id: op.id, startX: raw.x, startY: raw.y, moved: false });
+                      setDraggingOpening({
+                        id: op.id,
+                        startX: raw.x,
+                        startY: raw.y,
+                        moved: false,
+                        snapshotRecorded: false,
+                      });
                     }
                   }
                 }}
@@ -1283,8 +1493,8 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                 {op.kind === 'window' ? (
                   <>
                     <line x1={-ow / 2} y1={0} x2={ow / 2} y2={0} stroke="#080F20" strokeWidth="7" />
-                    <line x1={-ow / 2} y1={-2.5} x2={ow / 2} y2={-2.5} stroke={isSelectedOp ? '#FF9D00' : '#00A8FF'} strokeWidth="2" />
-                    <line x1={-ow / 2} y1={2.5} x2={ow / 2} y2={2.5} stroke={isSelectedOp ? '#FF9D00' : '#00A8FF'} strokeWidth="2" />
+                    <line x1={-ow / 2} y1={-2.5} x2={ow / 2} y2={-2.5} stroke={isSelectedOp || isActiveFindOp ? '#FF9D00' : '#00A8FF'} strokeWidth="2" />
+                    <line x1={-ow / 2} y1={2.5} x2={ow / 2} y2={2.5} stroke={isSelectedOp || isActiveFindOp ? '#FF9D00' : '#00A8FF'} strokeWidth="2" />
                   </>
                 ) : (
                   <>
@@ -1300,15 +1510,15 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                     />
                   </>
                 )}
-                {isSelectedOp && (
+                {(isSelectedOp || isActiveFindOp || isFindMatchOp) && (
                   <rect
                     x={-ow / 2 - 4}
                     y={-8}
                     width={ow + 8}
                     height={16}
                     fill="none"
-                    stroke="#00A8FF"
-                    strokeWidth="1.2"
+                    stroke={isActiveFindOp ? '#FF9D00' : isSelectedOp ? '#00A8FF' : '#FBBF24'}
+                    strokeWidth={isActiveFindOp ? '2' : '1.3'}
                     strokeDasharray="3,2"
                   />
                 )}
@@ -1397,11 +1607,19 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
           {project.points.map((pt) => {
             const px = PAD + (pt.x + (groupDrag ? groupDrag.dx : 0)) * SCALE;
             const py = PAD + (pt.y + (groupDrag ? groupDrag.dy : 0)) * SCALE;
-            const isSelected = (pt.id === activePointId || allSelected) && !previewOnly;
+            const isSelected = isEntitySelected('point', pt.id);
+            const isActiveFind = !previewOnly && activeHighlightId === pt.id;
+            const isFindMatch = !previewOnly && !!highlightedIds?.has(pt.id);
             const isHighPower = pt.category === 'Appliances' || pt.itemType === 'socket_16a';
-            const fill = isSelected ? '#00A8FF' : isHighPower ? '#FF9D00' : '#0D1528';
-            const stroke = isSelected ? '#F5F7FA' : isHighPower ? '#FFE2B3' : '#00A8FF';
-            const radius = previewOnly ? 4 : isSelected ? 9 : 6.5;
+            const fill = isActiveFind
+              ? '#FF9D00'
+              : isSelected
+                ? '#00A8FF'
+                : isHighPower
+                  ? '#FF9D00'
+                  : '#0D1528';
+            const stroke = isActiveFind || isSelected ? '#F5F7FA' : isFindMatch ? '#FBBF24' : isHighPower ? '#FFE2B3' : '#00A8FF';
+            const radius = previewOnly ? 4 : isActiveFind ? 10 : isSelected ? 9 : isFindMatch ? 8 : 6.5;
 
             return (
               <g
@@ -1430,6 +1648,12 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                     onEraseEntity?.({ kind: 'point', id: pt.id });
                     return;
                   }
+                  if (activeTool === 'rotate') {
+                    onClearAllSelection?.();
+                    onSelectEntity?.({ kind: 'point', id: pt.id }, false);
+                    onRotateEntity?.({ kind: 'point', id: pt.id });
+                    return;
+                  }
                   // Ctrl + Left Click on any electrical point (fan, light, switch, socket, AC, etc.) -> Duplicate & position freely!
                   if ((e.ctrlKey || e.metaKey) && e.button === 0 && onDuplicatePoint) {
                     e.preventDefault();
@@ -1437,31 +1661,52 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                     const dup = onDuplicatePoint(pt.id);
                     if (dup) {
                       const raw = clientToRawMeters(e.clientX, e.clientY);
-                      setDraggingPoint({ id: dup.id, startX: raw.x, startY: raw.y, moved: false });
+                      setDraggingPoint({
+                        id: dup.id,
+                        startX: raw.x,
+                        startY: raw.y,
+                        moved: false,
+                        snapshotRecorded: true,
+                      });
                     }
                     return;
                   }
                   onClearAllSelection?.();
-                  onSelectEntity?.({ kind: 'point', id: pt.id });
-                  onSelectPoint?.(pt.id);
-                  if (activeTool === 'select' || activeTool === 'move') {
+                  onSelectEntity?.({ kind: 'point', id: pt.id }, e.shiftKey);
+                  onSelectPoint?.(pt.id, e.shiftKey);
+                  if (!e.shiftKey && (activeTool === 'select' || activeTool === 'move')) {
                     const raw = clientToRawMeters(e.clientX, e.clientY);
-                    setDraggingPoint({ id: pt.id, startX: raw.x, startY: raw.y, moved: false });
+                    setDraggingPoint({
+                      id: pt.id,
+                      startX: raw.x,
+                      startY: raw.y,
+                      moved: false,
+                      snapshotRecorded: false,
+                    });
                   }
                 }}
               >
-                {isSelected && (
-                  <circle r="14" fill="none" stroke="#00A8FF" strokeWidth="1.5" strokeDasharray="3,2" />
+                {isActiveFind && (
+                  <circle r="19" fill="rgba(255, 157, 0, 0.16)" stroke="#FF9D00" strokeWidth="2" />
                 )}
-                <circle r={radius} fill={fill} stroke={stroke} strokeWidth={isSelected ? 2 : 1.5} />
+                {(isSelected || isFindMatch) && (
+                  <circle
+                    r="14"
+                    fill="none"
+                    stroke={isActiveFind ? '#FF9D00' : isSelected ? '#00A8FF' : '#FBBF24'}
+                    strokeWidth="1.6"
+                    strokeDasharray="3,2"
+                  />
+                )}
+                <circle r={radius} fill={fill} stroke={stroke} strokeWidth={isSelected || isActiveFind ? 2 : 1.5} />
                 {!previewOnly && (
                   <text
-                    y={-11}
+                    y={-12}
                     textAnchor="middle"
-                    fill={isSelected ? '#FFFFFF' : isHighPower ? '#FFE2B3' : '#C5CDD8'}
+                    fill={isActiveFind ? '#FFE2B3' : isSelected ? '#FFFFFF' : isFindMatch ? '#FDE68A' : isHighPower ? '#FFE2B3' : '#C5CDD8'}
                     fontFamily="Red Hat Mono, monospace"
-                    fontSize={isSelected ? '9.5' : '8.5'}
-                    fontWeight={isSelected ? '700' : '500'}
+                    fontSize={isSelected || isActiveFind ? '9.5' : '8.5'}
+                    fontWeight={isSelected || isActiveFind ? '700' : '500'}
                     pointerEvents="none"
                   >
                     {pt.code}
