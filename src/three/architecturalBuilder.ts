@@ -177,7 +177,7 @@ function buildElectricalFixture(
   fanRotors: THREE.Object3D[]
 ): THREE.Group {
   const group = new THREE.Group();
-  const isEvening = lightingMode === 'evening';
+  const isEvening = lightingMode === 'evening' || lightingMode === 'sunset';
 
   const metalBody = new THREE.MeshStandardMaterial({
     color: 0xe2e8f0,

@@ -5,6 +5,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { CATALOG_MAP, findRoomAtPoint, siteToMeters } from '../data/presets';
 import { buildArchitecturalScene, BuiltSceneHandles, STORY_SLAB_THICKNESS } from '../three/architecturalBuilder';
 import { ArchitecturalTextureSet, createArchitecturalTextures } from '../three/proceduralTextures';
+import { createSkyAtmosphere } from '../three/skyAtmosphere';
 import {
   CameraMode,
   ElectricalItemType,
@@ -256,7 +257,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     const width = Math.max(container.clientWidth, 320);
     const height = Math.max(container.clientHeight, 220);
 
-    renderer.setSize(width, height);
+    renderer.setSize(width, height, false);
     renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -287,12 +288,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     scene.environment = envTex;
     pmrem.dispose();
 
-    // Camera (enlarged FOV & extended clip range for 1:3 interactive 3D Preview)
+    // Camera (enlarged FOV & extended clip range so sky dome, clouds, and birds never clip)
     const camera = new THREE.PerspectiveCamera(
       previewOnly ? 38 : 48,
       width / height,
       0.15,
-      160 * sceneScale
+      280 * sceneScale
     );
     camera.position.set(11.5 * sceneScale, 11.2 * sceneScale, 13.0 * sceneScale);
 
@@ -345,10 +346,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     rimLight.position.set(-14 * sceneScale, 10 * sceneScale, -12 * sceneScale);
     scene.add(rimLight);
 
-    // Warm interior ambiance light for Evening mode
+    // Warm interior ambiance light for Evening / Sunset / Sunrise mode
     const eveningFill = new THREE.PointLight(0xffb454, 0, 22 * sceneScale, 1.4);
     eveningFill.position.set(0, 3.2 * sceneScale, 0);
     scene.add(eveningFill);
+
+    // Procedural Sky Atmosphere (Sun, Sunrise, Sunset, Night + Drifting Clouds + Soaring Birds)
+    const skyAtmosphere = createSkyAtmosphere(sceneScale);
+    scene.add(skyAtmosphere.root);
 
     const textures = createArchitecturalTextures(renderer.capabilities.getMaxAnisotropy());
 
@@ -457,6 +462,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     };
 
     const clock = new THREE.Clock();
+    let elapsedTime = 0;
 
     const requestRender = () => {
       if (disposed) return;
@@ -524,7 +530,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           controls.update();
         }
 
-        // Gentle fan spin on GPU
+        // Advance drifting clouds, flapping birds, and gentle fan spin
+        elapsedTime += dt;
+        skyAtmosphere.update(dt, elapsedTime);
         if (!isSoftwareGl && engineRef.current?.built) {
           engineRef.current.built.fanRotors.forEach((r) => {
             r.rotation.y += dt * 1.4;
@@ -605,25 +613,26 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     };
 
     const applyLighting = (mode: LightingMode) => {
-      if (mode === 'evening') {
-        scene.background = new THREE.Color(0x050914);
-        scene.fog = new THREE.FogExp2(0x050914, 0.014 / sceneScale);
-        keyLight.intensity = 0.45;
-        keyLight.color.setHex(0x64748b);
-        hemiLight.intensity = 0.35;
-        rimLight.intensity = 0.55;
-        eveningFill.intensity = 2.6;
-        renderer.toneMappingExposure = 1.05;
-      } else {
-        scene.background = new THREE.Color(0x080f20);
-        scene.fog = new THREE.FogExp2(0x080f20, 0.01 / sceneScale);
-        keyLight.intensity = 1.85;
-        keyLight.color.setHex(0xfff4e0);
-        hemiLight.intensity = 0.95;
-        rimLight.intensity = 0.65;
-        eveningFill.intensity = 0;
-        renderer.toneMappingExposure = 1.15;
-      }
+      const preset = skyAtmosphere.applyMode(mode);
+      scene.background = new THREE.Color(preset.fogColor);
+      scene.fog = new THREE.FogExp2(preset.fogColor, preset.fogDensity / sceneScale);
+
+      // Align directional sunlight with the visible Sun / Sunrise / Sunset position in the sky
+      const [sx, sy, sz] = preset.sunDirection;
+      const sunDist = 30 * sceneScale;
+      keyLight.position.set(sx * sunDist, Math.max(8 * sceneScale, sy * sunDist), sz * sunDist);
+      keyLight.color.setHex(preset.keyLightColor);
+      keyLight.intensity = preset.keyLightIntensity;
+
+      hemiLight.color.setHex(preset.hemiSkyColor);
+      hemiLight.groundColor.setHex(preset.hemiGroundColor);
+      hemiLight.intensity = preset.hemiIntensity;
+
+      rimLight.color.setHex(preset.rimLightColor);
+      rimLight.intensity = preset.rimLightIntensity;
+
+      eveningFill.intensity = preset.eveningFillIntensity;
+      renderer.toneMappingExposure = preset.exposure;
     };
 
     const rebuildScene = () => {
@@ -999,18 +1008,26 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onWindowBlur);
 
-    // ResizeObserver for crisp container tracking
+    // ResizeObserver for crisp full-container tracking
+    const syncRendererSize = (rawW: number, rawH: number) => {
+      const w = Math.max(100, Math.floor(rawW));
+      const h = Math.max(100, Math.floor(rawH));
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+      requestRender();
+    };
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const w = Math.max(100, Math.floor(entry.contentRect.width));
-        const h = Math.max(100, Math.floor(entry.contentRect.height));
-        camera.aspect = w / h;
-        camera.updateProjectionMatrix();
-        renderer.setSize(w, h);
-        requestRender();
+        syncRendererSize(entry.contentRect.width, entry.contentRect.height);
       }
     });
     resizeObserver.observe(container);
+    const initialSizeRaf = requestAnimationFrame(() => {
+      if (!disposed && container.clientWidth > 0 && container.clientHeight > 0) {
+        syncRendererSize(container.clientWidth, container.clientHeight);
+      }
+    });
 
     engineRef.current = {
       scene,
@@ -1049,6 +1066,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     return () => {
       disposed = true;
       if (spinTimer) clearInterval(spinTimer);
+      cancelAnimationFrame(initialSizeRaf);
       cancelAnimationFrame(frameId);
       clearTimeout(frameId);
       resizeObserver.disconnect();
@@ -1063,6 +1081,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       window.removeEventListener('blur', onWindowBlur);
       controls.dispose();
       engineRef.current?.built?.dispose();
+      skyAtmosphere.dispose();
       textures.dispose();
       envTex.dispose();
       renderer.dispose();
@@ -1114,11 +1133,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   }
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-surface">
+    <div className="relative w-full h-full flex-1 min-h-0 overflow-hidden bg-surface">
       {/* Dedicated empty mount node for WebGL canvas */}
       <div
         ref={mountRef}
-        className={`w-full h-full ${pendingPlaceItem ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+        className={`absolute inset-0 w-full h-full ${pendingPlaceItem ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
       />
 
       {/* Interactive 3D-projected pin markers (solid dark slate/blue surfaces, zero backdrop-blur) */}

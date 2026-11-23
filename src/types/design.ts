@@ -3,7 +3,7 @@ export type UnitSystem = 'ft' | 'm';
 export type ProjectType = 'Residential' | 'Commercial' | 'Custom';
 export type ViewMode = '2d' | '3d';
 export type CameraMode = 'orbit' | 'fps';
-export type LightingMode = 'daylight' | 'evening';
+export type LightingMode = 'sunrise' | 'daylight' | 'sunset' | 'evening';
 export type FloorView3DMode = 'all' | 'up-to-active' | 'active-only';
 
 export type CanvasTool =

@@ -838,7 +838,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
 
   return (
     <div
-      className={`w-full h-full flex items-center justify-center bg-surface select-none overflow-hidden ${
+      className={`w-full h-full flex-1 min-h-0 flex items-center justify-center bg-surface select-none overflow-hidden ${
         previewOnly ? 'p-1.5' : 'p-gutter-sm'
       }`}
     >

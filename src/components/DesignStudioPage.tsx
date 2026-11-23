@@ -140,6 +140,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
   useEffect(() => {
     setCanvasContextMenu(null);
+    setOpenToolbarDropdown(null);
   }, [viewMode, activeFloor, project.id]);
 
   const totalFloors = Math.max(1, Math.min(5, Math.round(project.site.floors || 1)));
@@ -210,7 +211,8 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     selectedEntities.length === 1 ? selectedEntities[0] : null;
 
   const [showExportMenu, setShowExportMenu] = useState(false);
-  const [openDrawer, setOpenDrawer] = useState<'tools' | 'rooms' | 'site' | 'electrical' | null>(null);
+  const [openToolbarDropdown, setOpenToolbarDropdown] = useState<'view' | 'camera' | 'sky' | null>(null);
+  const [openDrawer, setOpenDrawer] = useState<'tools' | 'rooms' | 'site' | 'electrical' | 'properties' | null>(null);
   const [showSaveAsModal, setShowSaveAsModal] = useState(false);
   const [saveAsName, setSaveAsName] = useState(`${project.name} (Copy)`);
   const [saveAsError, setSaveAsError] = useState<string | null>(null);
@@ -578,7 +580,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           break;
         case 'escape':
           e.preventDefault();
-          if (canvasContextMenu) {
+          if (openToolbarDropdown) {
+            setOpenToolbarDropdown(null);
+          } else if (canvasContextMenu) {
             setCanvasContextMenu(null);
           } else if (viewMode === '3d' && cameraMode === 'fps') {
             setCameraMode('orbit');
@@ -609,6 +613,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     cameraMode,
     activeFloor,
     canvasContextMenu,
+    openToolbarDropdown,
     pendingRoomModal,
     showSaveAsModal,
     showGuideModal,
@@ -1629,8 +1634,24 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     ? formatArea(selectedRoom.width * selectedRoom.height, units)
     : '—';
 
+  const inspectorBadgeLabel = allSelected
+    ? 'ALL SELECTED'
+    : selectedEntities.length > 1
+      ? `${selectedEntities.length} SELECTED`
+      : selectedRoom
+        ? 'ROOM'
+        : selectedWall
+          ? 'WALL'
+          : selectedOpening
+            ? selectedOpening.kind
+            : selectedPoint
+              ? 'ELECTRICAL'
+              : selectedFurniture
+                ? 'FURNITURE'
+                : 'SITE';
+
   return (
-    <div className="min-h-screen flex flex-col bg-surface text-on-surface">
+    <div className="min-h-screen lg:h-screen lg:overflow-hidden flex flex-col bg-surface text-on-surface">
       {/* Shared Top Navigation */}
       <Navbar
         activeScreen="studio"
@@ -1852,70 +1873,214 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </button>
           </div>
 
-          {/* 2D View / 3D Preview Switch */}
-          <div className="inline-flex items-center rounded-sm border border-outline bg-surface-container p-0.5">
-            <button
-              type="button"
-              onClick={() => setViewMode('2d')}
-              className={`px-gutter-sm py-0.5 rounded-sm font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap ${
-                viewMode === '2d'
-                  ? 'bg-primary text-on-primary'
-                  : 'text-on-surface-variant hover:text-on-surface'
-              }`}
-            >
-              2D View
-            </button>
+          {/* Separate Dropdown 1: View Mode (2D View / 3D Preview) */}
+          <div className="relative">
             <button
               type="button"
               onClick={() => {
-                setViewMode('3d');
-                notify('3D Preview synchronized from 2D floor plan geometry');
+                setShowExportMenu(false);
+                setOpenToolbarDropdown((prev) => (prev === 'view' ? null : 'view'));
               }}
-              className={`px-gutter-sm py-0.5 rounded-sm font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap ${
-                viewMode === '3d'
-                  ? 'bg-primary text-on-primary'
-                  : 'text-on-surface-variant hover:text-on-surface'
-              }`}
+              title="Switch between 2D View and 3D Preview"
+              className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-primary text-on-primary border border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
             >
-              3D Preview
+              <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                {viewMode === '2d' ? 'grid_on' : 'view_in_ar'}
+              </span>
+              <span>{viewMode === '2d' ? '2D View' : '3D Preview'}</span>
+              <span className="material-symbols-outlined text-[14px]" aria-hidden="true">expand_more</span>
             </button>
+
+            {openToolbarDropdown === 'view' && (
+              <div
+                className="absolute right-0 top-full mt-1 w-44 z-40 bg-surface-container border border-outline rounded-md shadow-xl py-1 flex flex-col"
+                onMouseLeave={() => setOpenToolbarDropdown(null)}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setViewMode('2d');
+                    setOpenToolbarDropdown(null);
+                  }}
+                  className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
+                    viewMode === '2d' ? 'text-primary' : 'text-on-surface'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-gutter-xs">
+                    <span className="material-symbols-outlined text-[16px]" aria-hidden="true">grid_on</span>
+                    <span>2D View</span>
+                  </span>
+                  {viewMode === '2d' && (
+                    <span className="material-symbols-outlined text-[15px]" aria-hidden="true">check</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setViewMode('3d');
+                    setOpenToolbarDropdown(null);
+                    notify('3D Preview synchronized from 2D floor plan geometry');
+                  }}
+                  className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
+                    viewMode === '3d' ? 'text-primary' : 'text-on-surface'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-gutter-xs">
+                    <span className="material-symbols-outlined text-[16px]" aria-hidden="true">view_in_ar</span>
+                    <span>3D Preview</span>
+                  </span>
+                  {viewMode === '3d' && (
+                    <span className="material-symbols-outlined text-[15px]" aria-hidden="true">check</span>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* 3D-specific Camera & Lighting controls when in 3D Preview */}
+          {/* Separate Dropdown 2: 3D Camera Mode (Orbit / Walk) */}
           {viewMode === '3d' && (
-            <div className="inline-flex items-center rounded-sm border border-outline-variant bg-surface-container p-0.5 gap-0.5">
+            <div className="relative">
               <button
                 type="button"
-                onClick={() => setCameraMode('orbit')}
-                className={`px-2 py-0.5 rounded-sm font-label text-label-sm cursor-pointer ${
-                  cameraMode === 'orbit' ? 'bg-surface-container-high text-primary' : 'text-on-surface-variant'
-                }`}
-              >
-                Orbit
-              </button>
-              <button
-                type="button"
-                title="Enter 3D Walk Mode (Press E or e)"
                 onClick={() => {
-                  setCameraMode('fps');
-                  notify(`First-Person walkthrough (1:3 Scale) on ${formatFloorLabel(activeFloor)} — use W/A/S/D or Arrows & drag to look`);
+                  setShowExportMenu(false);
+                  setOpenToolbarDropdown((prev) => (prev === 'camera' ? null : 'camera'));
                 }}
-                className={`px-2 py-0.5 rounded-sm font-label text-label-sm cursor-pointer ${
-                  cameraMode === 'fps' ? 'bg-surface-container-high text-primary' : 'text-on-surface-variant'
-                }`}
+                title="3D Camera Navigation Mode"
+                className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-surface-container border border-outline-variant text-on-surface hover:border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
               >
-                Walk
-              </button>
-              <button
-                type="button"
-                onClick={() => setLightingMode((l) => (l === 'daylight' ? 'evening' : 'daylight'))}
-                title="Toggle Daylight / Evening Lighting"
-                className="px-1.5 py-0.5 rounded-sm text-secondary hover:bg-surface-container-high cursor-pointer"
-              >
-                <span className="material-symbols-outlined text-[15px]">
-                  {lightingMode === 'daylight' ? 'light_mode' : 'dark_mode'}
+                <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
+                  {cameraMode === 'orbit' ? '3d_rotation' : 'directions_walk'}
+                </span>
+                <span>{cameraMode === 'orbit' ? 'Orbit' : 'Walk'}</span>
+                <span className="material-symbols-outlined text-[14px] text-on-surface-variant" aria-hidden="true">
+                  expand_more
                 </span>
               </button>
+
+              {openToolbarDropdown === 'camera' && (
+                <div
+                  className="absolute right-0 top-full mt-1 w-44 z-40 bg-surface-container border border-outline rounded-md shadow-xl py-1 flex flex-col"
+                  onMouseLeave={() => setOpenToolbarDropdown(null)}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCameraMode('orbit');
+                      setOpenToolbarDropdown(null);
+                    }}
+                    className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
+                      cameraMode === 'orbit' ? 'text-primary' : 'text-on-surface'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-gutter-xs">
+                      <span className="material-symbols-outlined text-[16px]" aria-hidden="true">3d_rotation</span>
+                      <span>Orbit</span>
+                    </span>
+                    {cameraMode === 'orbit' && (
+                      <span className="material-symbols-outlined text-[15px]" aria-hidden="true">check</span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCameraMode('fps');
+                      setOpenToolbarDropdown(null);
+                      notify(`First-Person walkthrough (1:3 Scale) on ${formatFloorLabel(activeFloor)} — use W/A/S/D or Arrows & drag to look`);
+                    }}
+                    className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
+                      cameraMode === 'fps' ? 'text-primary' : 'text-on-surface'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-gutter-xs">
+                      <span className="material-symbols-outlined text-[16px]" aria-hidden="true">directions_walk</span>
+                      <span>Walk (E)</span>
+                    </span>
+                    {cameraMode === 'fps' && (
+                      <span className="material-symbols-outlined text-[15px]" aria-hidden="true">check</span>
+                    )}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Separate Dropdown 3: 3D Sky & Atmosphere (Sunrise / Sun / Sunset / Night) */}
+          {viewMode === '3d' && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExportMenu(false);
+                  setOpenToolbarDropdown((prev) => (prev === 'sky' ? null : 'sky'));
+                }}
+                title="3D Sky & Atmosphere Effects"
+                className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-surface-container border border-outline-variant text-on-surface hover:border-secondary font-label text-label-sm cursor-pointer whitespace-nowrap"
+              >
+                <span className="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">
+                  {lightingMode === 'sunrise'
+                    ? 'wb_twilight'
+                    : lightingMode === 'daylight'
+                      ? 'light_mode'
+                      : lightingMode === 'sunset'
+                        ? 'wb_sunny'
+                        : 'dark_mode'}
+                </span>
+                <span>
+                  {lightingMode === 'sunrise'
+                    ? 'Sunrise'
+                    : lightingMode === 'daylight'
+                      ? 'Sun'
+                      : lightingMode === 'sunset'
+                        ? 'Sunset'
+                        : 'Night'}
+                </span>
+                <span className="material-symbols-outlined text-[14px] text-on-surface-variant" aria-hidden="true">
+                  expand_more
+                </span>
+              </button>
+
+              {openToolbarDropdown === 'sky' && (
+                <div
+                  className="absolute right-0 top-full mt-1 w-48 z-40 bg-surface-container border border-outline rounded-md shadow-xl py-1 flex flex-col"
+                  onMouseLeave={() => setOpenToolbarDropdown(null)}
+                >
+                  {(
+                    [
+                      { id: 'sunrise', label: 'Sunrise', icon: 'wb_twilight', title: 'Golden Sunrise with Clouds & Birds' },
+                      { id: 'daylight', label: 'Sun (Daylight)', icon: 'light_mode', title: 'Sunlit Daylight Sky with Clouds & Birds' },
+                      { id: 'sunset', label: 'Sunset', icon: 'wb_sunny', title: 'Warm Sunset Sky with Clouds & Soaring Birds' },
+                      { id: 'evening', label: 'Night', icon: 'dark_mode', title: 'Starlit Night Sky with Interior Lighting' },
+                    ] as const
+                  ).map((sky) => {
+                    const active = lightingMode === sky.id;
+                    return (
+                      <button
+                        key={sky.id}
+                        type="button"
+                        title={sky.title}
+                        onClick={() => {
+                          setLightingMode(sky.id);
+                          setOpenToolbarDropdown(null);
+                        }}
+                        className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
+                          active ? 'text-secondary' : 'text-on-surface'
+                        }`}
+                      >
+                        <span className="inline-flex items-center gap-gutter-xs">
+                          <span className="material-symbols-outlined text-secondary text-[16px]" aria-hidden="true">
+                            {sky.icon}
+                          </span>
+                          <span>{sky.label}</span>
+                        </span>
+                        {active && (
+                          <span className="material-symbols-outlined text-[15px]" aria-hidden="true">check</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -1932,10 +2097,10 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         </div>
       </div>
 
-      {/* MAIN CAD WORKSPACE (Canvas extended to occupy left area + Right Properties Inspector) */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_292px] min-h-0">
-        {/* PRIMARY WORKSPACE: A. Drawing Tools + B/C/D Drawers + Floor Strip + Extended 2D/3D Canvas */}
-        <main className="min-w-0 bg-surface cad-grid relative flex flex-col p-gutter-sm gap-gutter-xs min-h-[520px] lg:max-h-[calc(100vh-146px)]">
+      {/* MAIN CAD WORKSPACE (Full-width canvas; Properties Inspector opens as a dropdown) */}
+      <div className="flex-1 flex flex-col min-h-0 relative">
+        {/* PRIMARY WORKSPACE: A. Drawing Tools + B/C/D Drawers + Properties Dropdown + Floor Strip + Full-Width 2D/3D Canvas */}
+        <main className="flex-1 min-w-0 min-h-[520px] lg:min-h-0 bg-surface cad-grid relative flex flex-col p-gutter-sm gap-gutter-xs">
           {/* Summary Components Row with A. Drawing Tools positioned beside B. Room Library */}
           <div className="flex flex-wrap items-center justify-between gap-gutter-xs z-30">
             <div className="flex flex-wrap items-center gap-gutter-xs">
@@ -2228,6 +2393,40 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 </div>
               </details>
             </div>
+
+            {/* PROPERTIES INSPECTOR DROPDOWN TRIGGER */}
+            <button
+              type="button"
+              onClick={() => {
+                setOpenToolbarDropdown(null);
+                setOpenDrawer((prev) => (prev === 'properties' ? null : 'properties'));
+              }}
+              aria-expanded={openDrawer === 'properties'}
+              title="Toggle Properties Inspector Dropdown"
+              className={`flex items-center gap-1.5 px-gutter-sm py-1.5 rounded-md border cursor-pointer select-none transition-colors ${
+                openDrawer === 'properties'
+                  ? 'bg-surface-container-high border-primary'
+                  : 'bg-surface-container border-outline-variant hover:bg-surface-container-high'
+              }`}
+            >
+              <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
+                tune
+              </span>
+              <span className="font-label text-label-sm text-on-surface uppercase tracking-wider whitespace-nowrap">
+                Properties Inspector
+              </span>
+              <span className="px-1.5 py-0.5 rounded-full bg-primary-container text-primary font-mono text-[10px] uppercase whitespace-nowrap">
+                {inspectorBadgeLabel}
+              </span>
+              <span
+                className={`material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle ${
+                  openDrawer === 'properties' ? 'rotate-180' : ''
+                }`}
+                aria-hidden="true"
+              >
+                expand_more
+              </span>
+            </button>
           </div>
 
           {/* Multi-Floor Level Switcher Strip (1st Floor, 2nd Floor, 3rd Floor + Elevated) */}
@@ -2323,9 +2522,10 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
           {/* Primary Canvas Frame */}
           <div
-            className="relative flex-1 min-h-[420px] rounded-lg border border-outline bg-surface-container-low overflow-hidden"
+            className="relative flex-1 flex flex-col min-h-[420px] lg:min-h-0 w-full rounded-lg border border-outline bg-surface-container-low overflow-hidden"
             onPointerDown={(e) => {
               if (openDrawer) setOpenDrawer(null);
+              if (openToolbarDropdown) setOpenToolbarDropdown(null);
               if (e.button === 0 && canvasContextMenu) setCanvasContextMenu(null);
             }}
             onContextMenu={(e) => {
@@ -2384,6 +2584,23 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                             shortcut: 'E',
                             onSelect: () => {
                               setCameraMode((prev) => (prev === 'fps' ? 'orbit' : 'fps'));
+                            },
+                          },
+                          {
+                            id: 'sky-cycle',
+                            label: `Sky: ${
+                              lightingMode === 'sunrise'
+                                ? 'Sunrise → Sun'
+                                : lightingMode === 'daylight'
+                                  ? 'Sun → Sunset'
+                                  : lightingMode === 'sunset'
+                                    ? 'Sunset → Night'
+                                    : 'Night → Sunrise'
+                            }`,
+                            icon: 'wb_twilight',
+                            onSelect: () => {
+                              const order: LightingMode[] = ['sunrise', 'daylight', 'sunset', 'evening'];
+                              setLightingMode((prev) => order[(order.indexOf(prev) + 1) % order.length]);
                             },
                           },
                           {
@@ -2570,29 +2787,31 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           </div>
         </main>
 
-        {/* RIGHT SIDEBAR: Context-Sensitive Properties Inspector */}
-        <aside className="bg-surface-container border-t lg:border-t-0 lg:border-l border-outline-variant p-gutter-md flex flex-col gap-gutter-md overflow-y-auto lg:max-h-[calc(100vh-146px)]">
-          <div className="flex items-center justify-between border-b border-outline-variant pb-gutter-sm">
+        {/* PROPERTIES INSPECTOR DROPDOWN PANEL */}
+        {openDrawer === 'properties' && (
+        <aside
+          onPointerDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
+          className="absolute right-2 top-[46px] z-40 w-[308px] max-w-[calc(100%-16px)] max-h-[calc(100%-56px)] bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-md flex flex-col gap-gutter-md overflow-y-auto"
+        >
+          <div className="flex items-center justify-between gap-2 border-b border-outline-variant pb-gutter-sm">
             <span className="font-label text-label-sm text-on-surface-variant uppercase tracking-wider">
               Properties Inspector
             </span>
-            <span className="px-2 py-0.5 rounded-full bg-primary-container text-primary font-mono text-[11px] uppercase">
-              {allSelected
-                ? 'ALL SELECTED'
-                : selectedEntities.length > 1
-                  ? `${selectedEntities.length} SELECTED`
-                  : selectedRoom
-                    ? 'ROOM'
-                    : selectedWall
-                      ? 'WALL'
-                      : selectedOpening
-                        ? selectedOpening.kind
-                        : selectedPoint
-                          ? 'ELECTRICAL'
-                          : selectedFurniture
-                            ? 'FURNITURE'
-                            : 'SITE'}
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="px-2 py-0.5 rounded-full bg-primary-container text-primary font-mono text-[11px] uppercase">
+                {inspectorBadgeLabel}
+              </span>
+              <button
+                type="button"
+                onClick={() => setOpenDrawer(null)}
+                aria-label="Close Properties Inspector"
+                title="Close"
+                className="p-0.5 rounded-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[16px]" aria-hidden="true">close</span>
+              </button>
+            </div>
           </div>
 
           {inspectorWarning && (
@@ -3408,6 +3627,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </div>
           )}
         </aside>
+        )}
       </div>
 
       {/* PHASE 3 BOTTOM STATUS BAR */}
