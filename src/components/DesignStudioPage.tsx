@@ -1657,11 +1657,6 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         activeScreen="studio"
         onNavigate={onNavigate}
         compact={true}
-        rightSlot={
-          <span className="font-mono text-mono-sm text-on-surface-variant">
-            {project.projectType ?? 'Residential'} · {project.refCode}
-          </span>
-        }
       />
 
       {/* PHASE 3 TOP TOOLBAR */}

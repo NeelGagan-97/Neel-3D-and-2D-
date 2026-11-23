@@ -1210,14 +1210,6 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         </div>
       )}
 
-      {/* Subtle 3D interaction hint */}
-      {!previewOnly && (
-        <div className="pointer-events-none absolute bottom-3 left-3 px-gutter-md py-gutter-xs rounded-sm bg-surface-container border border-outline text-on-surface-variant font-mono text-mono-sm">
-          {cameraMode === 'fps'
-            ? 'Walk Mode (1:3 Scale): W / A / S / D or Arrows to navigate · Drag to look · Press E or Esc to exit'
-            : '3D Scale 1:3 · Press E to enter 3D Walk · Right-click canvas for options · Ctrl + Click to duplicate'}
-        </div>
-      )}
     </div>
   );
 };
