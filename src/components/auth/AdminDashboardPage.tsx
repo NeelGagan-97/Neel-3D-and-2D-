@@ -245,7 +245,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
             </h1>
             <p className="font-body text-body-md text-on-surface-variant">
               Review employee registrations, approve or suspend workspace access, and audit account
-              permissions for Neel 3D Space.
+              permissions for Blue Space.
             </p>
           </div>
 

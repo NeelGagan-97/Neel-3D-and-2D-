@@ -48,14 +48,14 @@ export const AuthLayout: React.FC<AuthLayoutProps> = ({
             onClick={() => void handleBackAction()}
             className="flex items-center gap-gutter-sm text-left cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary rounded-sm"
           >
-            <div className="w-9 h-9 rounded-md bg-primary-container border border-primary flex items-center justify-center shrink-0">
-              <span className="material-symbols-outlined text-primary text-[20px]" aria-hidden="true">
-                deployed_code
-              </span>
-            </div>
+            <img
+              src="/assets/aistudio/Create_favicon_and_transparent_p__21f5ae8d_2K_3f0575c9.png"
+              alt="Blue Space logo"
+              className="w-9 h-9 object-contain shrink-0"
+            />
             <div className="flex flex-col min-w-0">
               <span className="font-headline text-title-sm text-on-surface tracking-wide uppercase whitespace-nowrap">
-                NEEL 3D SPACE
+                BLUE SPACE
               </span>
               <span className="font-mono text-mono-sm text-on-surface-variant tracking-wider uppercase whitespace-nowrap hidden sm:block">
                 EMPLOYEE ACCESS PORTAL

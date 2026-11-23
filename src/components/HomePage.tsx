@@ -544,13 +544,20 @@ export const HomePage: React.FC<HomePageProps> = ({
       {/* Footer */}
       <footer className="bg-surface-container border-t border-outline-variant">
         <div className="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-gutter-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-gutter-lg">
-          <div className="flex flex-col gap-gutter-xs">
-            <span className="font-headline text-title-sm text-on-surface uppercase tracking-wide">
-              ANANYA SPACE DESIGNER
-            </span>
-            <span className="font-mono text-mono-sm text-on-surface-variant uppercase">
-              DESIGN YOUR SPACE. POWER YOUR WORLD.
-            </span>
+          <div className="flex items-center gap-gutter-sm">
+            <img
+              src="/assets/aistudio/Create_favicon_and_transparent_p__21f5ae8d_2K_3f0575c9.png"
+              alt="Blue Space logo"
+              className="w-8 h-8 object-contain shrink-0"
+            />
+            <div className="flex flex-col gap-gutter-xs">
+              <span className="font-headline text-title-sm text-on-surface uppercase tracking-wide">
+                BLUE SPACE
+              </span>
+              <span className="font-mono text-mono-sm text-on-surface-variant uppercase">
+                DESIGN YOUR SPACE. POWER YOUR WORLD.
+              </span>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-gutter-xl">
             <button

@@ -95,7 +95,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onNavigateRoute }) =
                 <>
                   We sent a verification email to{' '}
                   <span className="font-mono text-on-surface">{successState.email}</span>. Please
-                  confirm your email address first. Once verified, an approved Neel 3D Space
+                  confirm your email address first. Once verified, an approved Blue Space
                   administrator will review and approve your access.
                 </>
               ) : (
@@ -147,7 +147,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onNavigateRoute }) =
   return (
     <AuthLayout
       title="Employee Registration"
-      subtitle="Create your Neel 3D Space employee account. New registrations require administrator approval before accessing the 3D Design Studio."
+      subtitle="Create your Blue Space employee account. New registrations require administrator approval before accessing the 3D Design Studio."
       onNavigateRoute={onNavigateRoute}
       isConfigured={isConfigured}
       maxWidthClass="max-w-2xl"

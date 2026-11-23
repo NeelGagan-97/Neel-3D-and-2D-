@@ -112,11 +112,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         <div className="max-w-7xl mx-auto px-6 sm:px-10 lg:px-12 xl:px-16 pt-6 pb-2 flex items-center justify-between gap-gutter-md">
           {/* Brand Header */}
           <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#9333EA] via-[#8B5CF6] to-[#6D28D9] shadow-[0_0_28px_rgba(139,92,246,0.55)] flex items-center justify-center shrink-0">
-              <span className="material-symbols-outlined text-white text-[22px]" aria-hidden="true">
-                deployed_code
-              </span>
-            </div>
+            <img
+              src="/assets/aistudio/Create_favicon_and_transparent_p__21f5ae8d_2K_3f0575c9.png"
+              alt="Blue Space logo"
+              className="w-10 h-10 object-contain shrink-0 drop-shadow-[0_2px_12px_rgba(59,130,246,0.45)]"
+            />
             <div className="flex flex-col">
               <span className="font-headline text-base font-bold text-white leading-tight drop-shadow-sm">
                 Blue Space
@@ -239,7 +239,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                             setEmail(e.target.value);
                             if (fieldErrors.email) setFieldErrors((p) => ({ ...p, email: '' }));
                           }}
-                          placeholder="designer@neel3dspace.com"
+                          placeholder="designer@bluespace.com"
                           disabled={submitting}
                           aria-invalid={Boolean(fieldErrors.email)}
                           className={`w-full pl-10 pr-3.5 py-2.5 rounded-lg bg-[#0A0814]/90 border text-sm text-white placeholder:text-slate-400 focus:outline-none focus:border-[#8B5CF6] focus:ring-2 focus:ring-[#8B5CF6]/25 transition-colors ${
@@ -355,7 +355,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             {/* Unified Section Footer */}
             <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-white/12 text-xs">
               <span className="text-slate-300">
-                © 2026 Neel 3D Space. All rights reserved.
+                © 2026 Blue Space. All rights reserved.
               </span>
             </div>
           </div>

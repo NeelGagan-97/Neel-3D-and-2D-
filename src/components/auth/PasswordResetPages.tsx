@@ -240,7 +240,7 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
   return (
     <AuthLayout
       title="Set New Password"
-      subtitle="Choose a strong password for your Neel 3D Space account."
+      subtitle="Choose a strong password for your Blue Space account."
       onNavigateRoute={onNavigateRoute}
       isConfigured={isConfigured}
     >

@@ -22,7 +22,7 @@ const VARIANT_CONFIG: Record<
 > = {
   'pending-approval': {
     title: 'Account Awaiting Approval',
-    subtitle: 'Your registration is under review by a Neel 3D Space administrator.',
+    subtitle: 'Your registration is under review by a Blue Space administrator.',
     icon: 'hourglass_top',
     accentClass: 'text-warning',
     statusLabel: 'PENDING APPROVAL',
@@ -36,7 +36,7 @@ const VARIANT_CONFIG: Record<
     accentClass: 'text-error',
     statusLabel: 'REJECTED',
     description:
-      'Protected design tools and workspace features are unavailable for rejected accounts. If you believe this was in error, please contact your Neel 3D Space administrator.',
+      'Protected design tools and workspace features are unavailable for rejected accounts. If you believe this was in error, please contact your Blue Space administrator.',
   },
   'account-suspended': {
     title: 'Account Suspended',

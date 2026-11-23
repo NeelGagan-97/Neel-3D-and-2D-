@@ -281,7 +281,7 @@ export default function App() {
           setRouteNotice(
             route === 'admin'
               ? 'Sign in with an approved administrator account to access the Admin Dashboard.'
-              : 'Sign in with an approved Neel 3D Space account to access protected design tools.'
+              : 'Sign in with an approved Blue Space account to access protected design tools.'
           );
         }
       } else if (accessDecision.reason === 'unauthorized-admin') {
@@ -346,7 +346,7 @@ export default function App() {
       if (!isAuthenticated || !isApprovedUser(profile, user?.id ?? null)) {
         setIntendedRoute('studio');
         setRouteNotice(
-          'Sign in with an approved Neel 3D Space account to create a new space in Design Studio.'
+          'Sign in with an approved Blue Space account to create a new space in Design Studio.'
         );
         navigateRoute(isAuthenticated ? evaluateRouteAccess('studio', {
           isAuthenticated,
@@ -441,7 +441,7 @@ export default function App() {
         if (!imported) {
           return {
             ok: false,
-            error: 'Invalid Neel 3D Space project JSON file.',
+            error: 'Invalid Blue Space project JSON file.',
           };
         }
         const collides = projects.some((p) => p.id === imported.id);

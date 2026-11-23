@@ -432,7 +432,7 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
 
   const handleExportExcel = () => {
     const lines: string[] = [];
-    lines.push(`"Ananya Space Designer — Engineering BOQ Report"`);
+    lines.push(`"Blue Space — Engineering BOQ Report"`);
     lines.push(`"Project","${project.name}","Reference","${project.refCode}"`);
     lines.push(`"Site Dimensions","${metrics.dimensionsDisplay}","Area","${metrics.areaDisplay}"`);
     lines.push(
@@ -1164,9 +1164,16 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
       {/* Footer */}
       <footer className="bg-surface-container border-t border-outline-variant">
         <div className="max-w-7xl mx-auto px-gutter-lg lg:px-gutter-xl py-gutter-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-gutter-md">
-          <span className="font-mono text-mono-sm text-on-surface-variant uppercase">
-            ANANYA SPACE DESIGNER • DESIGN YOUR SPACE. POWER YOUR WORLD.
-          </span>
+          <div className="flex items-center gap-gutter-sm">
+            <img
+              src="/assets/aistudio/Create_favicon_and_transparent_p__21f5ae8d_2K_3f0575c9.png"
+              alt="Blue Space logo"
+              className="w-6 h-6 object-contain shrink-0"
+            />
+            <span className="font-mono text-mono-sm text-on-surface-variant uppercase">
+              BLUE SPACE • DESIGN YOUR SPACE. POWER YOUR WORLD.
+            </span>
+          </div>
           <span className="font-mono text-mono-sm text-on-surface-variant">
             BOQ Estimates Exclusive of Civil Conduit Labor
           </span>

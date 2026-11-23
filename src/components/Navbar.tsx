@@ -92,18 +92,11 @@ export const Navbar: React.FC<NavbarProps> = ({
           onClick={() => onNavigate('home')}
           className="flex items-center gap-gutter-sm min-w-0 text-left cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary rounded-sm"
         >
-          <div
-            className={`${
-              compact ? 'w-8 h-8' : 'w-9 h-9'
-            } rounded-md bg-primary-container border border-primary flex items-center justify-center shrink-0`}
-          >
-            <span
-              className={`material-symbols-outlined text-primary ${compact ? 'text-[18px]' : 'text-[20px]'}`}
-              aria-hidden="true"
-            >
-              deployed_code
-            </span>
-          </div>
+          <img
+            src="/assets/aistudio/Create_favicon_and_transparent_p__21f5ae8d_2K_3f0575c9.png"
+            alt="Blue Space logo"
+            className={`${compact ? 'w-8 h-8' : 'w-9 h-9'} object-contain shrink-0`}
+          />
           <div className={compact ? 'flex items-baseline gap-gutter-md min-w-0' : 'flex flex-col min-w-0'}>
             <span className="font-headline text-title-sm text-on-surface tracking-wide whitespace-nowrap">
               Blue Space
