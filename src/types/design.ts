@@ -130,9 +130,14 @@ export interface ElectricalWire {
   productId?: string;
   manufacturer?: string;
   brand?: string;
+  productName?: string;
+  productCategory?: string;
   modelNumber?: string;
+  specification?: string;
+  unit?: string;
   unitPricePerM?: number | null;
   gstPercent?: number | null;
+  datasheetUrl?: string;
 }
 
 export interface CircuitCableConfig {
@@ -141,7 +146,15 @@ export interface CircuitCableConfig {
   cableMaterial: CableMaterial;
   productId?: string;
   manufacturer?: string;
+  brand?: string;
+  productName?: string;
+  productCategory?: string;
   modelNumber?: string;
+  specification?: string;
+  unit?: string;
+  unitPricePerM?: number | null;
+  gstPercent?: number | null;
+  datasheetUrl?: string;
   note?: string;
 }
 

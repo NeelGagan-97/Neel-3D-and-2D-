@@ -820,7 +820,12 @@ export function duplicateFloorInProject(
 
   const pointIdMap = new Map<string, string>();
   const clonedPoints = project.points
-    .filter((p) => getItemFloor(p) === sourceFloor)
+    .filter(
+      (p) =>
+        getItemFloor(p) === sourceFloor &&
+        p.itemType !== 'distribution_board' &&
+        p.itemType !== 'earthing_point'
+    )
     .map((p, i) => {
       const id = `pt-f${newFloor}-${ts}-${i}`;
       pointIdMap.set(p.id, id);
@@ -832,18 +837,20 @@ export function duplicateFloorInProject(
       };
     });
 
-  // Clone same-floor electrical wires preserving source/destination point mapping
-  const existingWireCount = (project.wires ?? []).length;
+  // Clone same-floor electrical wires preserving source/destination point mapping & cable pricing/GST
+  let nextWireSeq = getNextWireSequence(project.wires ?? []);
   const clonedWires: ElectricalWire[] = (project.wires ?? [])
     .filter((w) => w.fromFloor === sourceFloor && w.toFloor === sourceFloor && !w.isInterFloor)
     .map((w, i) => {
       const mappedFrom = pointIdMap.get(w.fromPointId);
       const mappedTo = pointIdMap.get(w.toPointId);
       if (!mappedFrom || !mappedTo) return null;
+      const codeNum = nextWireSeq;
+      nextWireSeq += 1;
       return {
         ...w,
         id: `wire-f${newFloor}-${ts}-${i}`,
-        code: `W-${String(existingWireCount + i + 1).padStart(2, '0')}`,
+        code: `W-${String(codeNum).padStart(2, '0')}`,
         floor: newFloor,
         fromFloor: newFloor,
         toFloor: newFloor,
@@ -861,6 +868,8 @@ export function duplicateFloorInProject(
           name: `${sourceCfg.name} (Copy)`,
           floorHeightM: sourceCfg.floorHeightM,
           slabThicknessM: sourceCfg.slabThicknessM,
+          ...(sourceCfg.lengthM !== undefined ? { lengthM: sourceCfg.lengthM } : {}),
+          ...(sourceCfg.widthM !== undefined ? { widthM: sourceCfg.widthM } : {}),
         }
       : fc
   );
@@ -1514,6 +1523,58 @@ export function validateWireRoutePath(
   return { valid: true, lengthM };
 }
 
+/**
+ * Computes the next non-colliding W-XX wire sequence number even after wires are deleted.
+ */
+export function getNextWireSequence(wires: ElectricalWire[]): number {
+  let maxNum = 0;
+  for (const w of wires) {
+    const m = /^W-(\d+)$/i.exec(w.code?.trim() ?? '');
+    if (m) {
+      const parsed = Number(m[1]);
+      if (Number.isFinite(parsed) && parsed > maxNum) {
+        maxNum = parsed;
+      }
+    }
+  }
+  return Math.max(maxNum, wires.length) + 1;
+}
+
+/**
+ * Extracts all linked cable product metadata, pricing, and GST fields from a CircuitCableConfig
+ * without fabricating missing values.
+ */
+export function buildCircuitCableWireFields(
+  cfg?: Partial<{
+    productId?: string;
+    manufacturer?: string;
+    brand?: string;
+    productName?: string;
+    productCategory?: string;
+    modelNumber?: string;
+    specification?: string;
+    unit?: string;
+    unitPricePerM?: number | null;
+    gstPercent?: number | null;
+    datasheetUrl?: string;
+  }>
+): Partial<ElectricalWire> {
+  if (!cfg || !cfg.productId) return {};
+  return {
+    productId: cfg.productId,
+    manufacturer: cfg.manufacturer,
+    brand: cfg.brand,
+    productName: cfg.productName,
+    productCategory: cfg.productCategory,
+    modelNumber: cfg.modelNumber,
+    specification: cfg.specification,
+    unit: cfg.unit,
+    unitPricePerM: cfg.unitPricePerM ?? null,
+    gstPercent: cfg.gstPercent ?? null,
+    ...(cfg.datasheetUrl ? { datasheetUrl: cfg.datasheetUrl } : {}),
+  };
+}
+
 export function createElectricalWire(options: {
   project: ProjectData;
   fromPoint: ElectricalPoint;
@@ -1530,7 +1591,7 @@ export function createElectricalWire(options: {
   const fromFloor = getItemFloor(options.fromPoint);
   const toFloor = getItemFloor(options.toPoint);
   const existing = options.project.wires ?? [];
-  const nextIdx = existing.length + 1;
+  const nextIdx = getNextWireSequence(existing);
 
   return {
     id: `wire-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -1617,7 +1678,7 @@ export function autoRouteUnwiredCables(project: ProjectData): {
     const catDefaults = WIRE_CATEGORY_DEFAULTS[category];
     const fromFloor = getItemFloor(fromPt);
     const toFloor = getItemFloor(toPt);
-    const seq = workingWires.length + 1;
+    const seq = getNextWireSequence(workingWires);
     const cktCfg = circuit ? project.circuitCableConfigs?.[circuit] : undefined;
     const servedFloor =
       fromPt.itemType === 'distribution_board' || fromPt.itemType === 'earthing_point'
@@ -1644,13 +1705,7 @@ export function autoRouteUnwiredCables(project: ProjectData): {
       lineThickness: catDefaults.lineThickness,
       lineStyle: catDefaults.lineStyle,
       status: 'connected',
-      ...(cktCfg?.productId
-        ? {
-            productId: cktCfg.productId,
-            manufacturer: cktCfg.manufacturer,
-            modelNumber: cktCfg.modelNumber,
-          }
-        : {}),
+      ...buildCircuitCableWireFields(cktCfg),
     });
     addedCount += 1;
   };
@@ -2947,10 +3002,12 @@ function buildBoqRowsForSubset(
     {
       manufacturer: string;
       brand: string;
+      productCategory: string;
       productName: string;
       model: string;
       spec: string;
       cableSize: string;
+      unit: string;
       circuitSet: Set<string>;
       rawLengthM: number;
       unitPrice: number | null;
@@ -2961,23 +3018,50 @@ function buildBoqRowsForSubset(
   wires.forEach((w) => {
     const lenM = computeWireLengthMeters(w, project);
     if (lenM <= 0) return;
-    const sizeLabel = w.cableSizeSqMm !== null && w.cableSizeSqMm > 0 ? `${w.cableSizeSqMm} sq.mm` : 'Not specified';
-    const manufacturer = w.manufacturer?.trim() || 'Not specified';
-    const brand = w.brand?.trim() || (w.manufacturer?.trim() ? w.manufacturer.trim() : 'Not specified');
-    const productName = `${WIRE_CATEGORY_LABELS[w.category]} — ${w.wireType}`;
-    const model = w.modelNumber?.trim() || 'Not specified';
-    const spec = `${w.cableMaterial}, ${w.cores}C, ${w.phaseDesignation}`;
+    const cktCfg = w.circuit ? project.circuitCableConfigs?.[w.circuit] : undefined;
+    const effectiveSize = w.cableSizeSqMm ?? cktCfg?.cableSizeSqMm ?? null;
+    const sizeLabel =
+      effectiveSize !== null && effectiveSize > 0 ? `${effectiveSize} sq.mm` : 'Not specified';
+    const manufacturer =
+      w.manufacturer?.trim() || cktCfg?.manufacturer?.trim() || 'Not specified';
+    const brand =
+      w.brand?.trim() ||
+      cktCfg?.brand?.trim() ||
+      (manufacturer !== 'Not specified' ? manufacturer : 'Not specified');
+    const productCategory =
+      w.productCategory?.trim() || cktCfg?.productCategory?.trim() || 'Cables & Wires';
+    const linkedName = w.productName?.trim() || cktCfg?.productName?.trim();
+    const productName = linkedName
+      ? `${linkedName} (${WIRE_CATEGORY_LABELS[w.category]})`
+      : `${WIRE_CATEGORY_LABELS[w.category]} — ${w.wireType}`;
+    const model = w.modelNumber?.trim() || cktCfg?.modelNumber?.trim() || 'Not specified';
+    const linkedSpec = w.specification?.trim() || cktCfg?.specification?.trim();
+    const spec = linkedSpec
+      ? `${linkedSpec} · ${w.cableMaterial}, ${w.cores}C, ${w.phaseDesignation}`
+      : `${w.cableMaterial}, ${w.cores}C, ${w.phaseDesignation}`;
+    const unit = w.unit?.trim() || cktCfg?.unit?.trim() || 'm';
+    const rawUnitPrice =
+      w.unitPricePerM !== undefined ? w.unitPricePerM : cktCfg?.unitPricePerM;
     const unitPrice =
-      typeof w.unitPricePerM === 'number' && Number.isFinite(w.unitPricePerM) && w.unitPricePerM > 0
-        ? Number(w.unitPricePerM.toFixed(2))
+      typeof rawUnitPrice === 'number' && Number.isFinite(rawUnitPrice) && rawUnitPrice > 0
+        ? Number(rawUnitPrice.toFixed(2))
         : null;
+    const rawGst = w.gstPercent !== undefined ? w.gstPercent : cktCfg?.gstPercent;
     const gstPercent =
-      typeof w.gstPercent === 'number' && Number.isFinite(w.gstPercent) && w.gstPercent >= 0
-        ? w.gstPercent
-        : null;
+      typeof rawGst === 'number' && Number.isFinite(rawGst) && rawGst >= 0 ? rawGst : null;
     const cktName = w.circuit || 'Unassigned';
 
-    const key = [manufacturer, model, sizeLabel, w.category, w.cableMaterial, unitPrice ?? 'NA', gstPercent ?? 'NA'].join('||');
+    const key = [
+      manufacturer,
+      brand,
+      model,
+      productName,
+      sizeLabel,
+      w.category,
+      w.cableMaterial,
+      unitPrice ?? 'NA',
+      gstPercent ?? 'NA',
+    ].join('||');
     const ex = wireGroups.get(key);
     if (ex) {
       ex.rawLengthM += lenM;
@@ -2986,10 +3070,12 @@ function buildBoqRowsForSubset(
       wireGroups.set(key, {
         manufacturer,
         brand,
+        productCategory,
         productName,
         model,
         spec,
         cableSize: sizeLabel,
+        unit,
         circuitSet: new Set([cktName]),
         rawLengthM: lenM,
         unitPrice,
@@ -3010,7 +3096,7 @@ function buildBoqRowsForSubset(
 
     rows.push({
       kind: 'cable',
-      productCategory: 'Cables & Wires',
+      productCategory: wg.productCategory,
       manufacturer: wg.manufacturer,
       brand: wg.brand,
       productName: wg.productName,
@@ -3020,7 +3106,7 @@ function buildBoqRowsForSubset(
       totalLoadW: 0,
       circuits: Array.from(wg.circuitSet).join(', '),
       cableSize: wg.cableSize,
-      unit: 'm',
+      unit: wg.unit,
       quantity: qtyM,
       unitPrice: wg.unitPrice,
       priceSource,

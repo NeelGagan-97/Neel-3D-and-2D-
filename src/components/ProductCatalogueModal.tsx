@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   addCatalogueProduct,
   CATALOGUE_CATEGORIES,
@@ -15,6 +15,7 @@ import {
 import { CatalogueCategory, ProductCatalogueItem } from '../types/catalogue';
 import { CircuitId } from '../types/design';
 import { CIRCUITS, formatINR } from '../data/presets';
+import { sanitizeSafeUrl, validateSafeUrl } from '../utils/urlSecurity';
 
 interface ProductCatalogueModalProps {
   open: boolean;
@@ -83,6 +84,16 @@ export const ProductCatalogueModal: React.FC<ProductCatalogueModalProps> = ({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      setProducts(loadCatalogueProducts());
+    }
+  }, [open]);
+
+  useEffect(() => {
+    setTargetCircuit(activeCircuit);
+  }, [activeCircuit]);
 
   const filteredProducts = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -167,11 +178,38 @@ export const ProductCatalogueModal: React.FC<ProductCatalogueModalProps> = ({
       return;
     }
 
+    const imageCheck = validateSafeUrl(form.imageUrl, 'Product Image URL');
+    if (!imageCheck.valid) {
+      setNotice({ kind: 'err', text: imageCheck.error ?? 'Invalid Product Image URL.' });
+      return;
+    }
+    const datasheetCheck = validateSafeUrl(form.datasheetUrl, 'Datasheet URL');
+    if (!datasheetCheck.valid) {
+      setNotice({ kind: 'err', text: datasheetCheck.error ?? 'Invalid Datasheet URL.' });
+      return;
+    }
+    const manufacturerCheck = validateSafeUrl(form.manufacturerUrl, 'Manufacturer Page URL');
+    if (!manufacturerCheck.valid) {
+      setNotice({ kind: 'err', text: manufacturerCheck.error ?? 'Invalid Manufacturer Page URL.' });
+      return;
+    }
+
     const toNumOrNull = (val: string): number | null => {
       if (!val.trim()) return null;
       const n = Number(val);
       return Number.isFinite(n) ? n : null;
     };
+
+    const unitPriceVal = toNumOrNull(form.unitPrice);
+    if (unitPriceVal !== null && unitPriceVal < 0) {
+      setNotice({ kind: 'err', text: 'Unit price cannot be negative.' });
+      return;
+    }
+    const gstVal = toNumOrNull(form.gstPercent);
+    if (gstVal !== null && (gstVal < 0 || gstVal > 100)) {
+      setNotice({ kind: 'err', text: 'GST % must be between 0 and 100.' });
+      return;
+    }
 
     const payload = {
       category: form.category,
@@ -185,11 +223,11 @@ export const ProductCatalogueModal: React.FC<ProductCatalogueModalProps> = ({
       cableSizeSqMm: toNumOrNull(form.cableSizeSqMm),
       dimensions: form.dimensions.trim(),
       unit: form.unit.trim() || (form.category === 'Cables & Wires' ? 'm' : 'Nos'),
-      unitPrice: toNumOrNull(form.unitPrice),
-      gstPercent: toNumOrNull(form.gstPercent),
-      imageUrl: form.imageUrl.trim() || undefined,
-      datasheetUrl: form.datasheetUrl.trim() || undefined,
-      manufacturerUrl: form.manufacturerUrl.trim() || undefined,
+      unitPrice: unitPriceVal,
+      gstPercent: gstVal,
+      imageUrl: imageCheck.normalized,
+      datasheetUrl: datasheetCheck.normalized,
+      manufacturerUrl: manufacturerCheck.normalized,
       mappedItemType: inferMappedItemType(form.category, name),
       source: 'admin-entry' as const,
     };
@@ -223,25 +261,36 @@ export const ProductCatalogueModal: React.FC<ProductCatalogueModalProps> = ({
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file || !isAdmin) return;
-    const buffer = await file.arrayBuffer();
-    const res = parseCatalogueSpreadsheet(buffer);
-    if (res.items.length === 0) {
+    try {
+      const buffer = await file.arrayBuffer();
+      const res = await parseCatalogueSpreadsheet(buffer, {
+        name: file.name,
+        type: file.type,
+        size: file.size,
+      });
+      if (res.items.length === 0) {
+        setNotice({
+          kind: 'err',
+          text: res.errors[0] || 'No valid product rows found in uploaded spreadsheet.',
+        });
+        return;
+      }
+      const merged = [...res.items, ...products];
+      saveCatalogueProducts(merged);
+      setProducts(merged);
+      setNotice({
+        kind: 'ok',
+        text: `Imported ${res.items.length} catalogue product(s) from ${file.name}${
+          res.errors.length > 0 ? ` (${res.errors.length} row warning(s))` : ''
+        }.`,
+      });
+      setTab('browse');
+    } catch (err) {
       setNotice({
         kind: 'err',
-        text: res.errors[0] || 'No valid product rows found in uploaded spreadsheet.',
+        text: err instanceof Error ? err.message : 'Failed to import uploaded spreadsheet.',
       });
-      return;
     }
-    const merged = [...res.items, ...products];
-    saveCatalogueProducts(merged);
-    setProducts(merged);
-    setNotice({
-      kind: 'ok',
-      text: `Imported ${res.items.length} catalogue product(s) from ${file.name}${
-        res.errors.length > 0 ? ` (${res.errors.length} row warning(s))` : ''
-      }.`,
-    });
-    setTab('browse');
   };
 
   return (
@@ -284,7 +333,7 @@ export const ProductCatalogueModal: React.FC<ProductCatalogueModalProps> = ({
                 <input
                   ref={importInputRef}
                   type="file"
-                  accept=".xlsx,.xls,.csv"
+                  accept=".xlsx,.csv"
                   onChange={handleSpreadsheetImport}
                   className="hidden"
                 />
@@ -473,6 +522,9 @@ export const ProductCatalogueModal: React.FC<ProductCatalogueModalProps> = ({
                   {filteredProducts.map((item) => {
                     const isCompared = compareIds.includes(item.id);
                     const isCable = item.category === 'Cables & Wires';
+                    const safeImageUrl = sanitizeSafeUrl(item.imageUrl);
+                    const safeDatasheetUrl = sanitizeSafeUrl(item.datasheetUrl);
+                    const safeManufacturerUrl = sanitizeSafeUrl(item.manufacturerUrl);
                     return (
                       <div
                         key={item.id}
@@ -488,9 +540,9 @@ export const ProductCatalogueModal: React.FC<ProductCatalogueModalProps> = ({
                                 {item.manufacturer} · {item.brand}
                               </p>
                             </div>
-                            {item.imageUrl && (
+                            {safeImageUrl && (
                               <img
-                                src={item.imageUrl}
+                                src={safeImageUrl}
                                 alt={item.productName}
                                 className="w-12 h-12 object-contain border border-outline bg-surface-container"
                               />
@@ -539,11 +591,11 @@ export const ProductCatalogueModal: React.FC<ProductCatalogueModalProps> = ({
                             </div>
                           </div>
 
-                          {(item.datasheetUrl || item.manufacturerUrl) && (
+                          {(safeDatasheetUrl || safeManufacturerUrl) && (
                             <div className="flex items-center gap-3 text-[11px]">
-                              {item.datasheetUrl && (
+                              {safeDatasheetUrl && (
                                 <a
-                                  href={item.datasheetUrl}
+                                  href={safeDatasheetUrl}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-secondary hover:underline flex items-center gap-0.5"
@@ -554,9 +606,9 @@ export const ProductCatalogueModal: React.FC<ProductCatalogueModalProps> = ({
                                   </span>
                                 </a>
                               )}
-                              {item.manufacturerUrl && (
+                              {safeManufacturerUrl && (
                                 <a
-                                  href={item.manufacturerUrl}
+                                  href={safeManufacturerUrl}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-secondary hover:underline flex items-center gap-0.5"

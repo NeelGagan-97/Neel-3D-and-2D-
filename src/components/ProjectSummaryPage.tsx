@@ -20,6 +20,7 @@ import {
   computeBuildingElectricalSummary,
   WIRE_CATEGORY_LABELS,
 } from '../utils/buildingWiring';
+import { formatSafeCsvRow } from '../utils/csvSecurity';
 import { downloadExcelBoq } from '../utils/excelBoqExporter';
 import { downloadFloorPlanPdf } from '../utils/exporters';
 import { FloorPlan2D } from './FloorPlan2D';
@@ -444,38 +445,85 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
 
   const handleExportExcel = () => {
     const lines: string[] = [];
-    lines.push(`"Blue Space — Engineering BOQ Report"`);
-    lines.push(`"Project","${project.name}","Reference","${project.refCode}"`);
-    lines.push(`"Site Dimensions","${metrics.dimensionsDisplay}","Area","${metrics.areaDisplay}"`);
+    lines.push(formatSafeCsvRow(['Blue Space — Engineering BOQ Report']));
+    lines.push(formatSafeCsvRow(['Project', project.name, 'Reference', project.refCode]));
     lines.push(
-      `"Total Electrical Points","${effectiveTotalPoints}","Connected Load (kW)","${effectiveTotalKw.toFixed(2)}"`
+      formatSafeCsvRow(['Site Dimensions', metrics.dimensionsDisplay, 'Area', metrics.areaDisplay])
+    );
+    lines.push(
+      formatSafeCsvRow([
+        'Total Electrical Points',
+        effectiveTotalPoints,
+        'Connected Load (kW)',
+        Number(effectiveTotalKw.toFixed(2)),
+      ])
     );
     lines.push('');
-    lines.push('"ROOM-WISE ELECTRICAL BREAKDOWN"');
-    lines.push('"Room","Fans","Lights","Switches","Sockets","Appliances","Room Load (W)"');
+    lines.push(formatSafeCsvRow(['ROOM-WISE ELECTRICAL BREAKDOWN']));
+    lines.push(
+      formatSafeCsvRow([
+        'Room',
+        'Fans',
+        'Lights',
+        'Switches',
+        'Sockets',
+        'Appliances',
+        'Room Load (W)',
+      ])
+    );
     roomRows.forEach((r) => {
       lines.push(
-        `"${r.roomName.replace(/"/g, '""')}",${r.fans},${r.lights},${r.switches},${r.sockets},${r.appliances},${r.loadWatts}`
+        formatSafeCsvRow([
+          r.roomName,
+          r.fans,
+          r.lights,
+          r.switches,
+          r.sockets,
+          r.appliances,
+          r.loadWatts,
+        ])
       );
     });
     lines.push('');
-    lines.push('"BILL OF QUANTITIES (BOQ)"');
-    lines.push('"Product Name","Category","Quantity","Total Wattage (W)","Estimated Cost (INR)"');
+    lines.push(formatSafeCsvRow(['BILL OF QUANTITIES (BOQ)']));
+    lines.push(
+      formatSafeCsvRow([
+        'Product Name',
+        'Category',
+        'Quantity',
+        'Total Wattage (W)',
+        'Estimated Cost (INR)',
+      ])
+    );
     boqRows.forEach((b) => {
       lines.push(
-        `"${b.productName.replace(/"/g, '""')}","${b.category.replace(/"/g, '""')}",${b.quantity},${b.totalWattage},${b.estimatedCost}`
+        formatSafeCsvRow([
+          b.productName,
+          b.category,
+          b.quantity,
+          b.totalWattage,
+          b.estimatedCost,
+        ])
       );
     });
     lines.push(
-      `"TOTAL CONNECTED SYSTEM SUMMARY","",${effectiveTotalPoints},${effectiveTotalWatts},${effectiveTotalCost}`
+      formatSafeCsvRow([
+        'TOTAL CONNECTED SYSTEM SUMMARY',
+        '',
+        effectiveTotalPoints,
+        effectiveTotalWatts,
+        effectiveTotalCost,
+      ])
     );
 
     const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${project.refCode}_${project.name.replace(/\s+/g, '_')}_BOQ.csv`;
+    a.download = `${project.refCode}_${project.name.replace(/[^a-zA-Z0-9-_]+/g, '_')}_BOQ.csv`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
     notify('Exported Excel-compatible CSV Bill of Quantities.');
   };
@@ -584,8 +632,17 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
             <button
               type="button"
               onClick={() => {
-                downloadExcelBoq(project);
-                notify(`Exported multi-sheet Excel BOQ workbook (.xlsx) for "${project.name}".`);
+                void downloadExcelBoq(project)
+                  .then(() => {
+                    notify(`Exported multi-sheet Excel BOQ workbook (.xlsx) for "${project.name}".`);
+                  })
+                  .catch((err) => {
+                    notify(
+                      err instanceof Error
+                        ? `Excel BOQ export failed: ${err.message}`
+                        : 'Excel BOQ export failed.'
+                    );
+                  });
               }}
               className="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-sm rounded-sm bg-surface-container-high border border-primary/70 text-primary hover:bg-primary-container/30 font-label text-label-md transition-colors duration-state-change cursor-pointer whitespace-nowrap"
             >

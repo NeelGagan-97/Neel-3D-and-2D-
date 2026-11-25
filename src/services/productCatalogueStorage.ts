@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import readXlsxFile from 'read-excel-file/universal';
 import {
   CatalogueCategory,
   ManufacturerName,
@@ -6,8 +6,87 @@ import {
   ProductCatalogueItem,
 } from '../types/catalogue';
 import { ElectricalItemType } from '../types/design';
+import { formatSafeCsvRow, sanitizeCsvTextValue } from '../utils/csvSecurity';
+import { sanitizeSafeUrl, validateSafeUrl } from '../utils/urlSecurity';
 
 const CATALOGUE_STORAGE_KEY = 'blue_space_product_catalogue_v1';
+
+export const SPREADSHEET_LIMITS = {
+  maxFileSizeBytes: 5 * 1024 * 1024, // 5 MB
+  maxSheets: 10,
+  maxRows: 5_000,
+  maxColumns: 50,
+  maxCellLength: 2_000,
+} as const;
+
+const FORBIDDEN_HEADER_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+const RECOGNIZED_PRODUCT_NAME_HEADERS = new Set([
+  'productname',
+  'name',
+  'product',
+  'description',
+  'title',
+]);
+
+const RECOGNIZED_ANY_HEADERS = new Set([
+  ...RECOGNIZED_PRODUCT_NAME_HEADERS,
+  'category',
+  'productcategory',
+  'type',
+  'manufacturer',
+  'make',
+  'vendor',
+  'company',
+  'brand',
+  'series',
+  'range',
+  'modelnumber',
+  'model',
+  'sku',
+  'partnumber',
+  'catalogcode',
+  'code',
+  'specification',
+  'specs',
+  'technicalspecification',
+  'details',
+  'rating',
+  'electricalrating',
+  'voltagecurrent',
+  'wattagew',
+  'wattage',
+  'watts',
+  'powerw',
+  'cablesizesqmm',
+  'cablesize',
+  'sqmm',
+  'crosssection',
+  'dimensions',
+  'size',
+  'dimension',
+  'unit',
+  'uom',
+  'unitprice',
+  'price',
+  'rate',
+  'mrp',
+  'cost',
+  'gstpercent',
+  'gst',
+  'taxpercent',
+  'tax',
+  'imageurl',
+  'image',
+  'photo',
+  'datasheeturl',
+  'datasheet',
+  'specsheet',
+  'manufacturerurl',
+  'producturl',
+  'url',
+  'website',
+]);
 
 export const CATALOGUE_CATEGORIES: CatalogueCategory[] = [
   'Cables & Wires',
@@ -175,18 +254,24 @@ function normalizeCategory(raw: string): CatalogueCategory {
   return 'Electrical Appliances';
 }
 
-function parseOptionalNumber(val: unknown): number | null {
-  if (val === null || val === undefined || val === '') return null;
-  const n = Number(String(val).replace(/[₹,\s%]/g, '').trim());
-  return Number.isFinite(n) ? n : null;
+function parseOptionalNumber(val: unknown): { value: number | null; invalid: boolean } {
+  if (val === null || val === undefined || val === '') return { value: null, invalid: false };
+  if (typeof val === 'number') {
+    return Number.isFinite(val) ? { value: val, invalid: false } : { value: null, invalid: true };
+  }
+  const str = String(val).replace(/[₹,\s%]/g, '').trim();
+  if (!str) return { value: null, invalid: false };
+  const n = Number(str);
+  return Number.isFinite(n) ? { value: n, invalid: false } : { value: null, invalid: true };
 }
 
-function sanitizeSafeUrl(val: unknown): string | undefined {
-  if (typeof val !== 'string') return undefined;
-  const trimmed = val.trim();
-  if (!trimmed) return undefined;
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return undefined;
+function sanitizeStoredProductUrls(item: ProductCatalogueItem): ProductCatalogueItem {
+  return {
+    ...item,
+    imageUrl: sanitizeSafeUrl(item.imageUrl),
+    datasheetUrl: sanitizeSafeUrl(item.datasheetUrl),
+    manufacturerUrl: sanitizeSafeUrl(item.manufacturerUrl),
+  };
 }
 
 export function loadCatalogueProducts(): ProductCatalogueItem[] {
@@ -195,10 +280,12 @@ export function loadCatalogueProducts(): ProductCatalogueItem[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is ProductCatalogueItem =>
-        Boolean(item && typeof item.id === 'string' && typeof item.productName === 'string')
-    );
+    return parsed
+      .filter(
+        (item): item is ProductCatalogueItem =>
+          Boolean(item && typeof item.id === 'string' && typeof item.productName === 'string')
+      )
+      .map(sanitizeStoredProductUrls);
   } catch {
     return [];
   }
@@ -206,7 +293,8 @@ export function loadCatalogueProducts(): ProductCatalogueItem[] {
 
 export function saveCatalogueProducts(items: ProductCatalogueItem[]): void {
   try {
-    localStorage.setItem(CATALOGUE_STORAGE_KEY, JSON.stringify(items));
+    const sanitized = items.map(sanitizeStoredProductUrls);
+    localStorage.setItem(CATALOGUE_STORAGE_KEY, JSON.stringify(sanitized));
   } catch {
     // ignore storage quota errors
   }
@@ -216,12 +304,12 @@ export function addCatalogueProduct(
   item: Omit<ProductCatalogueItem, 'id' | 'updatedAt'>
 ): ProductCatalogueItem[] {
   const existing = loadCatalogueProducts();
-  const created: ProductCatalogueItem = {
+  const created: ProductCatalogueItem = sanitizeStoredProductUrls({
     ...item,
     id: `cat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     mappedItemType: item.mappedItemType ?? inferMappedItemType(item.category, item.productName),
     updatedAt: new Date().toISOString(),
-  };
+  });
   const next = [created, ...existing];
   saveCatalogueProducts(next);
   return next;
@@ -234,11 +322,11 @@ export function updateCatalogueProduct(
   const existing = loadCatalogueProducts();
   const next = existing.map((item) =>
     item.id === id
-      ? {
+      ? sanitizeStoredProductUrls({
           ...item,
           ...patch,
           updatedAt: new Date().toISOString(),
-        }
+        })
       : item
   );
   saveCatalogueProducts(next);
@@ -257,55 +345,398 @@ export interface CatalogueImportResult {
   errors: string[];
 }
 
+export interface SpreadsheetFileMeta {
+  name?: string;
+  type?: string;
+  size?: number;
+}
+
+function isZipSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x50 && // P
+    bytes[1] === 0x4b && // K
+    (bytes[2] === 0x03 || bytes[2] === 0x05 || bytes[2] === 0x07) &&
+    (bytes[3] === 0x04 || bytes[3] === 0x06 || bytes[3] === 0x08)
+  );
+}
+
+function isLegacyOleSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 8 &&
+    bytes[0] === 0xd0 &&
+    bytes[1] === 0xcf &&
+    bytes[2] === 0x11 &&
+    bytes[3] === 0xe0
+  );
+}
+
+function looksLikeTextCsv(bytes: Uint8Array): boolean {
+  const sampleLen = Math.min(bytes.length, 4096);
+  let nullBytes = 0;
+  for (let i = 0; i < sampleLen; i++) {
+    if (bytes[i] === 0x00) {
+      nullBytes += 1;
+    }
+  }
+  return nullBytes === 0;
+}
+
 /**
- * Parses an administrator-supplied Excel (.xlsx/.xls) or CSV spreadsheet into verified ProductCatalogueItems.
+ * Validates file extension, MIME type, size, and magic bytes before parsing.
+ * Accepts modern .xlsx (OOXML ZIP) and .csv files; rejects legacy binary .xls, macro .xlsm, and oversized/malformed uploads.
+ */
+export function validateSpreadsheetUpload(
+  bytes: Uint8Array,
+  meta?: SpreadsheetFileMeta
+): { ok: true; format: 'xlsx' | 'csv' } | { ok: false; error: string } {
+  const byteSize = meta?.size ?? bytes.byteLength;
+  if (bytes.byteLength === 0 || byteSize === 0) {
+    return { ok: false, error: 'Uploaded spreadsheet file is empty.' };
+  }
+  if (byteSize > SPREADSHEET_LIMITS.maxFileSizeBytes || bytes.byteLength > SPREADSHEET_LIMITS.maxFileSizeBytes) {
+    return {
+      ok: false,
+      error: `Spreadsheet exceeds maximum allowed size (${Math.round(SPREADSHEET_LIMITS.maxFileSizeBytes / (1024 * 1024))} MB).`,
+    };
+  }
+
+  const rawName = (meta?.name ?? '').trim();
+  const extMatch = rawName ? /\.([a-z0-9]+)$/i.exec(rawName) : null;
+  const ext = extMatch ? extMatch[1].toLowerCase() : '';
+
+  if (ext === 'xls') {
+    return {
+      ok: false,
+      error: 'Legacy binary .xls files are not supported. Save the spreadsheet as .xlsx or .csv and upload again.',
+    };
+  }
+  if (ext === 'xlsm' || ext === 'xlsb') {
+    return {
+      ok: false,
+      error: 'Macro-enabled or binary Excel workbooks (.xlsm / .xlsb) are not permitted. Export as .xlsx or .csv.',
+    };
+  }
+  if (ext && ext !== 'xlsx' && ext !== 'csv') {
+    return {
+      ok: false,
+      error: `Unsupported file extension ".${ext}". Upload a .xlsx or .csv spreadsheet.`,
+    };
+  }
+
+  if (isLegacyOleSignature(bytes)) {
+    return {
+      ok: false,
+      error: 'Legacy binary .xls file detected. Convert to .xlsx or .csv before importing.',
+    };
+  }
+
+  const mime = (meta?.type ?? '').trim().toLowerCase();
+  const isZip = isZipSignature(bytes);
+
+  if (ext === 'xlsx') {
+    if (!isZip) {
+      return {
+        ok: false,
+        error: 'Invalid .xlsx file: file signature does not match an OOXML workbook.',
+      };
+    }
+    if (
+      mime &&
+      mime !== 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' &&
+      mime !== 'application/octet-stream' &&
+      mime !== 'application/zip'
+    ) {
+      return {
+        ok: false,
+        error: `Unexpected MIME type "${mime}" for .xlsx upload.`,
+      };
+    }
+    return { ok: true, format: 'xlsx' };
+  }
+
+  if (ext === 'csv') {
+    if (isZip || !looksLikeTextCsv(bytes)) {
+      return {
+        ok: false,
+        error: 'Invalid .csv file: binary content detected.',
+      };
+    }
+    if (
+      mime &&
+      mime !== 'text/csv' &&
+      mime !== 'text/plain' &&
+      mime !== 'application/vnd.ms-excel' &&
+      mime !== 'application/csv' &&
+      mime !== 'application/octet-stream'
+    ) {
+      return {
+        ok: false,
+        error: `Unexpected MIME type "${mime}" for .csv upload.`,
+      };
+    }
+    return { ok: true, format: 'csv' };
+  }
+
+  // Fallback when filename wasn't supplied (e.g., programmatic ArrayBuffer calls)
+  if (isZip) {
+    return { ok: true, format: 'xlsx' };
+  }
+  if (looksLikeTextCsv(bytes)) {
+    return { ok: true, format: 'csv' };
+  }
+  return {
+    ok: false,
+    error: 'Unrecognized spreadsheet format. Upload a valid .xlsx or .csv file.',
+  };
+}
+
+/**
+ * Safe RFC-4180 CSV parser with strict row and column limits.
+ */
+function parseCsvRows(text: string): { rows: string[][]; error?: string } {
+  const cleaned = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (cleaned[i + 1] === '"') {
+          field += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += ch;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      if (field.length === 0) {
+        inQuotes = true;
+      } else {
+        field += ch;
+      }
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+      if (row.length > SPREADSHEET_LIMITS.maxColumns) {
+        return {
+          rows: [],
+          error: `Spreadsheet exceeds the maximum allowed column count (${SPREADSHEET_LIMITS.maxColumns}).`,
+        };
+      }
+    } else if (ch === '\r' || ch === '\n') {
+      if (ch === '\r' && cleaned[i + 1] === '\n') {
+        i += 1;
+      }
+      row.push(field);
+      field = '';
+      if (row.some((c) => c.trim() !== '')) {
+        rows.push(row);
+        if (rows.length > SPREADSHEET_LIMITS.maxRows + 1) {
+          return {
+            rows: [],
+            error: `Spreadsheet exceeds the maximum allowed row count (${SPREADSHEET_LIMITS.maxRows} data rows).`,
+          };
+        }
+      }
+      row = [];
+    } else {
+      field += ch;
+    }
+  }
+
+  if (inQuotes) {
+    return { rows: [], error: 'Malformed CSV file: unterminated quoted value.' };
+  }
+
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    if (row.length > SPREADSHEET_LIMITS.maxColumns) {
+      return {
+        rows: [],
+        error: `Spreadsheet exceeds the maximum allowed column count (${SPREADSHEET_LIMITS.maxColumns}).`,
+      };
+    }
+    if (row.some((c) => c.trim() !== '')) {
+      rows.push(row);
+    }
+  }
+
+  return { rows };
+}
+
+function normalizeHeaderKey(rawHeader: unknown): string {
+  const raw = String(rawHeader ?? '').trim().toLowerCase();
+  if (FORBIDDEN_HEADER_KEYS.has(raw)) return '';
+  const cleaned = raw.replace(/[^a-z0-9]/g, '');
+  if (!cleaned || FORBIDDEN_HEADER_KEYS.has(cleaned)) return '';
+  return cleaned;
+}
+
+function sanitizeImportedText(val: unknown): string {
+  if (val === null || val === undefined) return '';
+  const str = String(val).replace(/\0/g, '').trim();
+  if (!str) return '';
+  const truncated =
+    str.length > SPREADSHEET_LIMITS.maxCellLength
+      ? str.slice(0, SPREADSHEET_LIMITS.maxCellLength)
+      : str;
+  // Neutralize leading spreadsheet formula characters if present in imported text
+  return sanitizeCsvTextValue(truncated);
+}
+
+/**
+ * Parses an administrator-supplied Excel (.xlsx) or CSV spreadsheet into verified ProductCatalogueItems.
+ * Enforces strict upload validation, structural limits, safe URL validation, and prototype-pollution protection.
  * Never fabricates missing prices, specs, or model numbers — leaves missing numeric fields as null.
  */
-export function parseCatalogueSpreadsheet(buffer: ArrayBuffer): CatalogueImportResult {
+export async function parseCatalogueSpreadsheet(
+  input: ArrayBuffer | Uint8Array,
+  meta?: SpreadsheetFileMeta
+): Promise<CatalogueImportResult> {
   const errors: string[] = [];
   const items: ProductCatalogueItem[] = [];
 
   try {
-    const workbook = XLSX.read(buffer, { type: 'array' });
-    const firstSheetName = workbook.SheetNames[0];
-    if (!firstSheetName) {
-      return { items: [], errors: ['Spreadsheet contains no worksheets.'] };
+    const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+    const validation = validateSpreadsheetUpload(bytes, meta);
+    if (!validation.ok) {
+      return { items: [], errors: [validation.error] };
     }
-    const sheet = workbook.Sheets[firstSheetName];
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
 
-    if (rows.length === 0) {
+    let rawRows: unknown[][];
+
+    if (validation.format === 'xlsx') {
+      const sheets = await readXlsxFile(bytes);
+      if (!Array.isArray(sheets) || sheets.length === 0) {
+        return { items: [], errors: ['Spreadsheet contains no worksheets.'] };
+      }
+      if (sheets.length > SPREADSHEET_LIMITS.maxSheets) {
+        return {
+          items: [],
+          errors: [
+            `Spreadsheet has ${sheets.length} worksheets, exceeding the maximum allowed (${SPREADSHEET_LIMITS.maxSheets}).`,
+          ],
+        };
+      }
+      rawRows = sheets[0].data as unknown[][];
+    } else {
+      const decoder = new TextDecoder('utf-8', { fatal: false });
+      const csvParsed = parseCsvRows(decoder.decode(bytes));
+      if (csvParsed.error) {
+        return { items: [], errors: [csvParsed.error] };
+      }
+      rawRows = csvParsed.rows;
+    }
+
+    if (!rawRows || rawRows.length === 0) {
       return { items: [], errors: ['Spreadsheet worksheet is empty.'] };
+    }
+
+    if (rawRows.length - 1 > SPREADSHEET_LIMITS.maxRows) {
+      return {
+        items: [],
+        errors: [
+          `Spreadsheet contains ${rawRows.length - 1} rows, exceeding the maximum allowed (${SPREADSHEET_LIMITS.maxRows}).`,
+        ],
+      };
+    }
+
+    const headerRow = rawRows[0];
+    if (!Array.isArray(headerRow) || headerRow.length === 0) {
+      return { items: [], errors: ['Spreadsheet is missing a header row.'] };
+    }
+    if (headerRow.length > SPREADSHEET_LIMITS.maxColumns) {
+      return {
+        items: [],
+        errors: [
+          `Spreadsheet contains ${headerRow.length} columns, exceeding the maximum allowed (${SPREADSHEET_LIMITS.maxColumns}).`,
+        ],
+      };
+    }
+
+    // Reject prototype-pollution headers explicitly
+    for (const rawCell of headerRow) {
+      const rawKey = String(rawCell ?? '').trim().toLowerCase();
+      if (FORBIDDEN_HEADER_KEYS.has(rawKey)) {
+        return {
+          items: [],
+          errors: [`Spreadsheet contains a prohibited column header ("${rawKey}").`],
+        };
+      }
+    }
+
+    const normalizedHeaders = headerRow.map((h) => normalizeHeaderKey(h));
+    const hasRecognizedHeader = normalizedHeaders.some((h) => RECOGNIZED_ANY_HEADERS.has(h));
+    const hasProductNameHeader = normalizedHeaders.some((h) =>
+      RECOGNIZED_PRODUCT_NAME_HEADERS.has(h)
+    );
+
+    if (!hasRecognizedHeader || !hasProductNameHeader) {
+      return {
+        items: [],
+        errors: [
+          'Spreadsheet header row does not contain the expected catalogue columns (at minimum a "Product Name" column). Download the CSV Template for the expected structure.',
+        ],
+      };
+    }
+
+    const dataRows = rawRows.slice(1);
+    if (dataRows.length === 0) {
+      return { items: [], errors: ['Spreadsheet contains headers but no product rows.'] };
     }
 
     const now = new Date().toISOString();
 
-    rows.forEach((rawRow, idx) => {
-      // Case-insensitive header lookup
+    dataRows.forEach((cells, idx) => {
+      const rowNum = idx + 2;
+      if (!Array.isArray(cells)) return;
+      if (cells.length > SPREADSHEET_LIMITS.maxColumns) {
+        errors.push(`Row ${rowNum}: Skipped because it exceeds the maximum allowed column count.`);
+        return;
+      }
+
+      const isBlankRow = cells.every(
+        (c) => c === null || c === undefined || String(c).trim() === ''
+      );
+      if (isBlankRow) return;
+
       const normalizedMap = new Map<string, unknown>();
-      Object.entries(rawRow).forEach(([k, v]) => {
-        normalizedMap.set(k.trim().toLowerCase().replace(/[^a-z0-9]/g, ''), v);
+      normalizedHeaders.forEach((key, colIdx) => {
+        if (key && !normalizedMap.has(key)) {
+          normalizedMap.set(key, cells[colIdx]);
+        }
       });
 
-      const getStr = (...keys: string[]): string => {
+      const getRaw = (...keys: string[]): unknown => {
         for (const k of keys) {
           const val = normalizedMap.get(k);
           if (val !== undefined && val !== null && String(val).trim() !== '') {
-            return String(val).trim();
+            return val;
           }
         }
-        return '';
+        return undefined;
       };
 
+      const getStr = (...keys: string[]): string => sanitizeImportedText(getRaw(...keys));
+
       const productName = getStr('productname', 'name', 'product', 'description', 'title');
+      if (!productName) {
+        errors.push(`Row ${rowNum}: Skipped because Product Name is blank.`);
+        return;
+      }
+
       const manufacturer = getStr('manufacturer', 'make', 'vendor', 'company');
       const modelNumber = getStr('modelnumber', 'model', 'sku', 'partnumber', 'catalogcode', 'code');
       const rawCategory = getStr('category', 'productcategory', 'type');
-
-      if (!productName) {
-        errors.push(`Row ${idx + 2}: Skipped because Product Name is blank.`);
-        return;
-      }
 
       const category = normalizeCategory(rawCategory || productName);
       const brand = getStr('brand', 'series', 'range') || manufacturer || 'Unspecified';
@@ -314,18 +745,49 @@ export function parseCatalogueSpreadsheet(buffer: ArrayBuffer): CatalogueImportR
       const dimensions = getStr('dimensions', 'size', 'dimension');
       const unit = getStr('unit', 'uom') || (category === 'Cables & Wires' ? 'm' : 'Nos');
 
-      const wattageW = parseOptionalNumber(getStr('wattagew', 'wattage', 'watts', 'powerw'));
-      const cableSizeSqMm = parseOptionalNumber(
-        getStr('cablesizesqmm', 'cablesize', 'sqmm', 'crosssection')
+      const wattageParsed = parseOptionalNumber(getRaw('wattagew', 'wattage', 'watts', 'powerw'));
+      const cableSizeParsed = parseOptionalNumber(
+        getRaw('cablesizesqmm', 'cablesize', 'sqmm', 'crosssection')
       );
-      const unitPrice = parseOptionalNumber(getStr('unitprice', 'price', 'rate', 'mrp', 'cost'));
-      const gstPercent = parseOptionalNumber(getStr('gstpercent', 'gst', 'taxpercent', 'tax'));
+      const unitPriceParsed = parseOptionalNumber(getRaw('unitprice', 'price', 'rate', 'mrp', 'cost'));
+      const gstParsed = parseOptionalNumber(getRaw('gstpercent', 'gst', 'taxpercent', 'tax'));
 
-      const imageUrl = sanitizeSafeUrl(getStr('imageurl', 'image', 'photo'));
-      const datasheetUrl = sanitizeSafeUrl(getStr('datasheeturl', 'datasheet', 'specsheet'));
-      const manufacturerUrl = sanitizeSafeUrl(
-        getStr('manufacturerurl', 'producturl', 'url', 'website')
-      );
+      if (wattageParsed.invalid || (wattageParsed.value !== null && wattageParsed.value < 0)) {
+        errors.push(`Row ${rowNum}: Skipped due to invalid Wattage value.`);
+        return;
+      }
+      if (cableSizeParsed.invalid || (cableSizeParsed.value !== null && cableSizeParsed.value <= 0)) {
+        errors.push(`Row ${rowNum}: Skipped due to invalid Cable Size (sq.mm) value.`);
+        return;
+      }
+      if (unitPriceParsed.invalid || (unitPriceParsed.value !== null && unitPriceParsed.value < 0)) {
+        errors.push(`Row ${rowNum}: Skipped due to invalid Unit Price value.`);
+        return;
+      }
+      if (gstParsed.invalid || (gstParsed.value !== null && (gstParsed.value < 0 || gstParsed.value > 100))) {
+        errors.push(`Row ${rowNum}: Skipped due to invalid GST % value (must be 0–100).`);
+        return;
+      }
+
+      const rawImageUrl = String(getRaw('imageurl', 'image', 'photo') ?? '').trim();
+      const rawDatasheetUrl = String(getRaw('datasheeturl', 'datasheet', 'specsheet') ?? '').trim();
+      const rawManufacturerUrl = String(
+        getRaw('manufacturerurl', 'producturl', 'url', 'website') ?? ''
+      ).trim();
+
+      const imageCheck = validateSafeUrl(rawImageUrl, 'Image URL');
+      const datasheetCheck = validateSafeUrl(rawDatasheetUrl, 'Datasheet URL');
+      const manufacturerCheck = validateSafeUrl(rawManufacturerUrl, 'Manufacturer URL');
+
+      if (!imageCheck.valid) {
+        errors.push(`Row ${rowNum}: ${imageCheck.error} (Image URL omitted)`);
+      }
+      if (!datasheetCheck.valid) {
+        errors.push(`Row ${rowNum}: ${datasheetCheck.error} (Datasheet URL omitted)`);
+      }
+      if (!manufacturerCheck.valid) {
+        errors.push(`Row ${rowNum}: ${manufacturerCheck.error} (Manufacturer URL omitted)`);
+      }
 
       items.push({
         id: `cat-imp-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 5)}`,
@@ -334,17 +796,17 @@ export function parseCatalogueSpreadsheet(buffer: ArrayBuffer): CatalogueImportR
         brand,
         productName,
         modelNumber: modelNumber || 'Not specified',
-        imageUrl,
+        imageUrl: imageCheck.valid ? imageCheck.normalized : undefined,
         specification,
         rating,
-        wattageW,
-        cableSizeSqMm,
+        wattageW: wattageParsed.value,
+        cableSizeSqMm: cableSizeParsed.value,
         dimensions,
         unit,
-        unitPrice,
-        gstPercent,
-        datasheetUrl,
-        manufacturerUrl,
+        unitPrice: unitPriceParsed.value,
+        gstPercent: gstParsed.value,
+        datasheetUrl: datasheetCheck.valid ? datasheetCheck.normalized : undefined,
+        manufacturerUrl: manufacturerCheck.valid ? manufacturerCheck.normalized : undefined,
         mappedItemType: inferMappedItemType(category, productName),
         source: 'csv-import',
         updatedAt: now,
@@ -380,10 +842,10 @@ export function downloadCatalogueCsvTemplate(): void {
     'Manufacturer URL',
   ];
 
-  // Header-only template plus one clearly marked placeholder comment row that has no fake SKU/price
+  // Header-only template plus one clearly marked placeholder row that has no fake SKU/price
   const csv = [
-    headers.join(','),
-    [
+    formatSafeCsvRow(headers),
+    formatSafeCsvRow([
       'Cables & Wires',
       'Polycab',
       'Enter Brand / Series',
@@ -392,17 +854,15 @@ export function downloadCatalogueCsvTemplate(): void {
       'Enter Verified Datasheet Specification',
       '1100V',
       '',
-      '2.5',
+      2.5,
       '',
       'm',
       '',
-      '18',
+      18,
       '',
       'https://polycab.com/',
       'https://polycab.com/',
-    ]
-      .map((cell) => `"${cell.replace(/"/g, '""')}"`)
-      .join(','),
+    ]),
   ].join('\n');
 
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });

@@ -875,20 +875,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     loadedUserIdRef.current = null;
     inFlightProfileRef.current = null;
     try {
-      await signOutUser();
+      await withTimeout(signOutUser(), 5_000, 'Sign out');
     } catch (err) {
       if (typeof import.meta !== 'undefined' && import.meta.env?.DEV) {
         console.error('[Auth] Error clearing temporary recovery session:', err);
       }
+    } finally {
+      setSession(null);
+      setUser(null);
+      setProfile(null);
+      setProfileError(null);
+      setProfileErrorKind(null);
+      setIsRecoveryMode(false);
+      setRecoveryError(null);
+      setSessionNotice(null);
     }
-    setSession(null);
-    setUser(null);
-    setProfile(null);
-    setProfileError(null);
-    setProfileErrorKind(null);
-    setIsRecoveryMode(false);
-    setRecoveryError(null);
-    setSessionNotice(null);
   }, []);
 
   const handleClearSessionNotice = useCallback(() => {

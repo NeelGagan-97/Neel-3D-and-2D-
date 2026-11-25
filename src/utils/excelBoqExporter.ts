@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import writeXlsxFile, { type Cell, type Row, type Sheet } from 'write-excel-file/universal';
 import { ProjectData } from '../types/design';
 import {
   BoqPriceSource,
@@ -12,11 +12,18 @@ import {
   validateCableSizeForCircuit,
   WIRE_CATEGORY_LABELS,
 } from './buildingWiring';
+import { sanitizeCsvTextValue } from './csvSecurity';
 import { formatArea, formatLength, getItemFloor } from './geometry';
 
 export interface ExcelBoqOptions {
   /** Optional configurable wastage / procurement allowance % for cables (0 by default so raw geometry length is unambiguous) */
   cableAllowancePercent?: number;
+}
+
+export interface ExcelBoqSheetDefinition {
+  name: string;
+  rows: (string | number)[][];
+  columnWidths: number[];
 }
 
 const PRICE_SOURCE_LABEL: Record<BoqPriceSource, string> = {
@@ -30,11 +37,35 @@ function safeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9-_]+/g, '_').replace(/^_+|_+$/g, '') || 'Blue_Space_Project';
 }
 
-export function buildExcelBoqWorkbook(
+function toSafeExcelCell(val: string | number | null | undefined): Cell {
+  if (val === null || val === undefined || val === '') {
+    return null;
+  }
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val)) return null;
+    return { value: val, type: Number };
+  }
+  const safeText = sanitizeCsvTextValue(String(val));
+  return { value: safeText, type: String };
+}
+
+function toWriteExcelSheet(def: ExcelBoqSheetDefinition): Sheet<Blob> {
+  const data: Row[] = def.rows.map((row) => row.map((cell) => toSafeExcelCell(cell)));
+  return {
+    sheet: def.name,
+    data,
+    columns: def.columnWidths.map((width) => ({ width })),
+  };
+}
+
+/**
+ * Pure, synchronous multi-sheet BOQ structure builder (6 reconciled sheets).
+ * Preserves exact sheet names, column headers, column widths, and reconciled totals.
+ */
+export function buildExcelBoqSheets(
   project: ProjectData,
   options: ExcelBoqOptions = {}
-): XLSX.WorkBook {
-  const wb = XLSX.utils.book_new();
+): ExcelBoqSheetDefinition[] {
   const reconciled = computeReconciledElectricalSchedule(project);
   const boq = computeReconciledBoq(project, options);
   const floors = getProjectFloors(project);
@@ -42,7 +73,7 @@ export function buildExcelBoqWorkbook(
   const units = project.site.units;
 
   // SHEET 1: Consolidated BOQ (100% reconciled with PDF Sheet S-01 & Project Summary)
-  const sheet1Header = [
+  const sheet1Header: (string | number)[][] = [
     ['BLUE SPACE — ELECTRICAL BILL OF QUANTITIES (CONSOLIDATED BOQ)'],
     [
       `Project: ${project.name}`,
@@ -80,7 +111,7 @@ export function buildExcelBoqWorkbook(
     ],
   ];
 
-  const sheet1Rows = boq.rows.map((r) => [
+  const sheet1Rows: (string | number)[][] = boq.rows.map((r) => [
     r.productCategory,
     r.manufacturer,
     r.brand,
@@ -101,7 +132,7 @@ export function buildExcelBoqWorkbook(
     r.notes,
   ]);
 
-  const sheet1Footer = [
+  const sheet1Footer: (string | number)[][] = [
     [],
     [
       'CONFIGURED SUBTOTAL (EXCL. GST)',
@@ -169,79 +200,53 @@ export function buildExcelBoqWorkbook(
     ],
   ];
 
-  const ws1 = XLSX.utils.aoa_to_sheet([...sheet1Header, ...sheet1Rows, ...sheet1Footer]);
-  ws1['!cols'] = [
-    { wch: 22 },
-    { wch: 18 },
-    { wch: 16 },
-    { wch: 32 },
-    { wch: 18 },
-    { wch: 36 },
-    { wch: 22 },
-    { wch: 13 },
-    { wch: 13 },
-    { wch: 14 },
-    { wch: 8 },
-    { wch: 10 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 12 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 40 },
-  ];
-  XLSX.utils.book_append_sheet(wb, ws1, 'Consolidated BOQ');
+  const sheet1: ExcelBoqSheetDefinition = {
+    name: 'Consolidated BOQ',
+    rows: [...sheet1Header, ...sheet1Rows, ...sheet1Footer],
+    columnWidths: [22, 18, 16, 32, 18, 36, 22, 13, 13, 14, 8, 10, 16, 16, 12, 16, 16, 40],
+  };
 
   // SHEET 2: Category Subtotals (100% reconciled with Consolidated BOQ)
-  const ws2Data: (string | number)[][] = [
-    ['CATEGORY SUBTOTALS (RECONCILED WITH CONSOLIDATED BOQ)'],
-    [
-      'Product Category',
-      'Line Items',
-      'Total Quantity',
-      'Unit',
-      'Total Load (W)',
-      'Subtotal (INR)',
-      'GST Amount (INR)',
-      'Total (INR)',
-      'Unpriced Lines',
+  const sheet2: ExcelBoqSheetDefinition = {
+    name: 'Category Subtotals',
+    rows: [
+      ['CATEGORY SUBTOTALS (RECONCILED WITH CONSOLIDATED BOQ)'],
+      [
+        'Product Category',
+        'Line Items',
+        'Total Quantity',
+        'Unit',
+        'Total Load (W)',
+        'Subtotal (INR)',
+        'GST Amount (INR)',
+        'Total (INR)',
+        'Unpriced Lines',
+      ],
+      ...boq.categorySubtotals.map((v) => [
+        v.category,
+        v.itemLines,
+        v.totalQty,
+        v.unit,
+        v.totalLoadW,
+        v.subtotal,
+        v.gstAmount,
+        v.total,
+        v.unpricedLines,
+      ]),
+      [
+        'RECONCILED TOTAL',
+        boq.rows.length,
+        '',
+        '',
+        boq.totalLoadWatts,
+        boq.subtotalConfigured,
+        boq.totalGstConfigured,
+        boq.grandTotalConfigured,
+        boq.unpricedRowCount,
+      ],
     ],
-    ...boq.categorySubtotals.map((v) => [
-      v.category,
-      v.itemLines,
-      v.totalQty,
-      v.unit,
-      v.totalLoadW,
-      v.subtotal,
-      v.gstAmount,
-      v.total,
-      v.unpricedLines,
-    ]),
-    [
-      'RECONCILED TOTAL',
-      boq.rows.length,
-      '',
-      '',
-      boq.totalLoadWatts,
-      boq.subtotalConfigured,
-      boq.totalGstConfigured,
-      boq.grandTotalConfigured,
-      boq.unpricedRowCount,
-    ],
-  ];
-  const ws2 = XLSX.utils.aoa_to_sheet(ws2Data);
-  ws2['!cols'] = [
-    { wch: 24 },
-    { wch: 12 },
-    { wch: 14 },
-    { wch: 10 },
-    { wch: 14 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 14 },
-  ];
-  XLSX.utils.book_append_sheet(wb, ws2, 'Category Subtotals');
+    columnWidths: [24, 12, 14, 10, 14, 16, 16, 16, 14],
+  };
 
   // SHEET 3: Floor-Wise BOQ (Independent per-floor components, routed cables, GST & explicit Floor Subtotals)
   const floorSheetRows: (string | number)[][] = [
@@ -344,26 +349,11 @@ export function buildExcelBoqWorkbook(
     Number(floorWiseGrandSum.toFixed(2)),
   ]);
 
-  const ws3 = XLSX.utils.aoa_to_sheet(floorSheetRows);
-  ws3['!cols'] = [
-    { wch: 24 },
-    { wch: 13 },
-    { wch: 24 },
-    { wch: 18 },
-    { wch: 32 },
-    { wch: 18 },
-    { wch: 20 },
-    { wch: 14 },
-    { wch: 8 },
-    { wch: 10 },
-    { wch: 14 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 12 },
-    { wch: 16 },
-    { wch: 16 },
-  ];
-  XLSX.utils.book_append_sheet(wb, ws3, 'Floor-Wise BOQ');
+  const sheet3: ExcelBoqSheetDefinition = {
+    name: 'Floor-Wise BOQ',
+    rows: floorSheetRows,
+    columnWidths: [24, 13, 24, 18, 32, 18, 20, 14, 8, 10, 14, 16, 16, 12, 16, 16],
+  };
 
   // SHEET 4: Cable & Wiring Schedule
   const pointById = new Map(project.points.map((p) => [p.id, p]));
@@ -384,6 +374,7 @@ export function buildExcelBoqWorkbook(
       'Manufacturer / Model',
       'Routed Length (m)',
       'Rate / m (INR)',
+      'GST %',
       'Validation Status',
     ],
   ];
@@ -393,6 +384,26 @@ export function buildExcelBoqWorkbook(
     const toPt = pointById.get(w.toPointId);
     const lenM = computeWireLengthMeters(w, project);
     const sizeCheck = validateCableSizeForCircuit(w.circuit, w.cableSizeSqMm);
+    const cktCfg = w.circuit ? project.circuitCableConfigs?.[w.circuit] : undefined;
+    const effectiveRate =
+      typeof w.unitPricePerM === 'number' && Number.isFinite(w.unitPricePerM) && w.unitPricePerM > 0
+        ? w.unitPricePerM
+        : typeof cktCfg?.unitPricePerM === 'number' &&
+            Number.isFinite(cktCfg.unitPricePerM) &&
+            cktCfg.unitPricePerM > 0
+          ? cktCfg.unitPricePerM
+          : null;
+    const effectiveGst =
+      typeof w.gstPercent === 'number' && Number.isFinite(w.gstPercent) && w.gstPercent >= 0
+        ? w.gstPercent
+        : typeof cktCfg?.gstPercent === 'number' &&
+            Number.isFinite(cktCfg.gstPercent) &&
+            cktCfg.gstPercent >= 0
+          ? cktCfg.gstPercent
+          : null;
+    const mfr = w.manufacturer || cktCfg?.manufacturer;
+    const mdl = w.modelNumber || cktCfg?.modelNumber;
+
     cableScheduleRows.push([
       w.code,
       fromPt ? `${fromPt.code} (${fromPt.name})` : w.fromPointId,
@@ -405,9 +416,10 @@ export function buildExcelBoqWorkbook(
       w.cableSizeSqMm !== null ? w.cableSizeSqMm : 'Not specified',
       w.cableMaterial,
       w.cores,
-      w.manufacturer ? `${w.manufacturer} ${w.modelNumber ?? ''}`.trim() : 'Not linked',
+      mfr ? `${mfr} ${mdl ?? ''}`.trim() : 'Not linked',
       lenM,
-      typeof w.unitPricePerM === 'number' && w.unitPricePerM > 0 ? w.unitPricePerM : 'Not configured',
+      effectiveRate !== null ? effectiveRate : 'Not configured',
+      effectiveGst !== null ? effectiveGst : 'Not configured',
       sizeCheck.status === 'ok' ? 'Within configured range' : sizeCheck.warning || 'Check sizing',
     ]);
   });
@@ -418,25 +430,11 @@ export function buildExcelBoqWorkbook(
     ]);
   }
 
-  const ws4 = XLSX.utils.aoa_to_sheet(cableScheduleRows);
-  ws4['!cols'] = [
-    { wch: 12 },
-    { wch: 24 },
-    { wch: 14 },
-    { wch: 24 },
-    { wch: 14 },
-    { wch: 16 },
-    { wch: 18 },
-    { wch: 20 },
-    { wch: 18 },
-    { wch: 12 },
-    { wch: 8 },
-    { wch: 24 },
-    { wch: 16 },
-    { wch: 15 },
-    { wch: 42 },
-  ];
-  XLSX.utils.book_append_sheet(wb, ws4, 'Cable & Wiring Schedule');
+  const sheet4: ExcelBoqSheetDefinition = {
+    name: 'Cable & Wiring Schedule',
+    rows: cableScheduleRows,
+    columnWidths: [12, 24, 14, 24, 14, 16, 18, 20, 18, 12, 8, 24, 16, 15, 10, 42],
+  };
 
   // SHEET 5: Reconciled Area, Circuit, Distribution Board & Earthing Schedule
   const circuitSheetRows: (string | number)[][] = [
@@ -562,49 +560,58 @@ export function buildExcelBoqWorkbook(
       : [['MISSING', 'No Main Earthing Point placed in project', '', '', '', '', '', '']]),
   ];
 
-  const ws5 = XLSX.utils.aoa_to_sheet(circuitSheetRows);
-  ws5['!cols'] = [
-    { wch: 28 },
-    { wch: 14 },
-    { wch: 22 },
-    { wch: 16 },
-    { wch: 12 },
-    { wch: 18 },
-    { wch: 20 },
-    { wch: 14 },
-    { wch: 16 },
-    { wch: 14 },
-    { wch: 16 },
-    { wch: 16 },
-  ];
-  XLSX.utils.book_append_sheet(wb, ws5, 'Circuit & DB Schedule');
+  const sheet5: ExcelBoqSheetDefinition = {
+    name: 'Circuit & DB Schedule',
+    rows: circuitSheetRows,
+    columnWidths: [28, 14, 22, 16, 12, 18, 20, 14, 16, 14, 16, 16],
+  };
 
   // SHEET 6: Engineering Validation Diagnostics
-  const diagRows: (string | number)[][] = [
-    ['ENGINEERING VALIDATION & DIAGNOSTICS'],
-    [
-      `Errors: ${reconciled.errorCount}`,
-      `Warnings: ${reconciled.warningCount}`,
-      `Info: ${reconciled.infoCount}`,
-      `Total Checks Logged: ${reconciled.issues.length}`,
+  const sheet6: ExcelBoqSheetDefinition = {
+    name: 'Diagnostics',
+    rows: [
+      ['ENGINEERING VALIDATION & DIAGNOSTICS'],
+      [
+        `Errors: ${reconciled.errorCount}`,
+        `Warnings: ${reconciled.warningCount}`,
+        `Info: ${reconciled.infoCount}`,
+        `Total Checks Logged: ${reconciled.issues.length}`,
+      ],
+      [],
+      ['Severity', 'Domain', 'Floor', 'Diagnostic Message'],
+      ...reconciled.issues.map((iss) => [
+        iss.severity.toUpperCase(),
+        iss.domain.toUpperCase(),
+        iss.floor !== undefined ? getFloorLabel(project, iss.floor) : 'Project-Wide',
+        iss.message,
+      ]),
     ],
-    [],
-    ['Severity', 'Domain', 'Floor', 'Diagnostic Message'],
-    ...reconciled.issues.map((iss) => [
-      iss.severity.toUpperCase(),
-      iss.domain.toUpperCase(),
-      iss.floor !== undefined ? getFloorLabel(project, iss.floor) : 'Project-Wide',
-      iss.message,
-    ]),
-  ];
-  const ws6 = XLSX.utils.aoa_to_sheet(diagRows);
-  ws6['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 18 }, { wch: 84 }];
-  XLSX.utils.book_append_sheet(wb, ws6, 'Diagnostics');
+    columnWidths: [12, 14, 18, 84],
+  };
 
-  return wb;
+  return [sheet1, sheet2, sheet3, sheet4, sheet5, sheet6];
 }
 
-export function downloadExcelBoq(project: ProjectData, options: ExcelBoqOptions = {}): void {
-  const wb = buildExcelBoqWorkbook(project, options);
-  XLSX.writeFile(wb, `${safeFileName(project.name)}_BOQ.xlsx`);
+export async function buildExcelBoqBlob(
+  project: ProjectData,
+  options: ExcelBoqOptions = {}
+): Promise<Blob> {
+  const sheetDefs = buildExcelBoqSheets(project, options);
+  const sheets = sheetDefs.map(toWriteExcelSheet);
+  return writeXlsxFile(sheets).toBlob();
+}
+
+export async function downloadExcelBoq(
+  project: ProjectData,
+  options: ExcelBoqOptions = {}
+): Promise<void> {
+  const blob = await buildExcelBoqBlob(project, options);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${safeFileName(project.name)}_BOQ.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }

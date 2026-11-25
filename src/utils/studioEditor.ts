@@ -5,11 +5,17 @@ import {
   ROOM_LIBRARY,
   siteToMeters,
 } from '../data/presets';
+import { ProductCatalogueItem } from '../types/catalogue';
 import {
   ArchitecturalOpening,
+  CableMaterial,
+  CircuitCableConfig,
+  CircuitId,
   CustomWall,
   ElectricalItemType,
   ElectricalPoint,
+  ElectricalWire,
+  FloorLevelConfig,
   FurnitureItem,
   ProjectData,
   RoomType,
@@ -17,7 +23,14 @@ import {
   StaircaseItem,
   StudioEntityRef,
 } from '../types/design';
-import { formatFloorLabel, getItemFloor } from './geometry';
+import {
+  buildCircuitCableWireFields,
+  getFloorLabel,
+  getNextWireSequence,
+  getProjectFloors,
+} from './buildingWiring';
+import { formatFloorLabel, getItemFloor, sliceProjectForFloor } from './geometry';
+import { sanitizeSafeUrl } from './urlSecurity';
 
 export const MAX_HISTORY_ENTRIES = 100;
 
@@ -1156,4 +1169,514 @@ export function resolve3DWalkDirectionFromCode(code: string): WalkDirection | nu
   if (code === 'KeyD' || code === 'ArrowRight') return 'right';
   return null;
 }
+
+export type ErasableStudioEntity =
+  | StudioEntityRef
+  | { kind: 'dimension'; id: string };
+
+/**
+ * Deletes a single entity by its stable ID.
+ * When deleting an electrical point, removes all wires connected to that point by stable
+ * fromPointId / toPointId (never by display label) while preserving unrelated components.
+ * When deleting a wire, preserves both connected electrical components.
+ */
+export function eraseEntityFromProject(
+  project: ProjectData,
+  entity: ErasableStudioEntity
+): { project: ProjectData; deleted: boolean; removedWireCount: number } {
+  if (entity.kind === 'room') {
+    const nextRooms = project.rooms.filter((r) => r.id !== entity.id);
+    return {
+      project: {
+        ...project,
+        rooms: nextRooms,
+      },
+      deleted: nextRooms.length !== project.rooms.length,
+      removedWireCount: 0,
+    };
+  }
+  if (entity.kind === 'wall') {
+    const nextWalls = project.customWalls.filter((w) => w.id !== entity.id);
+    return {
+      project: {
+        ...project,
+        customWalls: nextWalls,
+      },
+      deleted: nextWalls.length !== project.customWalls.length,
+      removedWireCount: 0,
+    };
+  }
+  if (entity.kind === 'opening') {
+    const nextOpenings = project.openings.filter((o) => o.id !== entity.id);
+    return {
+      project: {
+        ...project,
+        openings: nextOpenings,
+      },
+      deleted: nextOpenings.length !== project.openings.length,
+      removedWireCount: 0,
+    };
+  }
+  if (entity.kind === 'point') {
+    const nextPoints = project.points.filter((p) => p.id !== entity.id);
+    const prevWires = project.wires ?? [];
+    const nextWires = prevWires.filter(
+      (w) => w.fromPointId !== entity.id && w.toPointId !== entity.id
+    );
+    return {
+      project: {
+        ...project,
+        points: nextPoints,
+        wires: nextWires,
+      },
+      deleted: nextPoints.length !== project.points.length,
+      removedWireCount: prevWires.length - nextWires.length,
+    };
+  }
+  if (entity.kind === 'furniture') {
+    const nextFurniture = project.furniture.filter((f) => f.id !== entity.id);
+    return {
+      project: {
+        ...project,
+        furniture: nextFurniture,
+      },
+      deleted: nextFurniture.length !== project.furniture.length,
+      removedWireCount: 0,
+    };
+  }
+  if (entity.kind === 'staircase') {
+    const prevStairs = project.staircases ?? [];
+    const nextStairs = prevStairs.filter((s) => s.id !== entity.id);
+    return {
+      project: {
+        ...project,
+        staircases: nextStairs,
+      },
+      deleted: nextStairs.length !== prevStairs.length,
+      removedWireCount: 0,
+    };
+  }
+  if (entity.kind === 'wire') {
+    const prevWires = project.wires ?? [];
+    const nextWires = prevWires.filter((w) => w.id !== entity.id);
+    return {
+      project: {
+        ...project,
+        wires: nextWires,
+      },
+      deleted: nextWires.length !== prevWires.length,
+      removedWireCount: prevWires.length - nextWires.length,
+    };
+  }
+  const prevDims = project.dimensions ?? [];
+  const nextDims = prevDims.filter((d) => d.id !== entity.id);
+  return {
+    project: {
+      ...project,
+      dimensions: nextDims,
+    },
+    deleted: nextDims.length !== prevDims.length,
+    removedWireCount: 0,
+  };
+}
+
+/**
+ * Clears all floor-specific architectural and electrical entities on `floor` in one atomic
+ * state update while preserving floorConfigs (floor ID, name, dimensions, elevation),
+ * unrelated floors, and project metadata.
+ */
+export function clearFloorInProject(
+  project: ProjectData,
+  floor: number
+): ProjectData {
+  const removedPointIds = new Set(
+    project.points.filter((p) => getItemFloor(p) === floor).map((p) => p.id)
+  );
+  const nextWires = (project.wires ?? []).filter(
+    (w) =>
+      !removedPointIds.has(w.fromPointId) &&
+      !removedPointIds.has(w.toPointId) &&
+      !(w.fromFloor === floor && w.toFloor === floor) &&
+      !(w.floor === floor && !w.isInterFloor)
+  );
+
+  return {
+    ...project,
+    rooms: project.rooms.filter((r) => getItemFloor(r) !== floor),
+    customWalls: project.customWalls.filter((w) => getItemFloor(w) !== floor),
+    openings: project.openings.filter((o) => getItemFloor(o) !== floor),
+    dimensions: (project.dimensions ?? []).filter((d) => getItemFloor(d) !== floor),
+    furniture: project.furniture.filter((f) => getItemFloor(f) !== floor),
+    points: project.points.filter((p) => getItemFloor(p) !== floor),
+    staircases: (project.staircases ?? []).filter((s) => s.fromFloor !== floor),
+    wires: nextWires,
+  };
+}
+
+/**
+ * Translates all objects on `floor` (rooms, walls, openings, dimensions, furniture,
+ * electrical points, staircases originating on `floor`, and wire waypoints on `floor`)
+ * by the exact same (dxM, dyM) offset without altering unrelated floors or wire topology.
+ */
+export function moveAllOnFloorInProject(
+  project: ProjectData,
+  floor: number,
+  dxM: number,
+  dyM: number
+): ProjectData {
+  const shift = (v: number, delta: number) => Number((v + delta).toFixed(3));
+  const floorPointIds = new Set(
+    project.points.filter((p) => getItemFloor(p) === floor).map((p) => p.id)
+  );
+
+  return {
+    ...project,
+    rooms: project.rooms.map((r) =>
+      getItemFloor(r) === floor ? { ...r, x: shift(r.x, dxM), y: shift(r.y, dyM) } : r
+    ),
+    customWalls: project.customWalls.map((w) =>
+      getItemFloor(w) === floor
+        ? {
+            ...w,
+            x1: shift(w.x1, dxM),
+            y1: shift(w.y1, dyM),
+            x2: shift(w.x2, dxM),
+            y2: shift(w.y2, dyM),
+          }
+        : w
+    ),
+    openings: project.openings.map((op) =>
+      getItemFloor(op) === floor ? { ...op, x: shift(op.x, dxM), y: shift(op.y, dyM) } : op
+    ),
+    dimensions: (project.dimensions ?? []).map((d) =>
+      getItemFloor(d) === floor
+        ? {
+            ...d,
+            x1: shift(d.x1, dxM),
+            y1: shift(d.y1, dyM),
+            x2: shift(d.x2, dxM),
+            y2: shift(d.y2, dyM),
+          }
+        : d
+    ),
+    furniture: project.furniture.map((f) =>
+      getItemFloor(f) === floor ? { ...f, x: shift(f.x, dxM), y: shift(f.y, dyM) } : f
+    ),
+    points: project.points.map((p) =>
+      getItemFloor(p) === floor ? { ...p, x: shift(p.x, dxM), y: shift(p.y, dyM) } : p
+    ),
+    staircases: (project.staircases ?? []).map((s) =>
+      s.fromFloor === floor ? { ...s, x: shift(s.x, dxM), y: shift(s.y, dyM) } : s
+    ),
+    wires: (project.wires ?? []).map((w) => {
+      const sameFloorOnTarget =
+        (w.fromFloor === floor && w.toFloor === floor) ||
+        (!w.isInterFloor && w.floor === floor) ||
+        (floorPointIds.has(w.fromPointId) && floorPointIds.has(w.toPointId));
+      if (sameFloorOnTarget) {
+        return {
+          ...w,
+          waypoints: w.waypoints.map((wp) => ({
+            x: shift(wp.x, dxM),
+            y: shift(wp.y, dyM),
+          })),
+        };
+      }
+      // For inter-floor risers starting on this floor, shift the riser anchor waypoint on this floor
+      if (w.isInterFloor && w.fromFloor === floor && w.waypoints.length > 0) {
+        return {
+          ...w,
+          waypoints: w.waypoints.map((wp, idx) =>
+            idx === 0 ? { x: shift(wp.x, dxM), y: shift(wp.y, dyM) } : wp
+          ),
+        };
+      }
+      return w;
+    }),
+  };
+}
+
+/**
+ * Resolves the floor immediately below `targetFloor` using the authoritative sorted
+ * floorConfigs order rather than assuming floor numbers equal array indexes.
+ */
+export function getFloorBelow(
+  project: ProjectData,
+  targetFloor: number
+): FloorLevelConfig | null {
+  const floors = getProjectFloors(project);
+  const idx = floors.findIndex((f) => f.floor === targetFloor);
+  if (idx <= 0) return null;
+  return floors[idx - 1] ?? null;
+}
+
+export interface CopyFloorBelowResult {
+  ok: boolean;
+  project: ProjectData;
+  sourceFloor?: number;
+  clonedRoomCount: number;
+  clonedPointCount: number;
+  clonedWireCount: number;
+  clonedStaircaseCount: number;
+  skippedDistributionCount: number;
+  reason?: string;
+}
+
+/**
+ * Copies layout, branch electrical points (excluding DB/EP to prevent duplicates),
+ * reconnected same-floor wires (preserving cable specs, pricing, GST & circuit),
+ * and valid staircases from the floor immediately below `targetFloor`.
+ * Never overwrites a target floor that already contains layout elements and never
+ * modifies the source floor.
+ */
+export function copyFloorBelowInProject(
+  project: ProjectData,
+  targetFloor: number
+): CopyFloorBelowResult {
+  const floors = getProjectFloors(project);
+  const targetIdx = floors.findIndex((f) => f.floor === targetFloor);
+  if (targetIdx <= 0) {
+    return {
+      ok: false,
+      project,
+      clonedRoomCount: 0,
+      clonedPointCount: 0,
+      clonedWireCount: 0,
+      clonedStaircaseCount: 0,
+      skippedDistributionCount: 0,
+      reason: 'No floor exists below the active floor to copy from.',
+    };
+  }
+
+  const sourceCfg = floors[targetIdx - 1];
+  const sourceFloor = sourceCfg.floor;
+  const targetLabel = getFloorLabel(project, targetFloor);
+  const sourceLabel = getFloorLabel(project, sourceFloor);
+
+  // Guard against overwriting an existing populated floor
+  const targetSlice = sliceProjectForFloor(project, targetFloor);
+  const targetStaircases = (project.staircases ?? []).filter((s) => s.fromFloor === targetFloor);
+  const targetHasExistingContent =
+    targetSlice.rooms.length > 0 ||
+    targetSlice.customWalls.length > 0 ||
+    targetSlice.openings.length > 0 ||
+    targetSlice.furniture.length > 0 ||
+    targetSlice.points.length > 0 ||
+    (targetSlice.dimensions ?? []).length > 0 ||
+    targetStaircases.length > 0;
+
+  if (targetHasExistingContent) {
+    return {
+      ok: false,
+      project,
+      sourceFloor,
+      clonedRoomCount: 0,
+      clonedPointCount: 0,
+      clonedWireCount: 0,
+      clonedStaircaseCount: 0,
+      skippedDistributionCount: 0,
+      reason: `${targetLabel} already contains existing layout items. Clear ${targetLabel} first before copying from ${sourceLabel}.`,
+    };
+  }
+
+  const sourceSlice = sliceProjectForFloor(project, sourceFloor);
+  const sourceStairs = (project.staircases ?? []).filter((s) => s.fromFloor === sourceFloor);
+  if (
+    sourceSlice.rooms.length === 0 &&
+    sourceSlice.customWalls.length === 0 &&
+    sourceSlice.openings.length === 0 &&
+    sourceSlice.points.length === 0
+  ) {
+    return {
+      ok: false,
+      project,
+      sourceFloor,
+      clonedRoomCount: 0,
+      clonedPointCount: 0,
+      clonedWireCount: 0,
+      clonedStaircaseCount: 0,
+      skippedDistributionCount: 0,
+      reason: `${sourceLabel} has no rooms, walls, or electrical points to copy yet.`,
+    };
+  }
+
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+  const roomIdMap = new Map<string, string>();
+  const pointIdMap = new Map<string, string>();
+
+  const clonedRooms = sourceSlice.rooms.map((r, idx) => {
+    const nextId = `rm-f${targetFloor}-${stamp}-${idx}`;
+    roomIdMap.set(r.id, nextId);
+    return { ...r, id: nextId, floor: targetFloor };
+  });
+  const clonedWalls = sourceSlice.customWalls.map((w, idx) => ({
+    ...w,
+    id: `cw-f${targetFloor}-${stamp}-${idx}`,
+    floor: targetFloor,
+  }));
+  const clonedOpenings = sourceSlice.openings.map((o, idx) => ({
+    ...o,
+    id: `op-f${targetFloor}-${stamp}-${idx}`,
+    floor: targetFloor,
+  }));
+  const clonedDimensions = (sourceSlice.dimensions ?? []).map((d, idx) => ({
+    ...d,
+    id: `dim-f${targetFloor}-${stamp}-${idx}`,
+    floor: targetFloor,
+  }));
+  const clonedFurniture = sourceSlice.furniture.map((f, idx) => ({
+    ...f,
+    id: `fn-f${targetFloor}-${stamp}-${idx}`,
+    roomId: roomIdMap.get(f.roomId) ?? f.roomId,
+    floor: targetFloor,
+  }));
+
+  let skippedDistributionCount = 0;
+  const clonedPoints: ElectricalPoint[] = [];
+  sourceSlice.points.forEach((p, idx) => {
+    if (p.itemType === 'distribution_board' || p.itemType === 'earthing_point') {
+      skippedDistributionCount += 1;
+      return;
+    }
+    const nextId = `pt-f${targetFloor}-${stamp}-${idx}`;
+    pointIdMap.set(p.id, nextId);
+    clonedPoints.push({
+      ...p,
+      id: nextId,
+      code: `F${targetFloor}-${p.code}`,
+      roomId: roomIdMap.get(p.roomId) ?? p.roomId,
+      floor: targetFloor,
+    });
+  });
+
+  // Reconnect same-floor wires between cloned branch points preserving cable specs, pricing & GST
+  let nextWireSeq = getNextWireSequence(project.wires ?? []);
+  const clonedWires: ElectricalWire[] = [];
+  (project.wires ?? []).forEach((w, idx) => {
+    if (w.fromFloor !== sourceFloor || w.toFloor !== sourceFloor || w.isInterFloor) return;
+    const mappedFrom = pointIdMap.get(w.fromPointId);
+    const mappedTo = pointIdMap.get(w.toPointId);
+    if (!mappedFrom || !mappedTo) return;
+    const seq = nextWireSeq;
+    nextWireSeq += 1;
+    clonedWires.push({
+      ...w,
+      id: `wire-f${targetFloor}-${stamp}-${idx}`,
+      code: `W-${String(seq).padStart(2, '0')}`,
+      floor: targetFloor,
+      fromFloor: targetFloor,
+      toFloor: targetFloor,
+      isInterFloor: false,
+      fromPointId: mappedFrom,
+      toPointId: mappedTo,
+      waypoints: w.waypoints.map((wp) => ({ ...wp })),
+    });
+  });
+
+  // Clone staircases only if there is an actual next floor above targetFloor to connect to
+  const nextFloorAbove = floors[targetIdx + 1] ?? null;
+  const clonedStaircases: StaircaseItem[] = nextFloorAbove
+    ? sourceStairs.map((s, idx) => ({
+        ...s,
+        id: `st-f${targetFloor}-${stamp}-${idx}`,
+        fromFloor: targetFloor,
+        toFloor: nextFloorAbove.floor,
+      }))
+    : [];
+
+  return {
+    ok: true,
+    sourceFloor,
+    clonedRoomCount: clonedRooms.length,
+    clonedPointCount: clonedPoints.length,
+    clonedWireCount: clonedWires.length,
+    clonedStaircaseCount: clonedStaircases.length,
+    skippedDistributionCount,
+    project: {
+      ...project,
+      rooms: [...project.rooms, ...clonedRooms],
+      customWalls: [...project.customWalls, ...clonedWalls],
+      openings: [...project.openings, ...clonedOpenings],
+      dimensions: [...(project.dimensions ?? []), ...clonedDimensions],
+      furniture: [...project.furniture, ...clonedFurniture],
+      points: [...project.points, ...clonedPoints],
+      staircases: [...(project.staircases ?? []), ...clonedStaircases],
+      wires: [...(project.wires ?? []), ...clonedWires],
+    },
+  };
+}
+
+/**
+ * Updates a circuit's cable configuration and propagates all product metadata,
+ * pricing, and GST values to existing wires on that circuit without inventing missing prices.
+ */
+export function applyCircuitCableConfigToProject(
+  project: ProjectData,
+  circuit: CircuitId,
+  patch: Partial<CircuitCableConfig>,
+  applyToCircuitWires = true
+): ProjectData {
+  const existing: CircuitCableConfig = project.circuitCableConfigs?.[circuit] ?? {
+    circuit,
+    cableSizeSqMm: null,
+    cableMaterial: 'Copper' as CableMaterial,
+  };
+  const updated: CircuitCableConfig = { ...existing, ...patch, circuit };
+  const nextConfigs = {
+    ...(project.circuitCableConfigs ?? {}),
+    [circuit]: updated,
+  };
+  const linkedWireFields = buildCircuitCableWireFields(updated);
+  const nextWires = applyToCircuitWires
+    ? (project.wires ?? []).map((w) =>
+        w.circuit === circuit
+          ? {
+              ...w,
+              cableSizeSqMm: updated.cableSizeSqMm,
+              cableMaterial: updated.cableMaterial,
+              ...linkedWireFields,
+            }
+          : w
+      )
+    : project.wires;
+
+  return {
+    ...project,
+    circuitCableConfigs: nextConfigs,
+    ...(nextWires ? { wires: nextWires } : {}),
+  };
+}
+
+/**
+ * Maps a verified ProductCatalogueItem cable product onto a target circuit and all
+ * wires assigned to that circuit, preserving productId, manufacturer, brand, productName,
+ * modelNumber, category, specification, cableSizeSqMm, unit, unitPrice, gstPercent, and datasheetUrl.
+ */
+export function assignCatalogueCableToCircuit(
+  project: ProjectData,
+  product: ProductCatalogueItem,
+  circuit: CircuitId
+): ProjectData {
+  const existing = project.circuitCableConfigs?.[circuit];
+  return applyCircuitCableConfigToProject(
+    project,
+    circuit,
+    {
+      cableSizeSqMm: product.cableSizeSqMm ?? existing?.cableSizeSqMm ?? null,
+      productId: product.id,
+      manufacturer: product.manufacturer,
+      brand: product.brand || product.manufacturer,
+      productName: product.productName,
+      productCategory: product.category,
+      modelNumber: product.modelNumber,
+      specification: product.specification,
+      unit: product.unit || 'm',
+      unitPricePerM: product.unitPrice,
+      gstPercent: product.gstPercent,
+      datasheetUrl: sanitizeSafeUrl(product.datasheetUrl),
+    },
+    true
+  );
+}
+
 

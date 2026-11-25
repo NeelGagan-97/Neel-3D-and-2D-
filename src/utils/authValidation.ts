@@ -139,8 +139,11 @@ export function validateResetPasswordInput(
 
   if (!password) {
     fieldErrors.password = 'New password is required.';
-  } else if (password.length < 8) {
-    fieldErrors.password = 'Password must be at least 8 characters long.';
+  } else {
+    const strengthErr = validatePasswordStrength(password);
+    if (strengthErr) {
+      fieldErrors.password = strengthErr;
+    }
   }
 
   if (!confirmPassword) {

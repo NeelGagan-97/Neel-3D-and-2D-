@@ -82,15 +82,24 @@ export function buildAuthRedirectUrl(
   return undefined;
 }
 
-function mapSignUpError(message: string): {
+export function mapSignUpError(
+  message: string,
+  errorCode?: string | null,
+  details?: string | null
+): {
   error: string;
   fieldErrors: Record<string, string>;
 } {
-  const lower = message.toLowerCase();
+  const combined = `${message ?? ''} ${details ?? ''}`.toLowerCase();
+  const normalizedCode = (errorCode ?? '').trim().toLowerCase();
 
   if (
-    lower.includes('user already registered') ||
-    lower.includes('already been registered')
+    normalizedCode === 'user_already_exists' ||
+    normalizedCode === 'email_exists' ||
+    combined.includes('user already registered') ||
+    combined.includes('already been registered') ||
+    combined.includes('employee_profiles_email_key') ||
+    combined.includes('idx_employee_profiles_email')
   ) {
     return {
       error: 'An account with this email address already exists.',
@@ -98,14 +107,23 @@ function mapSignUpError(message: string): {
     };
   }
 
-  if (lower.includes('username')) {
+  if (
+    combined.includes('employee_profiles_username_key') ||
+    combined.includes('idx_employee_profiles_username') ||
+    combined.includes('username')
+  ) {
     return {
       error: 'This username is already taken.',
       fieldErrors: { username: 'This username is already in use. Choose another.' },
     };
   }
 
-  if (lower.includes('employee_id') || lower.includes('employee id')) {
+  if (
+    combined.includes('employee_profiles_employee_id_key') ||
+    combined.includes('idx_employee_profiles_employee_id') ||
+    combined.includes('employee_id') ||
+    combined.includes('employee id')
+  ) {
     return {
       error: 'This Employee ID is already registered.',
       fieldErrors: { employeeId: 'This Employee ID is already registered.' },
@@ -113,9 +131,11 @@ function mapSignUpError(message: string): {
   }
 
   if (
-    lower.includes('database error saving new user') ||
-    lower.includes('duplicate key') ||
-    lower.includes('unique constraint')
+    normalizedCode === '23505' ||
+    combined.includes('database error saving new user') ||
+    combined.includes('duplicate key') ||
+    combined.includes('unique constraint') ||
+    combined.includes('already exists')
   ) {
     return {
       error:
@@ -732,7 +752,7 @@ export async function ensureOwnEmployeeProfile(
 
       const rawMsg = rpcRes.error.message ?? '';
       if (rpcRes.error.code === '23505' || rawMsg.toLowerCase().includes('already')) {
-        const mapped = mapSignUpError(rawMsg);
+        const mapped = mapSignUpError(rawMsg, rpcRes.error.code, rpcRes.error.details);
         return {
           ok: false,
           error: mapped.error,
@@ -844,7 +864,7 @@ export async function registerEmployee(
   const redirectUrl = buildAuthRedirectUrl('/auth/callback', emailRedirectTo);
 
   let signUpData: { user: User | null; session: Session | null };
-  let signUpError: { message: string } | null;
+  let signUpError: { message: string; code?: string; status?: number } | null;
   try {
     const res = await withTimeout(
       sb.auth.signUp({
@@ -876,10 +896,12 @@ export async function registerEmployee(
   }
 
   if (signUpError) {
-    const mapped = mapSignUpError(signUpError.message);
+    const mapped = mapSignUpError(signUpError.message, signUpError.code);
     return {
       ok: false,
       error: mapped.error,
+      errorCode: signUpError.code,
+      httpStatus: signUpError.status,
       fieldErrors: mapped.fieldErrors,
     };
   }

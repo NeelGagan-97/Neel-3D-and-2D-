@@ -1518,9 +1518,13 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           rebuildScene();
           if (!disposed) {
             createdRenderer.render(createdScene, activeCamera);
-            if (!isSoftwareGl && !spinTimer) {
+            if (!isSoftwareGl) {
+              if (spinTimer) {
+                clearInterval(spinTimer);
+                spinTimer = 0;
+              }
               spinTimer = window.setInterval(() => {
-                if (!disposed && !contextLost) requestRender();
+                if (!disposed && !contextLost && !document.hidden) requestRender();
               }, 33);
             }
           }
@@ -1630,10 +1634,14 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
       createdRenderer.render(createdScene, activeCamera);
       syncProjectedPins();
 
-      // Gentle continuous fan & sky animation on GPU when interactive
+      // Gentle continuous fan & sky animation on GPU when interactive and tab visible
       if (!isSoftwareGl) {
+        if (spinTimer) {
+          clearInterval(spinTimer);
+          spinTimer = 0;
+        }
         spinTimer = window.setInterval(() => {
-          if (!disposed && !contextLost) requestRender();
+          if (!disposed && !contextLost && !document.hidden) requestRender();
         }, 33);
       }
     } catch (initErr) {

@@ -29,6 +29,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onNavigateRoute }) =
     email: string;
     requiresEmailConfirmation: boolean;
   } | null>(null);
+  const submittingRef = React.useRef(false);
 
   const updateField = (key: keyof EmployeeRegistrationInput, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -39,8 +40,12 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onNavigateRoute }) =
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current || submitting) {
+      return;
+    }
     setFormError(null);
     setFieldErrors({});
+    setSuccessState(null);
 
     const validation = validateRegistrationInput(form);
     if (!validation.valid) {
@@ -49,12 +54,14 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onNavigateRoute }) =
       return;
     }
 
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const res = await register(form);
-      if (!res.ok || !res.data) {
+      if (!res.ok || !res.data || !res.data.user) {
+        setSuccessState(null);
         setFieldErrors(res.fieldErrors ?? {});
-        setFormError(res.error ?? 'Registration failed. Please try again.');
+        setFormError(res.error ?? 'Registration failed. Please check your details and try again.');
         return;
       }
 
@@ -69,7 +76,15 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onNavigateRoute }) =
           requiresEmailConfirmation: false,
         });
       }
+    } catch (err) {
+      setSuccessState(null);
+      setFormError(
+        err instanceof Error
+          ? err.message
+          : 'Registration could not be completed. Please try again.'
+      );
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };

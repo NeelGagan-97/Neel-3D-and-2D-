@@ -57,6 +57,7 @@ import {
   addFloorToProject,
   applyBuildingTypeSafely,
   autoRouteUnwiredCables,
+  buildCircuitCableWireFields,
   BUILDING_TYPE_LABELS,
   CIRCUIT_CABLE_RANGES,
   computeActualGeometryBounds,
@@ -103,14 +104,21 @@ import {
   validateRoomPlacement,
 } from '../utils/geometry';
 import {
+  applyCircuitCableConfigToProject,
+  assignCatalogueCableToCircuit,
+  clearFloorInProject,
   copyEntitiesToClipboard,
+  copyFloorBelowInProject,
   deleteEntitiesFromProject,
   duplicateEntitiesInProject,
+  eraseEntityFromProject,
   FindCategoryFilter,
   FURNITURE_MAP,
   generateUniqueEntityId,
   getEntityFocusPoint,
+  getFloorBelow,
   isEditableEventTarget,
+  moveAllOnFloorInProject,
   pasteClipboardIntoProject,
   pruneSelectionToProject,
   resolve3DWalkCommand,
@@ -318,19 +326,55 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const [inspectorWarning, setInspectorWarning] = useState<string | null>(null);
-  const [, setStatusMessage] = useState<{
+  type NotificationTone = 'info' | 'success' | 'warning' | 'error';
+  const [statusMessage, setStatusMessage] = useState<{
+    id: number;
     text: string;
-    tone: 'info' | 'warning';
-  }>(() => ({
-    text:
-      project.rooms.length === 0
-        ? 'Blank site ready — click anywhere inside the site boundary to create a room'
-        : 'Ctrl+F Find · Ctrl+Z/Y Undo/Redo · Ctrl+C/V/D Copy/Paste/Duplicate · Shift+Click Multi-Select',
-    tone: 'info',
-  }));
+    tone: NotificationTone;
+  } | null>(null);
+  const statusTimerRef = useRef<number | null>(null);
+  const lastStatusRef = useRef<{ text: string; tone: NotificationTone; ts: number } | null>(null);
 
-  const notify = useCallback((text: string, tone: 'info' | 'warning' = 'info') => {
-    setStatusMessage({ text, tone });
+  useEffect(() => {
+    return () => {
+      if (statusTimerRef.current !== null) {
+        window.clearTimeout(statusTimerRef.current);
+        statusTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const dismissNotification = useCallback(() => {
+    if (statusTimerRef.current !== null) {
+      window.clearTimeout(statusTimerRef.current);
+      statusTimerRef.current = null;
+    }
+    setStatusMessage(null);
+  }, []);
+
+  const notify = useCallback((text: string, tone: NotificationTone = 'info') => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const now = Date.now();
+    const last = lastStatusRef.current;
+    // Deduplicate rapid repeated identical notifications
+    if (last && last.text === trimmed && last.tone === tone && now - last.ts < 800) {
+      return;
+    }
+    lastStatusRef.current = { text: trimmed, tone, ts: now };
+
+    if (statusTimerRef.current !== null) {
+      window.clearTimeout(statusTimerRef.current);
+      statusTimerRef.current = null;
+    }
+
+    setStatusMessage({ id: now, text: trimmed, tone });
+
+    const durationMs = tone === 'error' ? 7000 : tone === 'warning' ? 5500 : 4000;
+    statusTimerRef.current = window.setTimeout(() => {
+      statusTimerRef.current = null;
+      setStatusMessage(null);
+    }, durationMs);
   }, []);
 
   const metrics = useMemo(() => computeProjectMetrics(project), [project]);
@@ -483,21 +527,29 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     if (targets.length === 0 && !allSelected) return;
 
     if (allSelected) {
-      onUpdateProject(
-        (prev) => ({
-          ...prev,
-          rooms: prev.rooms.filter((r) => getItemFloor(r) !== activeFloor),
-          customWalls: prev.customWalls.filter((w) => getItemFloor(w) !== activeFloor),
-          openings: prev.openings.filter((o) => getItemFloor(o) !== activeFloor),
-          dimensions: (prev.dimensions ?? []).filter((d) => getItemFloor(d) !== activeFloor),
-          furniture: prev.furniture.filter((f) => getItemFloor(f) !== activeFloor),
-          points: prev.points.filter((p) => getItemFloor(p) !== activeFloor),
-        }),
-        true
-      );
+      const clearedProject = clearFloorInProject(project, activeFloor);
+      const clearedCount =
+        (project.rooms.length - clearedProject.rooms.length) +
+        (project.customWalls.length - clearedProject.customWalls.length) +
+        (project.openings.length - clearedProject.openings.length) +
+        ((project.dimensions?.length ?? 0) - (clearedProject.dimensions?.length ?? 0)) +
+        (project.furniture.length - clearedProject.furniture.length) +
+        (project.points.length - clearedProject.points.length) +
+        ((project.staircases?.length ?? 0) - (clearedProject.staircases?.length ?? 0)) +
+        ((project.wires?.length ?? 0) - (clearedProject.wires?.length ?? 0));
+      if (clearedCount === 0) {
+        setAllSelected(false);
+        setSelectedEntities([]);
+        notify(`${getFloorLabel(project, activeFloor)} has no elements to clear.`, 'info');
+        return;
+      }
+      onUpdateProject(() => clearedProject, true);
       setAllSelected(false);
       setSelectedEntities([]);
-      notify(`Cleared all components on ${formatFloorLabel(activeFloor)} (Ctrl+Z to undo)`);
+      notify(
+        `Cleared ${clearedCount} element${clearedCount === 1 ? '' : 's'} on ${getFloorLabel(project, activeFloor)} (Ctrl+Z to undo)`,
+        'success'
+      );
       return;
     }
 
@@ -826,150 +878,59 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     notify(`Exploded 3D View — inspecting all ${totalFloors} floors with vertical separation`);
   };
 
+  const floorBelowConfig = useMemo(
+    () => getFloorBelow(project, activeFloor),
+    [project, activeFloor]
+  );
+
   const handleCopyFloorBelow = () => {
-    if (activeFloor <= 1) return;
-    const sourceFloor = activeFloor - 1;
-    const sourceSlice = sliceProjectForFloor(project, sourceFloor);
-    if (
-      sourceSlice.rooms.length === 0 &&
-      sourceSlice.customWalls.length === 0 &&
-      sourceSlice.openings.length === 0
-    ) {
-      notify(`${formatFloorLabel(sourceFloor)} has no rooms or walls to copy yet.`, 'warning');
+    const result = copyFloorBelowInProject(project, activeFloor);
+    if (!result.ok) {
+      notify(result.reason ?? 'Unable to copy floor below.', 'warning');
       return;
     }
-
-    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
-    const roomIdMap = new Map<string, string>();
-
-    const clonedRooms = sourceSlice.rooms.map((r, idx) => {
-      const nextId = `rm-f${activeFloor}-${stamp}-${idx}`;
-      roomIdMap.set(r.id, nextId);
-      return { ...r, id: nextId, floor: activeFloor };
-    });
-    const clonedWalls = sourceSlice.customWalls.map((w, idx) => ({
-      ...w,
-      id: `cw-f${activeFloor}-${stamp}-${idx}`,
-      floor: activeFloor,
-    }));
-    const clonedOpenings = sourceSlice.openings.map((o, idx) => ({
-      ...o,
-      id: `op-f${activeFloor}-${stamp}-${idx}`,
-      floor: activeFloor,
-    }));
-    const clonedFurniture = sourceSlice.furniture.map((f, idx) => ({
-      ...f,
-      id: `fn-f${activeFloor}-${stamp}-${idx}`,
-      roomId: roomIdMap.get(f.roomId) ?? f.roomId,
-      floor: activeFloor,
-    }));
-    const clonedPoints = sourceSlice.points.map((p, idx) => ({
-      ...p,
-      id: `pt-f${activeFloor}-${stamp}-${idx}`,
-      code: `F${activeFloor}-${p.code}`,
-      roomId: roomIdMap.get(p.roomId) ?? p.roomId,
-      floor: activeFloor,
-    }));
-
-    onUpdateProject(
-      (prev) => ({
-        ...prev,
-        rooms: [...prev.rooms.filter((r) => getItemFloor(r) !== activeFloor), ...clonedRooms],
-        customWalls: [
-          ...prev.customWalls.filter((w) => getItemFloor(w) !== activeFloor),
-          ...clonedWalls,
-        ],
-        openings: [
-          ...prev.openings.filter((o) => getItemFloor(o) !== activeFloor),
-          ...clonedOpenings,
-        ],
-        furniture: [
-          ...prev.furniture.filter((f) => getItemFloor(f) !== activeFloor),
-          ...clonedFurniture,
-        ],
-        points: [
-          ...prev.points.filter((p) => getItemFloor(p) !== activeFloor),
-          ...clonedPoints,
-        ],
-      }),
-      true
-    );
+    onUpdateProject(() => result.project, true);
     setSelectedEntity(null);
+    setAllSelected(false);
+    const srcLabel =
+      result.sourceFloor !== undefined
+        ? getFloorLabel(project, result.sourceFloor)
+        : 'floor below';
     notify(
-      `Copied ${formatFloorLabel(sourceFloor)} layout (${clonedRooms.length} rooms) onto ${formatFloorLabel(activeFloor)}`
+      `Copied ${srcLabel} onto ${getFloorLabel(project, activeFloor)} (${result.clonedRoomCount} rooms, ${result.clonedPointCount} points, ${result.clonedWireCount} cables — Ctrl+Z to undo)`,
+      'success'
     );
   };
 
   const handleMoveAll = (dxM: number, dyM: number) => {
-    const shift = (v: number, delta: number) => Number((v + delta).toFixed(3));
-
-    onUpdateProject(
-      (prev) => ({
-        ...prev,
-        rooms: prev.rooms.map((r) =>
-          getItemFloor(r) === activeFloor
-            ? { ...r, x: shift(r.x, dxM), y: shift(r.y, dyM) }
-            : r
-        ),
-        customWalls: prev.customWalls.map((w) =>
-          getItemFloor(w) === activeFloor
-            ? {
-                ...w,
-                x1: shift(w.x1, dxM),
-                y1: shift(w.y1, dyM),
-                x2: shift(w.x2, dxM),
-                y2: shift(w.y2, dyM),
-              }
-            : w
-        ),
-        openings: prev.openings.map((op) =>
-          getItemFloor(op) === activeFloor
-            ? { ...op, x: shift(op.x, dxM), y: shift(op.y, dyM) }
-            : op
-        ),
-        dimensions: (prev.dimensions ?? []).map((d) =>
-          getItemFloor(d) === activeFloor
-            ? {
-                ...d,
-                x1: shift(d.x1, dxM),
-                y1: shift(d.y1, dyM),
-                x2: shift(d.x2, dxM),
-                y2: shift(d.y2, dyM),
-              }
-            : d
-        ),
-        furniture: prev.furniture.map((f) =>
-          getItemFloor(f) === activeFloor
-            ? { ...f, x: shift(f.x, dxM), y: shift(f.y, dyM) }
-            : f
-        ),
-        points: prev.points.map((p) =>
-          getItemFloor(p) === activeFloor
-            ? { ...p, x: shift(p.x, dxM), y: shift(p.y, dyM) }
-            : p
-        ),
-      }),
-      true
-    );
-    notify(`Moved all selected elements on ${formatFloorLabel(activeFloor)} freely on canvas`);
+    onUpdateProject((prev) => moveAllOnFloorInProject(prev, activeFloor, dxM, dyM), true);
+    notify(`Moved all elements on ${getFloorLabel(project, activeFloor)} (Ctrl+Z to undo)`);
   };
 
   const handleClearAllSelected = () => {
-    onUpdateProject(
-      (prev) => ({
-        ...prev,
-        rooms: prev.rooms.filter((r) => getItemFloor(r) !== activeFloor),
-        customWalls: prev.customWalls.filter((w) => getItemFloor(w) !== activeFloor),
-        openings: prev.openings.filter((o) => getItemFloor(o) !== activeFloor),
-        dimensions: (prev.dimensions ?? []).filter((d) => getItemFloor(d) !== activeFloor),
-        furniture: prev.furniture.filter((f) => getItemFloor(f) !== activeFloor),
-        points: prev.points.filter((p) => getItemFloor(p) !== activeFloor),
-      }),
-      true
-    );
+    const clearedProject = clearFloorInProject(project, activeFloor);
+    const clearedCount =
+      (project.rooms.length - clearedProject.rooms.length) +
+      (project.customWalls.length - clearedProject.customWalls.length) +
+      (project.openings.length - clearedProject.openings.length) +
+      ((project.dimensions?.length ?? 0) - (clearedProject.dimensions?.length ?? 0)) +
+      (project.furniture.length - clearedProject.furniture.length) +
+      (project.points.length - clearedProject.points.length) +
+      ((project.staircases?.length ?? 0) - (clearedProject.staircases?.length ?? 0)) +
+      ((project.wires?.length ?? 0) - (clearedProject.wires?.length ?? 0));
+    if (clearedCount === 0) {
+      setAllSelected(false);
+      setSelectedEntity(null);
+      notify(`${getFloorLabel(project, activeFloor)} is already empty.`, 'info');
+      return;
+    }
+    onUpdateProject(() => clearedProject, true);
     setAllSelected(false);
     setSelectedEntity(null);
-    notify(`Cleared all selected elements on ${formatFloorLabel(activeFloor)} (click Undo to restore)`);
+    notify(
+      `Cleared ${clearedCount} element${clearedCount === 1 ? '' : 's'} on ${getFloorLabel(project, activeFloor)} (click Undo to restore)`,
+      'success'
+    );
   };
 
   const handleFitToScreen = () => {
@@ -1299,77 +1260,40 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const handleEraseEntity = (
     entity: NonNullable<SelectedEntity> | { kind: 'dimension'; id: string }
   ) => {
+    const result = eraseEntityFromProject(project, entity);
+    if (!result.deleted) return;
+
+    const rm = entity.kind === 'room' ? project.rooms.find((r) => r.id === entity.id) : null;
+    const pt = entity.kind === 'point' ? project.points.find((p) => p.id === entity.id) : null;
+    const w = entity.kind === 'wire' ? (project.wires ?? []).find((item) => item.id === entity.id) : null;
+
+    onUpdateProject(() => result.project, true);
+
+    if (entity.kind !== 'dimension') {
+      setSelectedEntities((prev) =>
+        prev.filter((s) => !(s.kind === entity.kind && s.id === entity.id))
+      );
+    }
+
     if (entity.kind === 'room') {
-      const rm = project.rooms.find((r) => r.id === entity.id);
-      onUpdateProject((prev) => ({
-        ...prev,
-        rooms: prev.rooms.filter((r) => r.id !== entity.id),
-      }));
-      if (selectedEntity?.kind === 'room' && selectedEntity.id === entity.id) {
-        setSelectedEntity(null);
-      }
       notify(`Deleted room "${rm?.name ?? 'Room'}"`);
     } else if (entity.kind === 'wall') {
-      onUpdateProject((prev) => ({
-        ...prev,
-        customWalls: prev.customWalls.filter((w) => w.id !== entity.id),
-      }));
-      if (selectedEntity?.kind === 'wall' && selectedEntity.id === entity.id) {
-        setSelectedEntity(null);
-      }
       notify('Deleted custom wall');
     } else if (entity.kind === 'opening') {
-      onUpdateProject((prev) => ({
-        ...prev,
-        openings: prev.openings.filter((o) => o.id !== entity.id),
-      }));
-      if (selectedEntity?.kind === 'opening' && selectedEntity.id === entity.id) {
-        setSelectedEntity(null);
-      }
       notify('Deleted door/window');
     } else if (entity.kind === 'point') {
-      onUpdateProject((prev) => ({
-        ...prev,
-        points: prev.points.filter((p) => p.id !== entity.id),
-      }));
-      if (selectedEntity?.kind === 'point' && selectedEntity.id === entity.id) {
-        setSelectedEntity(null);
-      }
-      notify('Deleted electrical point');
-    } else if (entity.kind === 'furniture') {
-      onUpdateProject((prev) => ({
-        ...prev,
-        furniture: prev.furniture.filter((f) => f.id !== entity.id),
-      }));
-      setSelectedEntities((prev) =>
-        prev.filter((s) => !(s.kind === 'furniture' && s.id === entity.id))
+      notify(
+        result.removedWireCount > 0
+          ? `Deleted ${pt?.code ?? 'electrical point'} and ${result.removedWireCount} connected cable${result.removedWireCount === 1 ? '' : 's'} (Ctrl+Z to undo)`
+          : `Deleted ${pt?.code ?? 'electrical point'} (Ctrl+Z to undo)`
       );
+    } else if (entity.kind === 'furniture') {
       notify('Deleted furniture item');
     } else if (entity.kind === 'staircase') {
-      onUpdateProject((prev) => ({
-        ...prev,
-        staircases: (prev.staircases ?? []).filter((s) => s.id !== entity.id),
-      }));
-      setSelectedEntities((prev) =>
-        prev.filter((s) => !(s.kind === 'staircase' && s.id === entity.id))
-      );
       notify('Deleted staircase');
     } else if (entity.kind === 'wire') {
-      // Strictly remove ONLY the wire while preserving both connected electrical components
-      const w = (project.wires ?? []).find((item) => item.id === entity.id);
-      onUpdateProject((prev) => ({
-        ...prev,
-        wires: (prev.wires ?? []).filter((item) => item.id !== entity.id),
-      }));
-      setSelectedEntities((prev) =>
-        prev.filter((s) => !(s.kind === 'wire' && s.id === entity.id))
-      );
       notify(`Deleted cable ${w?.code ?? ''} (connected electrical components preserved)`);
     } else if (entity.kind === 'dimension') {
-      onUpdateProject((prev) => ({
-        ...prev,
-        dimensions: (prev.dimensions ?? []).filter((d) => d.id !== entity.id),
-      }));
       notify('Deleted dimension annotation');
     }
   };
@@ -1504,13 +1428,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
     const enrichedWire: ElectricalWire = {
       ...newWire,
-      ...(circuitCfg?.productId
-        ? {
-            productId: circuitCfg.productId,
-            manufacturer: circuitCfg.manufacturer,
-            modelNumber: circuitCfg.modelNumber,
-          }
-        : {}),
+      ...buildCircuitCableWireFields(circuitCfg),
     };
 
     onUpdateProject(
@@ -1591,41 +1509,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     applyToCircuitWires = true
   ) => {
     onUpdateProject(
-      (prev) => {
-        const existing = prev.circuitCableConfigs?.[circuit] ?? {
-          circuit,
-          cableSizeSqMm: null,
-          cableMaterial: 'Copper' as CableMaterial,
-        };
-        const updated: CircuitCableConfig = { ...existing, ...patch, circuit };
-        const nextConfigs = {
-          ...(prev.circuitCableConfigs ?? {}),
-          [circuit]: updated,
-        };
-        const nextWires = applyToCircuitWires
-          ? (prev.wires ?? []).map((w) =>
-              w.circuit === circuit
-                ? {
-                    ...w,
-                    cableSizeSqMm: updated.cableSizeSqMm,
-                    cableMaterial: updated.cableMaterial,
-                    ...(updated.productId !== undefined
-                      ? {
-                          productId: updated.productId,
-                          manufacturer: updated.manufacturer,
-                          modelNumber: updated.modelNumber,
-                        }
-                      : {}),
-                  }
-                : w
-            )
-          : prev.wires;
-        return {
-          ...prev,
-          circuitCableConfigs: nextConfigs,
-          ...(nextWires ? { wires: nextWires } : {}),
-        };
-      },
+      (prev) => applyCircuitCableConfigToProject(prev, circuit, patch, applyToCircuitWires),
       true
     );
   };
@@ -1758,19 +1642,19 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   };
 
   const handleAssignCableToCircuit = (product: ProductCatalogueItem, circuit: CircuitId) => {
-    handleUpdateCircuitCableConfig(
-      circuit,
-      {
-        cableSizeSqMm: product.cableSizeSqMm ?? project.circuitCableConfigs?.[circuit]?.cableSizeSqMm ?? null,
-        productId: product.id,
-        manufacturer: product.manufacturer,
-        modelNumber: product.modelNumber,
-      },
-      true
-    );
+    onUpdateProject((prev) => assignCatalogueCableToCircuit(prev, product, circuit), true);
     setCatalogueOpen(false);
+    const priceSuffix =
+      product.unitPrice !== null
+        ? ` · ₹${product.unitPrice}/${product.unit || 'm'}${
+            product.gstPercent !== null ? ` + ${product.gstPercent}% GST` : ''
+          }`
+        : '';
     notify(
-      `Assigned ${product.manufacturer} ${product.productName}${product.cableSizeSqMm ? ` (${product.cableSizeSqMm} sq.mm)` : ''} to ${circuit}`
+      `Assigned ${product.manufacturer} ${product.productName}${
+        product.cableSizeSqMm ? ` (${product.cableSizeSqMm} sq.mm)` : ''
+      }${priceSuffix} to ${circuit}`,
+      'success'
     );
   };
 
@@ -2367,9 +2251,22 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    downloadExcelBoq(project);
                     setShowExportMenu(false);
-                    notify(`Exported multi-sheet Excel BOQ (.xlsx) for "${project.name}"`);
+                    void downloadExcelBoq(project)
+                      .then(() => {
+                        notify(
+                          `Exported multi-sheet Excel BOQ (.xlsx) for "${project.name}"`,
+                          'success'
+                        );
+                      })
+                      .catch((err) => {
+                        notify(
+                          err instanceof Error
+                            ? `Excel BOQ export failed: ${err.message}`
+                            : 'Excel BOQ export failed.',
+                          'error'
+                        );
+                      });
                   }}
                   className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-on-surface hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
                 >
@@ -3970,15 +3867,15 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </div>
 
             <div className="flex items-center gap-gutter-xs">
-              {activeFloor > 1 && !(viewMode === '3d' && (floorView3D === 'all' || floorView3D === 'exploded')) && (
+              {floorBelowConfig && !(viewMode === '3d' && (floorView3D === 'all' || floorView3D === 'exploded')) && (
                 <button
                   type="button"
                   onClick={handleCopyFloorBelow}
-                  title={`Copy layout from ${getFloorLabel(project, activeFloor - 1)} to ${getFloorLabel(project, activeFloor)}`}
+                  title={`Copy layout from ${floorBelowConfig.name} to ${getFloorLabel(project, activeFloor)}`}
                   className="inline-flex items-center gap-1 px-2 py-1 rounded-sm bg-surface-container-high border border-outline text-primary hover:border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
                 >
                   <span className="material-symbols-outlined text-[14px]" aria-hidden="true">content_copy</span>
-                  <span>Copy {getFloorLabel(project, activeFloor - 1)}</span>
+                  <span>Copy {floorBelowConfig.name}</span>
                 </button>
               )}
               {/* PROPERTIES INSPECTOR DROPDOWN TRIGGER */}
@@ -5904,6 +5801,56 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         onCancel={() => setImportPreview(null)}
         onConfirmImport={handleConfirmSafeImport}
       />
+
+      {/* DESIGN STUDIO NOTIFICATION TOAST (INFO / SUCCESS / WARNING / ERROR) */}
+      {statusMessage && (
+        <div
+          key={statusMessage.id}
+          role={statusMessage.tone === 'error' || statusMessage.tone === 'warning' ? 'alert' : 'status'}
+          aria-live={statusMessage.tone === 'error' ? 'assertive' : 'polite'}
+          className={`fixed bottom-4 right-4 z-50 max-w-md px-3.5 py-2.5 rounded-md border shadow-xl flex items-start gap-2.5 text-xs font-label ${
+            statusMessage.tone === 'error'
+              ? 'bg-surface-container border-error text-on-surface'
+              : statusMessage.tone === 'warning'
+                ? 'bg-surface-container border-secondary text-on-surface'
+                : statusMessage.tone === 'success'
+                  ? 'bg-surface-container border-success text-on-surface'
+                  : 'bg-surface-container border-primary text-on-surface'
+          }`}
+        >
+          <span
+            className={`material-symbols-outlined text-[17px] shrink-0 mt-0.5 ${
+              statusMessage.tone === 'error'
+                ? 'text-error'
+                : statusMessage.tone === 'warning'
+                  ? 'text-secondary'
+                  : statusMessage.tone === 'success'
+                    ? 'text-success'
+                    : 'text-primary'
+            }`}
+            aria-hidden="true"
+          >
+            {statusMessage.tone === 'error'
+              ? 'error'
+              : statusMessage.tone === 'warning'
+                ? 'warning'
+                : statusMessage.tone === 'success'
+                  ? 'check_circle'
+                  : 'info'}
+          </span>
+          <span className="flex-1 leading-snug">{statusMessage.text}</span>
+          <button
+            type="button"
+            onClick={dismissNotification}
+            aria-label="Dismiss notification"
+            className="text-on-surface-variant hover:text-on-surface cursor-pointer p-0.5 -mr-1"
+          >
+            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+              close
+            </span>
+          </button>
+        </div>
+      )}
     </div>
   );
 };

@@ -19,9 +19,13 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  const submittingRef = React.useRef(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current || submitting) {
+      return;
+    }
     setError(null);
 
     const validation = validateForgotPasswordEmail(email);
@@ -30,6 +34,7 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({
       return;
     }
 
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const res = await sendPasswordReset(email);
@@ -39,6 +44,7 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({
       }
       setSubmitted(true);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -157,7 +163,7 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
   onNavigateRouteRef.current = onNavigateRoute;
   onResetSuccessRef.current = onResetSuccess;
 
-  const hasValidRecoverySession = !recoveryError && isAuthenticated;
+  const hasValidRecoverySession = !recoveryError && isAuthenticated && isRecoveryMode;
 
   const finishAndRedirectToLogin = React.useCallback(async () => {
     if (redirectingRef.current) return;
@@ -205,6 +211,13 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
         validation.fieldErrors.confirmPassword ||
         'Please correct your new password entries.';
       setError(firstMessage);
+      return;
+    }
+
+    if (!hasValidRecoverySession) {
+      setError(
+        'Your password recovery session is missing or expired. Please request a new password reset link.'
+      );
       return;
     }
 
@@ -339,7 +352,7 @@ export const ResetPasswordPage: React.FC<ResetPasswordPageProps> = ({
                   if (fieldErrors.password) setFieldErrors((p) => ({ ...p, password: '' }));
                   if (error) setError(null);
                 }}
-                placeholder="Minimum 8 characters"
+                placeholder="Min 8 chars, A-Z, a-z, 0-9"
                 disabled={submitting}
                 className={`w-full pl-gutter-md pr-11 py-gutter-sm rounded-md bg-surface-container-low border text-body-md text-on-surface focus:outline-none focus:border-primary ${
                   fieldErrors.password ? 'border-error' : 'border-outline'
