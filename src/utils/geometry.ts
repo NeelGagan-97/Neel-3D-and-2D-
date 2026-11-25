@@ -4,23 +4,28 @@ import { ProjectData, RoomZone, UnitSystem } from '../types/design';
 const EPS = 0.015; // 1.5 cm tolerance for shared walls and floating-point comparisons
 
 export function getItemFloor(item: { floor?: number }): number {
-  return item.floor && item.floor >= 1 ? Math.floor(item.floor) : 1;
+  return typeof item.floor === 'number' && Number.isFinite(item.floor)
+    ? Math.floor(item.floor)
+    : 1;
 }
 
 export function formatFloorLabel(floor: number): string {
-  const n = Math.max(1, Math.floor(floor));
-  if (n === 1) return '1st Floor';
-  if (n === 2) return '2nd Floor';
-  if (n === 3) return '3rd Floor';
-  return `${n}th Floor`;
+  const n = Math.floor(floor);
+  if (n === 0) return 'Basement';
+  if (n < 0) return `Basement ${Math.abs(n) + 1}`;
+  if (n === 1) return 'Ground Floor';
+  if (n === 2) return 'First Floor';
+  if (n === 3) return 'Second Floor';
+  if (n === 4) return 'Third Floor';
+  return `Floor ${n - 1}`;
 }
 
 /**
- * Returns a floor-scoped view of ProjectData containing only elements belonging to `floor` (1-based).
- * Used for per-floor 2D editing, geometric validation, wall extraction, and elevated 3D floor rendering.
+ * Returns a floor-scoped view of ProjectData containing only elements belonging to `floor`.
+ * Supports Basement (0 or negative), Ground Floor (1), Upper Floors (2+), and Terrace.
  */
 export function sliceProjectForFloor(project: ProjectData, floor: number): ProjectData {
-  const target = Math.max(1, Math.floor(floor));
+  const target = Number.isFinite(floor) ? Math.floor(floor) : 1;
   return {
     ...project,
     rooms: project.rooms.filter((r) => getItemFloor(r) === target),
@@ -29,6 +34,12 @@ export function sliceProjectForFloor(project: ProjectData, floor: number): Proje
     dimensions: (project.dimensions ?? []).filter((d) => getItemFloor(d) === target),
     furniture: project.furniture.filter((f) => getItemFloor(f) === target),
     points: project.points.filter((p) => getItemFloor(p) === target),
+    staircases: (project.staircases ?? []).filter(
+      (s) => s.fromFloor === target || s.toFloor === target
+    ),
+    wires: (project.wires ?? []).filter(
+      (w) => w.floor === target || w.fromFloor === target || w.toFloor === target
+    ),
   };
 }
 

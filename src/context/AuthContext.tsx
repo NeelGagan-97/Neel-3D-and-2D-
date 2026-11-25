@@ -724,19 +724,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     isRecoveryModeRef.current = false;
     loadedUserIdRef.current = null;
     inFlightProfileRef.current = null;
-    await signOutUser();
-    setSession(null);
-    setUser(null);
-    setProfile(null);
-    setAuthError(null);
-    setAuthErrorKind(null);
-    setProfileError(null);
-    setProfileErrorKind(null);
-    setProfileLoading(false);
-    setIsRecoveryMode(false);
-    setRecoveryError(null);
-    setEmailVerified(false);
-    setSessionNotice(null);
+    try {
+      await withTimeout(signOutUser(), 5_000, 'Sign out');
+    } catch (err) {
+      if (typeof import.meta !== 'undefined' && import.meta.env?.DEV) {
+        console.warn('[Auth] Sign out request timed out or failed; clearing local session:', err);
+      }
+    } finally {
+      setSession(null);
+      setUser(null);
+      setProfile(null);
+      setAuthError(null);
+      setAuthErrorKind(null);
+      setProfileError(null);
+      setProfileErrorKind(null);
+      setProfileLoading(false);
+      setIsRecoveryMode(false);
+      setRecoveryError(null);
+      setEmailVerified(false);
+      setSessionNotice(null);
+    }
   }, []);
 
   const handleRefreshProfile = useCallback(async (): Promise<EmployeeProfile | null> => {

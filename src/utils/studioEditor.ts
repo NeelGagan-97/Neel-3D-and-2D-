@@ -14,6 +14,7 @@ import {
   ProjectData,
   RoomType,
   RoomZone,
+  StaircaseItem,
   StudioEntityRef,
 } from '../types/design';
 import { formatFloorLabel, getItemFloor } from './geometry';
@@ -86,6 +87,7 @@ export interface StudioClipboard {
   customWalls: CustomWall[];
   openings: ArchitecturalOpening[];
   furniture: FurnitureItem[];
+  staircases?: StaircaseItem[];
   sourceFloor: number;
 }
 
@@ -187,6 +189,12 @@ export function selectAllEntitiesOnFloor(project: ProjectData, activeFloor: numb
   project.points.forEach((p) => {
     if (getItemFloor(p) === activeFloor) list.push({ kind: 'point', id: p.id });
   });
+  (project.staircases ?? []).forEach((s) => {
+    if (s.fromFloor === activeFloor) list.push({ kind: 'staircase', id: s.id });
+  });
+  (project.wires ?? []).forEach((w) => {
+    if (w.floor === activeFloor) list.push({ kind: 'wire', id: w.id });
+  });
   return list;
 }
 
@@ -199,6 +207,8 @@ export function pruneSelectionToProject(
   const openingIds = new Set(project.openings.map((o) => o.id));
   const furnitureIds = new Set(project.furniture.map((f) => f.id));
   const pointIds = new Set(project.points.map((p) => p.id));
+  const staircaseIds = new Set((project.staircases ?? []).map((s) => s.id));
+  const wireIds = new Set((project.wires ?? []).map((w) => w.id));
 
   return selection.filter((ent) => {
     if (ent.kind === 'room') return roomIds.has(ent.id);
@@ -206,6 +216,8 @@ export function pruneSelectionToProject(
     if (ent.kind === 'opening') return openingIds.has(ent.id);
     if (ent.kind === 'furniture') return furnitureIds.has(ent.id);
     if (ent.kind === 'point') return pointIds.has(ent.id);
+    if (ent.kind === 'staircase') return staircaseIds.has(ent.id);
+    if (ent.kind === 'wire') return wireIds.has(ent.id);
     return false;
   });
 }
@@ -237,6 +249,27 @@ export function getEntityFocusPoint(
     return w
       ? { x: (w.x1 + w.x2) / 2, y: (w.y1 + w.y2) / 2, z: 1.4, floor: getItemFloor(w) }
       : null;
+  }
+  if (entity.kind === 'staircase') {
+    const st = (project.staircases ?? []).find((s) => s.id === entity.id);
+    return st ? { x: st.x + st.width / 2, y: st.y + st.width / 2, z: 1.2, floor: st.fromFloor } : null;
+  }
+  if (entity.kind === 'wire') {
+    const wire = (project.wires ?? []).find((w) => w.id === entity.id);
+    if (!wire) return null;
+    const fromPt = project.points.find((p) => p.id === wire.fromPointId);
+    const toPt = project.points.find((p) => p.id === wire.toPointId);
+    if (fromPt && toPt) {
+      return {
+        x: (fromPt.x + toPt.x) / 2,
+        y: (fromPt.y + toPt.y) / 2,
+        z: Math.max(fromPt.z, toPt.z),
+        floor: wire.floor,
+      };
+    }
+    if (fromPt) return { x: fromPt.x, y: fromPt.y, z: fromPt.z, floor: wire.floor };
+    if (toPt) return { x: toPt.x, y: toPt.y, z: toPt.z, floor: wire.floor };
+    return null;
   }
   return null;
 }
@@ -502,19 +535,31 @@ export function deleteEntitiesFromProject(
   const openingIds = new Set(selection.filter((s) => s.kind === 'opening').map((s) => s.id));
   const furnitureIds = new Set(selection.filter((s) => s.kind === 'furniture').map((s) => s.id));
   const pointIds = new Set(selection.filter((s) => s.kind === 'point').map((s) => s.id));
+  const staircaseIds = new Set(selection.filter((s) => s.kind === 'staircase').map((s) => s.id));
+  const wireIds = new Set(selection.filter((s) => s.kind === 'wire').map((s) => s.id));
 
   const nextRooms = project.rooms.filter((r) => !roomIds.has(r.id));
   const nextWalls = project.customWalls.filter((w) => !wallIds.has(w.id));
   const nextOpenings = project.openings.filter((o) => !openingIds.has(o.id));
   const nextFurniture = project.furniture.filter((f) => !furnitureIds.has(f.id));
+  // Deleting a wire NEVER deletes its connected electrical components
   const nextPoints = project.points.filter((p) => !pointIds.has(p.id));
+  const prevStairs = project.staircases ?? [];
+  const nextStairs = prevStairs.filter((s) => !staircaseIds.has(s.id));
+  const prevWires = project.wires ?? [];
+  // Remove explicitly selected wires (and clean up wires whose endpoint point was explicitly deleted)
+  const nextWires = prevWires.filter(
+    (w) => !wireIds.has(w.id) && !pointIds.has(w.fromPointId) && !pointIds.has(w.toPointId)
+  );
 
   const deletedCount =
     (project.rooms.length - nextRooms.length) +
     (project.customWalls.length - nextWalls.length) +
     (project.openings.length - nextOpenings.length) +
     (project.furniture.length - nextFurniture.length) +
-    (project.points.length - nextPoints.length);
+    (project.points.length - nextPoints.length) +
+    (prevStairs.length - nextStairs.length) +
+    (prevWires.length - nextWires.length);
 
   if (deletedCount === 0) return { project, deletedCount: 0 };
 
@@ -526,6 +571,8 @@ export function deleteEntitiesFromProject(
       openings: nextOpenings,
       furniture: nextFurniture,
       points: nextPoints,
+      staircases: nextStairs,
+      wires: nextWires,
     },
     deletedCount,
   };
@@ -542,6 +589,7 @@ export function rotateEntitiesInProject(
   const openingIds = new Set(selection.filter((s) => s.kind === 'opening').map((s) => s.id));
   const furnitureIds = new Set(selection.filter((s) => s.kind === 'furniture').map((s) => s.id));
   const pointIds = new Set(selection.filter((s) => s.kind === 'point').map((s) => s.id));
+  const staircaseIds = new Set(selection.filter((s) => s.kind === 'staircase').map((s) => s.id));
 
   let rotatedCount = 0;
 
@@ -583,6 +631,15 @@ export function rotateEntitiesInProject(
     };
   });
 
+  const nextStaircases = (project.staircases ?? []).map((st) => {
+    if (!staircaseIds.has(st.id)) return st;
+    rotatedCount += 1;
+    return {
+      ...st,
+      rotation: (st.rotation + angleDeltaDeg) % 360,
+    };
+  });
+
   if (rotatedCount === 0) return { project, rotatedCount: 0 };
 
   return {
@@ -592,6 +649,7 @@ export function rotateEntitiesInProject(
       openings: nextOpenings,
       furniture: nextFurniture,
       points: nextPoints,
+      staircases: nextStaircases,
     },
     rotatedCount,
   };
@@ -613,6 +671,8 @@ export function moveEntitiesInProject(
   const openingIds = new Set(selection.filter((s) => s.kind === 'opening').map((s) => s.id));
   const furnitureIds = new Set(selection.filter((s) => s.kind === 'furniture').map((s) => s.id));
   const pointIds = new Set(selection.filter((s) => s.kind === 'point').map((s) => s.id));
+  const staircaseIds = new Set(selection.filter((s) => s.kind === 'staircase').map((s) => s.id));
+  const wireIds = new Set(selection.filter((s) => s.kind === 'wire').map((s) => s.id));
 
   const nextRooms = project.rooms.map((r) =>
     roomIds.has(r.id) ? { ...r, x: shift(r.x, dxM), y: shift(r.y, dyM) } : r
@@ -659,6 +719,20 @@ export function moveEntitiesInProject(
       );
       return { ...p, x: nx, y: ny, roomId: room?.id ?? p.roomId };
     }),
+    staircases: (project.staircases ?? []).map((st) =>
+      staircaseIds.has(st.id) ? { ...st, x: shift(st.x, dxM), y: shift(st.y, dyM) } : st
+    ),
+    wires: (project.wires ?? []).map((w) =>
+      wireIds.has(w.id)
+        ? {
+            ...w,
+            waypoints: w.waypoints.map((wp) => ({
+              x: shift(wp.x, dxM),
+              y: shift(wp.y, dyM),
+            })),
+          }
+        : w
+    ),
   };
 }
 
@@ -834,6 +908,65 @@ export function searchStudioComponents(
       x: (w.x1 + w.x2) / 2,
       y: (w.y1 + w.y2) / 2,
       z: 1.4,
+    });
+  });
+
+  // 5b. Placed Staircases
+  (project.staircases ?? []).forEach((st) => {
+    if (!matchesCategoryFilter(categoryFilter, 'rooms')) return;
+    const haystack = [st.id, st.name, st.type, 'staircase', 'stairs', 'room'].join(' ');
+    if (!matchesQueryTokens(haystack, tokens)) return;
+
+    placedResults.push({
+      key: `placed-stair-${st.id}`,
+      source: 'placed',
+      entity: { kind: 'staircase', id: st.id },
+      title: st.name,
+      subtitle: `${st.type} · ${st.steps} steps · ${formatFloorLabel(st.fromFloor)} → ${formatFloorLabel(st.toFloor)}`,
+      badge: 'STAIR',
+      category: 'Staircases',
+      icon: 'stairs',
+      floor: st.fromFloor,
+      x: st.x,
+      y: st.y,
+      z: 1.2,
+    });
+  });
+
+  // 5c. Placed Electrical Wires
+  (project.wires ?? []).forEach((wire) => {
+    if (!matchesCategoryFilter(categoryFilter, 'electrical')) return;
+    const fromPt = project.points.find((p) => p.id === wire.fromPointId);
+    const toPt = project.points.find((p) => p.id === wire.toPointId);
+    const haystack = [
+      wire.id,
+      wire.code,
+      wire.category,
+      wire.circuit,
+      wire.wireType,
+      wire.cableMaterial,
+      wire.phaseDesignation,
+      fromPt?.code ?? '',
+      toPt?.code ?? '',
+      'wire',
+      'cable',
+      'electrical',
+    ].join(' ');
+    if (!matchesQueryTokens(haystack, tokens)) return;
+
+    placedResults.push({
+      key: `placed-wire-${wire.id}`,
+      source: 'placed',
+      entity: { kind: 'wire', id: wire.id },
+      title: `Wire ${wire.code} (${fromPt?.code ?? '?'} → ${toPt?.code ?? '?'})`,
+      subtitle: `${wire.category.toUpperCase()} · ${wire.circuit || 'Unassigned'} · ${formatFloorLabel(wire.floor)}`,
+      badge: wire.code,
+      category: 'Wiring',
+      icon: 'cable',
+      floor: wire.floor,
+      x: fromPt && toPt ? (fromPt.x + toPt.x) / 2 : fromPt?.x ?? 0,
+      y: fromPt && toPt ? (fromPt.y + toPt.y) / 2 : fromPt?.y ?? 0,
+      z: 2.2,
     });
   });
 

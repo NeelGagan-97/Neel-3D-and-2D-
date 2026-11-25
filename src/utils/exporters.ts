@@ -324,6 +324,12 @@ export function downloadProjectJson(project: ProjectData) {
   triggerDownload(blob, `${safeFileName(project.name)}.json`);
 }
 
+export function downloadNativeBluespace(project: ProjectData) {
+  const payload = projectStorage.exportNativeBluespace(project);
+  const blob = new Blob([payload], { type: 'application/octet-stream' });
+  triggerDownload(blob, `${safeFileName(project.name)}.bluespace`);
+}
+
 export function downloadFloorPlanPng(project: ProjectData, activeFloor = 1) {
   const canvas = renderArchitecturalSheetCanvas(project, false, activeFloor);
   const suffix = project.site.floors > 1 ? `_Floor${activeFloor}` : '';

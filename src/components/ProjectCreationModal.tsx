@@ -1,10 +1,14 @@
 import React, { useState } from 'react';
-import { ProjectType, UnitSystem } from '../types/design';
+import { BuildingType, ProjectType, UnitSystem } from '../types/design';
 
 export interface ProjectCreationInput {
   name: string;
   units: UnitSystem;
   projectType: ProjectType;
+  buildingType: BuildingType;
+  customStoreys?: number;
+  includeBasement?: boolean;
+  includeTerrace?: boolean;
   description: string;
 }
 
@@ -15,6 +19,18 @@ interface ProjectCreationModalProps {
 
 const INVALID_NAME_PATTERN = /[<>:"/\\|?*]/;
 
+const BUILDING_TYPE_OPTIONS: {
+  value: BuildingType;
+  label: string;
+  subtitle: string;
+  icon: string;
+}[] = [
+  { value: 'single', label: 'Single Floor', subtitle: 'Ground Floor', icon: 'home' },
+  { value: 'duplex', label: 'Duplex', subtitle: 'Ground + First', icon: 'villa' },
+  { value: 'triplex', label: 'Triplex', subtitle: 'Ground + 1st + 2nd', icon: 'apartment' },
+  { value: 'custom', label: 'Custom Multi-Storey', subtitle: 'Basement / Terrace', icon: 'domain' },
+];
+
 export const ProjectCreationModal: React.FC<ProjectCreationModalProps> = ({
   onCancel,
   onCreate,
@@ -22,6 +38,10 @@ export const ProjectCreationModal: React.FC<ProjectCreationModalProps> = ({
   const [name, setName] = useState('');
   const [units, setUnits] = useState<UnitSystem>('ft');
   const [projectType, setProjectType] = useState<ProjectType>('Residential');
+  const [buildingType, setBuildingType] = useState<BuildingType>('duplex');
+  const [customStoreys, setCustomStoreys] = useState<number>(3);
+  const [includeBasement, setIncludeBasement] = useState<boolean>(false);
+  const [includeTerrace, setIncludeTerrace] = useState<boolean>(true);
   const [description, setDescription] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -53,13 +73,17 @@ export const ProjectCreationModal: React.FC<ProjectCreationModalProps> = ({
       name: name.trim(),
       units,
       projectType,
+      buildingType,
+      customStoreys: buildingType === 'custom' ? Math.max(1, Math.min(6, customStoreys)) : undefined,
+      includeBasement: buildingType === 'custom' ? includeBasement : false,
+      includeTerrace: buildingType === 'custom' ? includeTerrace : false,
       description: description.trim(),
     });
   };
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-deep-navy/85 flex items-center justify-center p-gutter-lg"
+      className="fixed inset-0 z-50 bg-deep-navy/85 flex items-center justify-center p-gutter-lg overflow-y-auto"
       role="dialog"
       aria-modal="true"
       aria-labelledby="create-project-modal-title"
@@ -67,7 +91,7 @@ export const ProjectCreationModal: React.FC<ProjectCreationModalProps> = ({
       <form
         onSubmit={handleSubmit}
         noValidate
-        className="w-full max-w-lg bg-surface-container border border-outline rounded-lg overflow-hidden"
+        className="w-full max-w-xl bg-surface-container border border-outline rounded-lg overflow-hidden my-auto"
       >
         {/* Header */}
         <div className="px-gutter-xl py-gutter-lg border-b border-outline-variant bg-surface-container-high flex items-center justify-between">
@@ -82,7 +106,7 @@ export const ProjectCreationModal: React.FC<ProjectCreationModalProps> = ({
                 Create Your Own Space
               </h2>
               <p className="font-mono text-mono-sm text-on-surface-variant">
-                STEP 1 OF 2 · PROJECT SPECIFICATION
+                STEP 1 OF 2 · PROJECT &amp; BUILDING SPECIFICATION
               </p>
             </div>
           </div>
@@ -97,7 +121,7 @@ export const ProjectCreationModal: React.FC<ProjectCreationModalProps> = ({
         </div>
 
         {/* Form Body */}
-        <div className="p-gutter-xl flex flex-col gap-gutter-lg">
+        <div className="p-gutter-xl flex flex-col gap-gutter-md">
           <label className="flex flex-col gap-gutter-xs">
             <span className="font-label text-label-md text-on-surface">
               Project Name <span className="text-secondary">*</span>
@@ -106,7 +130,7 @@ export const ProjectCreationModal: React.FC<ProjectCreationModalProps> = ({
               type="text"
               autoFocus
               required
-              placeholder="My Dream Home - 2BHK"
+              placeholder="My Dream Duplex - 3BHK"
               value={name}
               onChange={(e) => {
                 setName(e.target.value);
@@ -122,6 +146,72 @@ export const ProjectCreationModal: React.FC<ProjectCreationModalProps> = ({
               </span>
             )}
           </label>
+
+          {/* Building Type Selection */}
+          <div className="flex flex-col gap-gutter-xs">
+            <span className="font-label text-label-md text-on-surface">
+              Building Type
+            </span>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-gutter-xs">
+              {BUILDING_TYPE_OPTIONS.map((opt) => {
+                const active = buildingType === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setBuildingType(opt.value)}
+                    className={`flex flex-col items-start gap-1 p-2.5 rounded-sm border text-left transition-colors cursor-pointer ${
+                      active
+                        ? 'bg-primary-container border-primary text-primary'
+                        : 'bg-surface border-outline text-on-surface-variant hover:border-primary/60 hover:text-on-surface'
+                    }`}
+                  >
+                    <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+                      {opt.icon}
+                    </span>
+                    <span className="font-label text-label-sm leading-tight">{opt.label}</span>
+                    <span className="font-mono text-[10px] opacity-80 leading-tight">{opt.subtitle}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {buildingType === 'custom' && (
+              <div className="mt-1 p-gutter-sm rounded-sm bg-surface border border-outline flex flex-wrap items-center justify-between gap-gutter-sm">
+                <label className="flex items-center gap-2">
+                  <span className="font-label text-label-sm text-on-surface-variant">Main Storeys:</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={6}
+                    value={customStoreys}
+                    onChange={(e) => setCustomStoreys(Math.max(1, Math.min(6, Number(e.target.value) || 1)))}
+                    className="w-16 bg-surface-container border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
+                  />
+                </label>
+                <div className="flex items-center gap-gutter-md">
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer font-label text-label-sm text-on-surface">
+                    <input
+                      type="checkbox"
+                      checked={includeBasement}
+                      onChange={(e) => setIncludeBasement(e.target.checked)}
+                      className="accent-primary"
+                    />
+                    <span>Basement</span>
+                  </label>
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer font-label text-label-sm text-on-surface">
+                    <input
+                      type="checkbox"
+                      checked={includeTerrace}
+                      onChange={(e) => setIncludeTerrace(e.target.checked)}
+                      className="accent-primary"
+                    />
+                    <span>Terrace</span>
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-gutter-md">
             <div className="flex flex-col gap-gutter-xs">
@@ -169,7 +259,7 @@ export const ProjectCreationModal: React.FC<ProjectCreationModalProps> = ({
             </span>
             <textarea
               rows={2}
-              placeholder="e.g., East-facing corner plot with open kitchen, living hall, and two bedrooms."
+              placeholder="e.g., East-facing corner plot with duplex layout, staircase core, and floor-wise electrical circuits."
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               className="w-full bg-surface border border-outline rounded-sm px-gutter-md py-gutter-sm font-body text-body-md text-on-surface placeholder:text-on-surface-variant/50 focus:border-primary focus:outline-none resize-none"

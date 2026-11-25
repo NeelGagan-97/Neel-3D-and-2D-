@@ -1,5 +1,11 @@
 import React, { useState } from 'react';
 import { ProjectData, SiteConfig, UnitSystem } from '../types/design';
+import {
+  BUILDING_TYPE_LABELS,
+  DEFAULT_SLAB_THICKNESS_M,
+  getProjectFloors,
+  inferBuildingType,
+} from '../utils/buildingWiring';
 
 interface SiteConfigStepProps {
   project: ProjectData;
@@ -19,11 +25,16 @@ export const SiteConfigStep: React.FC<SiteConfigStepProps> = ({
   const [wallThickInput, setWallThickInput] = useState<number>(
     project.site.units === 'ft' ? 6 : 0.15
   );
+  const [slabThicknessM, setSlabThicknessM] = useState<number>(
+    project.site.slabThicknessM ?? DEFAULT_SLAB_THICKNESS_M
+  );
   const [ceilingHeight, setCeilingHeight] = useState<number>(
     project.site.units === 'ft' ? 10 : 3
   );
-  const [floors, setFloors] = useState<number>(project.site.floors || 1);
+  const initialFloors = getProjectFloors(project);
+  const [floors, setFloors] = useState<number>(initialFloors.length || project.site.floors || 1);
   const [error, setError] = useState<string | null>(null);
+  const buildingTypeLabel = BUILDING_TYPE_LABELS[inferBuildingType(project)];
 
   const handleUnitSwitch = (nextUnit: UnitSystem) => {
     if (nextUnit === units) return;
@@ -79,8 +90,9 @@ export const SiteConfigStep: React.FC<SiteConfigStepProps> = ({
       width: Number(width.toFixed(2)),
       ceilingHeight: Number(ceilingHeight.toFixed(2)),
       wallThickness: normalizedWallThickness,
+      slabThicknessM: Number(Math.max(0.1, Math.min(0.6, slabThicknessM || DEFAULT_SLAB_THICKNESS_M)).toFixed(2)),
       units,
-      floors: Math.max(1, Math.min(5, Math.round(floors))),
+      floors: Math.max(1, Math.min(8, Math.round(floors))),
     });
   };
 
@@ -91,7 +103,10 @@ export const SiteConfigStep: React.FC<SiteConfigStepProps> = ({
           <div>
             <div className="flex items-center gap-gutter-sm mb-1">
               <span className="font-mono text-mono-sm text-primary uppercase">
-                STEP 2 OF 2 · SITE DIMENSION CONFIGURATION
+                STEP 2 OF 2 · SITE &amp; STRUCTURAL CONFIGURATION
+              </span>
+              <span className="font-mono text-mono-sm text-secondary">
+                · {buildingTypeLabel}
               </span>
               <span className="font-mono text-mono-sm text-on-surface-variant">
                 · {project.projectType ?? 'Residential'}
@@ -199,14 +214,28 @@ export const SiteConfigStep: React.FC<SiteConfigStepProps> = ({
             </div>
 
             <label className="flex flex-col gap-gutter-xs">
-              <span className="font-label text-label-md text-on-surface">Number of Floors</span>
+              <span className="font-label text-label-md text-on-surface">Number of Levels</span>
               <input
                 type="number"
                 min={1}
-                max={5}
+                max={8}
                 required
                 value={floors}
-                onChange={(e) => setFloors(Math.max(1, Math.min(5, Number(e.target.value) || 1)))}
+                onChange={(e) => setFloors(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
+                className="w-full bg-surface border border-outline rounded-sm px-gutter-md py-gutter-sm font-mono text-mono-md text-on-surface tabular-nums focus:border-primary focus:outline-none"
+              />
+            </label>
+
+            <label className="flex flex-col gap-gutter-xs">
+              <span className="font-label text-label-md text-on-surface">Slab Thickness (m)</span>
+              <input
+                type="number"
+                step="0.02"
+                min={0.12}
+                max={0.5}
+                required
+                value={slabThicknessM}
+                onChange={(e) => setSlabThicknessM(Number(e.target.value))}
                 className="w-full bg-surface border border-outline rounded-sm px-gutter-md py-gutter-sm font-mono text-mono-md text-on-surface tabular-nums focus:border-primary focus:outline-none"
               />
             </label>

@@ -12,7 +12,10 @@ function makeCanvas(size = 256): [HTMLCanvasElement, CanvasRenderingContext2D] {
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Failed to acquire 2D canvas context for procedural architectural textures.');
+  }
   return [canvas, ctx];
 }
 
@@ -27,7 +30,8 @@ function finalizeTexture(
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeatX, repeatY);
-  tex.anisotropy = Math.min(8, maxAnisotropy);
+  const safeMax = Number.isFinite(maxAnisotropy) && maxAnisotropy >= 1 ? maxAnisotropy : 1;
+  tex.anisotropy = Math.max(1, Math.min(8, safeMax));
   tex.needsUpdate = true;
   return tex;
 }

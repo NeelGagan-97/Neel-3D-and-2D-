@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
 import {
   CATALOG_MAP,
   CIRCUITS,
@@ -10,29 +11,84 @@ import {
   siteToMeters,
 } from '../data/presets';
 import {
+  inferMappedItemType,
+  loadCatalogueProducts,
+} from '../services/productCatalogueStorage';
+import { ParsedImportPreview, projectStorage } from '../services/projectStorage';
+import { ProductCatalogueItem } from '../types/catalogue';
+import {
   ArchitecturalOpening,
+  BuildingType,
+  CableMaterial,
   CameraMode,
+  CameraPreset,
   CanvasTool,
+  CircuitCableConfig,
   CircuitId,
+  DistributionBoardConfig,
+  EarthingPointConfig,
   ElectricalItemType,
   ElectricalPoint,
+  ElectricalWire,
   FloorView3DMode,
   FurnitureItem,
   LightingMode,
+  PhaseDesignation,
   ProjectData,
   RoomType,
   RoomZone,
+  SavedCameraView,
   ScreenId,
   SelectedEntity,
   SiteConfig,
+  StaircaseItem,
+  StaircaseType,
   StudioEntityRef,
   StudioFocusTarget,
   UnitSystem,
   ViewMode,
+  WireCategory,
+  WireLineStyle,
+  WireStandard,
+  WireWaypoint,
+  WiringDisplayConfig,
 } from '../types/design';
+import {
+  addFloorToProject,
+  applyBuildingTypeSafely,
+  autoRouteUnwiredCables,
+  BUILDING_TYPE_LABELS,
+  CIRCUIT_CABLE_RANGES,
+  computeActualGeometryBounds,
+  computeWireLengthMeters,
+  countElementsOnFloor,
+  createDefaultDbAndEarthingPoints,
+  createDefaultStaircase,
+  createElectricalWire,
+  duplicateFloorInProject,
+  fitSiteToActualGeometry,
+  generateAutoRouteWaypoints,
+  generateWallAlignedWaypoints,
+  getFloorLabel,
+  getProjectFloors,
+  getWiringConfig,
+  inferBuildingType,
+  isDuplicateWireConnection,
+  removeFloorFromProject,
+  setProjectFloorCountSafely,
+  updateFloorConfigInProject,
+  validateBuildingAndElectrical,
+  validateCableSizeForCircuit,
+  validateWireRoutePath,
+  WIRE_CATEGORY_LABELS,
+  WIRE_STANDARD_COLORS,
+  WIRE_STANDARD_LABELS,
+} from '../utils/buildingWiring';
+import { downloadExcelBoq } from '../utils/excelBoqExporter';
 import {
   downloadFloorPlanPdf,
   downloadFloorPlanPng,
+  downloadNativeBluespace,
   downloadProjectJson,
 } from '../utils/exporters';
 import {
@@ -71,7 +127,10 @@ import { CreateRoomModal } from './CreateRoomModal';
 import { DrawingInstructionsModal } from './DrawingInstructionsModal';
 import { FindComponentPanel } from './FindComponentPanel';
 import { FloorPlan2D } from './FloorPlan2D';
+import { ImportProjectPreviewModal } from './ImportProjectPreviewModal';
 import { Navbar } from './Navbar';
+import { PdfExportModal } from './PdfExportModal';
+import { ProductCatalogueModal } from './ProductCatalogueModal';
 import { SiteConfigStep } from './SiteConfigStep';
 import { Viewport3D } from './Viewport3D';
 
@@ -99,10 +158,12 @@ const DRAWING_TOOLS: { id: CanvasTool; label: string; icon: string; hint: string
   { id: 'add-room', label: 'Add Room', icon: 'add_box', hint: 'Click any empty area inside the site boundary to create a room' },
   { id: 'add-door', label: 'Add Door', icon: 'door_front', hint: 'Click on any exterior or interior wall to place a door' },
   { id: 'add-window', label: 'Add Window', icon: 'window', hint: 'Click on any wall to snap a parametric window' },
-  { id: 'erase', label: 'Erase', icon: 'ink_eraser', hint: 'Click any room, custom wall, door, window, dimension, or electrical point to remove' },
+  { id: 'add-staircase', label: 'Staircase', icon: 'stairs', hint: 'Click inside the plan to place a parametric inter-floor staircase' },
+  { id: 'add-wire', label: 'Route Cable', icon: 'cable', hint: 'Click a source electrical point, click to place waypoints (Shift for angled), click destination point (Esc to cancel)' },
+  { id: 'erase', label: 'Erase', icon: 'ink_eraser', hint: 'Click any room, wall, door, window, staircase, wire, dimension, or electrical point to remove' },
   { id: 'dimension', label: 'Dimension', icon: 'straighten', hint: 'Click & drag between two points to place a measurement annotation' },
-  { id: 'move', label: 'Move', icon: 'open_with', hint: 'Drag any room or electrical point to reposition it' },
-  { id: 'rotate', label: 'Rotate', icon: 'rotate_right', hint: 'Click any room or door/window to rotate 90°' },
+  { id: 'move', label: 'Move', icon: 'open_with', hint: 'Drag any room, staircase, wire waypoint, or electrical point to reposition it' },
+  { id: 'rotate', label: 'Rotate', icon: 'rotate_right', hint: 'Click any room, staircase, or door/window to rotate 90°' },
   { id: 'pan', label: 'Pan', icon: 'pan_tool', hint: 'Pan active — drag anywhere on the model to move it freely inside the canvas' },
 ];
 
@@ -123,6 +184,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   onRedo,
   onSaveProject,
 }) => {
+  const { profile, isAdmin: authIsAdmin } = useAuth();
+  const isAdmin = authIsAdmin || profile?.role === 'ADMIN';
+
   const [viewMode, setViewMode] = useState<ViewMode>(
     project.siteConfigured === false ? '2d' : initialViewMode
   );
@@ -130,6 +194,10 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const [floorView3D, setFloorView3D] = useState<FloorView3DMode>('active-only');
   const [showGuideModal, setShowGuideModal] = useState<boolean>(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>('orbit');
+  const [cameraPreset, setCameraPreset] = useState<CameraPreset>('perspective');
+  const [appliedSavedView, setAppliedSavedView] = useState<SavedCameraView | null>(null);
+  const captureCameraRef = useRef<(() => SavedCameraView | null) | null>(null);
+  const [savedViewLabel, setSavedViewLabel] = useState<string>('');
   const [lightingMode, setLightingMode] = useState<LightingMode>('daylight');
   const [zoom, setZoom] = useState<number>(100);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -138,18 +206,47 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const snapEnabled = true;
   const [activeTool, setActiveTool] = useState<CanvasTool>('select');
 
+  // Interactive wiring, product catalogue, PDF package & safe import states
+  const [activeWireCategory, setActiveWireCategory] = useState<WireCategory>('phase');
+  const [allowInterFloorWiring, setAllowInterFloorWiring] = useState<boolean>(false);
+  const [catalogueOpen, setCatalogueOpen] = useState<boolean>(false);
+  const [catalogueVersion, setCatalogueVersion] = useState<number>(0);
+  const [pdfModalOpen, setPdfModalOpen] = useState<boolean>(false);
+  const [importPreview, setImportPreview] = useState<ParsedImportPreview | null>(null);
+  const [pendingDeleteFloor, setPendingDeleteFloor] = useState<number | null>(null);
+
   useEffect(() => {
     setCanvasContextMenu(null);
     setOpenToolbarDropdown(null);
   }, [viewMode, activeFloor, project.id]);
 
-  const totalFloors = Math.max(1, Math.min(5, Math.round(project.site.floors || 1)));
+  const projectFloors = useMemo(() => getProjectFloors(project), [project]);
+  const totalFloors = projectFloors.length;
+  const wiringConfig = useMemo(() => getWiringConfig(project), [project]);
+  const validationIssues = useMemo(() => validateBuildingAndElectrical(project), [project]);
+  const catalogueProducts = useMemo(
+    () => loadCatalogueProducts(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [catalogueVersion, catalogueOpen]
+  );
+  const cableCatalogueProducts = useMemo(
+    () => catalogueProducts.filter((p) => p.category === 'Cables & Wires'),
+    [catalogueProducts]
+  );
+  const hasDbPoint = useMemo(
+    () => project.points.some((p) => p.itemType === 'distribution_board'),
+    [project.points]
+  );
+  const hasEarthingPoint = useMemo(
+    () => project.points.some((p) => p.itemType === 'earthing_point'),
+    [project.points]
+  );
 
   useEffect(() => {
-    if (activeFloor > totalFloors) {
-      setActiveFloor(totalFloors);
+    if (!projectFloors.some((f) => f.floor === activeFloor)) {
+      setActiveFloor(projectFloors.find((f) => f.floor === 1)?.floor ?? projectFloors[0]?.floor ?? 1);
     }
-  }, [activeFloor, totalFloors]);
+  }, [activeFloor, projectFloors]);
 
   const floorProject = useMemo(
     () => sliceProjectForFloor(project, activeFloor),
@@ -212,7 +309,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [openToolbarDropdown, setOpenToolbarDropdown] = useState<'view' | 'camera' | 'sky' | null>(null);
-  const [openDrawer, setOpenDrawer] = useState<'tools' | 'rooms' | 'site' | 'electrical' | 'properties' | null>(null);
+  const [openDrawer, setOpenDrawer] = useState<
+    'tools' | 'rooms' | 'site' | 'electrical' | 'wiring' | 'floors' | 'properties' | null
+  >(null);
   const [showSaveAsModal, setShowSaveAsModal] = useState(false);
   const [saveAsName, setSaveAsName] = useState(`${project.name} (Copy)`);
   const [saveAsError, setSaveAsError] = useState<string | null>(null);
@@ -262,6 +361,16 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     if (selectedEntity?.kind !== 'furniture') return null;
     return project.furniture.find((f) => f.id === selectedEntity.id) ?? null;
   }, [project.furniture, selectedEntity]);
+
+  const selectedStaircase = useMemo(() => {
+    if (selectedEntity?.kind !== 'staircase') return null;
+    return (project.staircases ?? []).find((s) => s.id === selectedEntity.id) ?? null;
+  }, [project.staircases, selectedEntity]);
+
+  const selectedWire = useMemo(() => {
+    if (selectedEntity?.kind !== 'wire') return null;
+    return (project.wires ?? []).find((w) => w.id === selectedEntity.id) ?? null;
+  }, [project.wires, selectedEntity]);
 
   // Live Find Component search results across placed canvas entities + component library
   const findResults = useMemo(
@@ -487,7 +596,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     if (project.siteConfigured === false) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      const modalBlocking = Boolean(pendingRoomModal || showSaveAsModal || showGuideModal);
+      const modalBlocking = Boolean(
+        pendingRoomModal || showSaveAsModal || showGuideModal || catalogueOpen || pdfModalOpen || importPreview
+      );
 
       // Allow Ctrl+S save even when Find input is open (prevent browser Save Page dialog)
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's' && !modalBlocking) {
@@ -617,6 +728,9 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     pendingRoomModal,
     showSaveAsModal,
     showGuideModal,
+    catalogueOpen,
+    pdfModalOpen,
+    importPreview,
     findOpen,
     openDrawer,
     pendingPlaceItem,
@@ -680,16 +794,18 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   };
 
   const handleSwitchFloor = (floorNum: number) => {
-    const clamped = Math.max(1, Math.min(totalFloors, floorNum));
-    setActiveFloor(clamped);
+    const targetCfg = projectFloors.find((f) => f.floor === floorNum) ?? projectFloors[0];
+    if (!targetCfg) return;
+    setActiveFloor(targetCfg.floor);
     setFloorView3D('active-only');
     setSelectedEntity(null);
     setAllSelected(false);
     setInspectorWarning(null);
-    const { ceilingM } = siteToMeters(project.site);
     const elev =
-      clamped > 1 ? ` · Elevation +${formatLength((clamped - 1) * ceilingM, units, 1)}` : ' · Ground Level';
-    notify(`Showing ${formatFloorLabel(clamped)} only${elev}`);
+      targetCfg.elevationM !== 0
+        ? ` · Elevation ${targetCfg.elevationM >= 0 ? '+' : ''}${formatLength(targetCfg.elevationM, units, 1)}`
+        : ' · Ground Level';
+    notify(`Showing ${targetCfg.name}${elev}`);
   };
 
   const handleToggleElevatedView = () => {
@@ -698,7 +814,16 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     setSelectedEntity(null);
     setAllSelected(false);
     setInspectorWarning(null);
-    notify(`Elevated View — displaying all ${totalFloors} floors stacked together`);
+    notify(`Complete Building View — displaying all ${totalFloors} floors stacked together`);
+  };
+
+  const handleToggleExplodedView = () => {
+    setFloorView3D('exploded');
+    setViewMode('3d');
+    setSelectedEntity(null);
+    setAllSelected(false);
+    setInspectorWarning(null);
+    notify(`Exploded 3D View — inspecting all ${totalFloors} floors with vertical separation`);
   };
 
   const handleCopyFloorBelow = () => {
@@ -1220,6 +1345,26 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         prev.filter((s) => !(s.kind === 'furniture' && s.id === entity.id))
       );
       notify('Deleted furniture item');
+    } else if (entity.kind === 'staircase') {
+      onUpdateProject((prev) => ({
+        ...prev,
+        staircases: (prev.staircases ?? []).filter((s) => s.id !== entity.id),
+      }));
+      setSelectedEntities((prev) =>
+        prev.filter((s) => !(s.kind === 'staircase' && s.id === entity.id))
+      );
+      notify('Deleted staircase');
+    } else if (entity.kind === 'wire') {
+      // Strictly remove ONLY the wire while preserving both connected electrical components
+      const w = (project.wires ?? []).find((item) => item.id === entity.id);
+      onUpdateProject((prev) => ({
+        ...prev,
+        wires: (prev.wires ?? []).filter((item) => item.id !== entity.id),
+      }));
+      setSelectedEntities((prev) =>
+        prev.filter((s) => !(s.kind === 'wire' && s.id === entity.id))
+      );
+      notify(`Deleted cable ${w?.code ?? ''} (connected electrical components preserved)`);
     } else if (entity.kind === 'dimension') {
       onUpdateProject((prev) => ({
         ...prev,
@@ -1260,7 +1405,406 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         }));
         notify(`Rotated ${fn.kind.replace('-', ' ')} 90°`);
       }
+    } else if (entity.kind === 'staircase') {
+      const st = (project.staircases ?? []).find((s) => s.id === entity.id);
+      if (st) {
+        onUpdateProject((prev) => ({
+          ...prev,
+          staircases: (prev.staircases ?? []).map((s) =>
+            s.id === st.id ? { ...s, rotation: (s.rotation + 90) % 360 } : s
+          ),
+        }));
+        notify(`Rotated ${st.name} 90°`);
+      }
     }
+  };
+
+  // --- Additive Staircase, Cable Routing, DB/Earthing, Catalogue & Camera Handlers ---
+
+  const handleAddStaircase = (x: number, y: number) => {
+    const stair = createDefaultStaircase(project, activeFloor, x, y, 'straight');
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        staircases: [...(prev.staircases ?? []), stair],
+      }),
+      true
+    );
+    setSelectedEntity({ kind: 'staircase', id: stair.id });
+    setActiveTool('select');
+    notify(
+      `Placed ${stair.name} (${getFloorLabel(project, stair.fromFloor)} → ${getFloorLabel(project, stair.toFloor)})`
+    );
+  };
+
+  const handleMoveStaircase = (staircaseId: string, x: number, y: number) => {
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        staircases: (prev.staircases ?? []).map((s) =>
+          s.id === staircaseId ? { ...s, x, y } : s
+        ),
+      }),
+      false
+    );
+  };
+
+  const handleUpdateStaircase = (
+    staircaseId: string,
+    patch: Partial<StaircaseItem>,
+    recordHistory = true
+  ) => {
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        staircases: (prev.staircases ?? []).map((s) =>
+          s.id === staircaseId ? { ...s, ...patch } : s
+        ),
+      }),
+      recordHistory
+    );
+  };
+
+  const handleCreateWire = (
+    fromPointId: string,
+    toPointId: string,
+    waypoints: WireWaypoint[]
+  ) => {
+    const fromPt = project.points.find((p) => p.id === fromPointId);
+    const toPt = project.points.find((p) => p.id === toPointId);
+    if (!fromPt || !toPt) return;
+
+    if (isDuplicateWireConnection(project.wires ?? [], fromPointId, toPointId, activeWireCategory)) {
+      notify(
+        `A ${WIRE_CATEGORY_LABELS[activeWireCategory]} wire already connects ${fromPt.code} and ${toPt.code}.`,
+        'warning'
+      );
+      return;
+    }
+
+    const pathCheck = validateWireRoutePath(fromPt, toPt, waypoints, project);
+    if (!pathCheck.valid) {
+      notify(pathCheck.reason ?? 'Cable path is invalid or zero length.', 'warning');
+      return;
+    }
+
+    const targetCircuit = fromPt.circuit || toPt.circuit;
+    const circuitCfg = targetCircuit ? project.circuitCableConfigs?.[targetCircuit] : undefined;
+
+    const newWire = createElectricalWire({
+      project,
+      fromPoint: fromPt,
+      toPoint: toPt,
+      waypoints,
+      category: activeWireCategory,
+      circuit: targetCircuit,
+      cableMaterial: circuitCfg?.cableMaterial ?? 'Copper',
+      cableSizeSqMm: circuitCfg?.cableSizeSqMm ?? null,
+    });
+
+    const enrichedWire: ElectricalWire = {
+      ...newWire,
+      ...(circuitCfg?.productId
+        ? {
+            productId: circuitCfg.productId,
+            manufacturer: circuitCfg.manufacturer,
+            modelNumber: circuitCfg.modelNumber,
+          }
+        : {}),
+    };
+
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        wires: [...(prev.wires ?? []), enrichedWire],
+      }),
+      true
+    );
+    setSelectedEntity({ kind: 'wire', id: enrichedWire.id });
+    const wireLen = computeWireLengthMeters(enrichedWire, {
+      ...project,
+      wires: [...(project.wires ?? []), enrichedWire],
+    });
+    notify(
+      `Routed ${enrichedWire.code} (${fromPt.code} → ${toPt.code}, ${wireLen.toFixed(1)} m)`
+    );
+  };
+
+  const handleUpdateWireWaypoints = (
+    wireId: string,
+    waypoints: WireWaypoint[],
+    recordHistory = false
+  ) => {
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        wires: (prev.wires ?? []).map((w) =>
+          w.id === wireId ? { ...w, waypoints } : w
+        ),
+      }),
+      recordHistory
+    );
+  };
+
+  const handleUpdateWire = (
+    wireId: string,
+    patch: Partial<ElectricalWire>,
+    recordHistory = true
+  ) => {
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        wires: (prev.wires ?? []).map((w) =>
+          w.id === wireId ? { ...w, ...patch } : w
+        ),
+      }),
+      recordHistory
+    );
+  };
+
+  const handleUpdateWiringConfig = (patch: Partial<WiringDisplayConfig>) => {
+    onUpdateProject(
+      (prev) => {
+        const current = getWiringConfig(prev);
+        const next: WiringDisplayConfig = { ...current, ...patch };
+        // When standard changes, update wire colors that still match the previous standard's default
+        const nextWires =
+          patch.standard && patch.standard !== current.standard
+            ? (prev.wires ?? []).map((w) => ({
+                ...w,
+                color: WIRE_STANDARD_COLORS[patch.standard!][w.category],
+              }))
+            : prev.wires;
+        return {
+          ...prev,
+          wiringConfig: next,
+          ...(nextWires ? { wires: nextWires } : {}),
+        };
+      },
+      true
+    );
+  };
+
+  const handleUpdateCircuitCableConfig = (
+    circuit: CircuitId,
+    patch: Partial<CircuitCableConfig>,
+    applyToCircuitWires = true
+  ) => {
+    onUpdateProject(
+      (prev) => {
+        const existing = prev.circuitCableConfigs?.[circuit] ?? {
+          circuit,
+          cableSizeSqMm: null,
+          cableMaterial: 'Copper' as CableMaterial,
+        };
+        const updated: CircuitCableConfig = { ...existing, ...patch, circuit };
+        const nextConfigs = {
+          ...(prev.circuitCableConfigs ?? {}),
+          [circuit]: updated,
+        };
+        const nextWires = applyToCircuitWires
+          ? (prev.wires ?? []).map((w) =>
+              w.circuit === circuit
+                ? {
+                    ...w,
+                    cableSizeSqMm: updated.cableSizeSqMm,
+                    cableMaterial: updated.cableMaterial,
+                    ...(updated.productId !== undefined
+                      ? {
+                          productId: updated.productId,
+                          manufacturer: updated.manufacturer,
+                          modelNumber: updated.modelNumber,
+                        }
+                      : {}),
+                  }
+                : w
+            )
+          : prev.wires;
+        return {
+          ...prev,
+          circuitCableConfigs: nextConfigs,
+          ...(nextWires ? { wires: nextWires } : {}),
+        };
+      },
+      true
+    );
+  };
+
+  const handleAddMissingDbAndEarthing = () => {
+    const res = createDefaultDbAndEarthingPoints(project);
+    if (res.added.length === 0) {
+      notify('Distribution Board (DB) and Earthing Point are already present in this design.');
+      return;
+    }
+    onUpdateProject(
+      (prev) => {
+        const built = createDefaultDbAndEarthingPoints(prev);
+        return {
+          ...prev,
+          points: built.nextPoints,
+        };
+      },
+      true
+    );
+    setSelectedEntity({ kind: 'point', id: res.added[0].id });
+    setOpenDrawer('properties');
+    notify(
+      `Added ${res.added.map((a) => `${a.code} (${a.name})`).join(' & ')} on Ground Floor`
+    );
+  };
+
+  const handleAutoRouteFromDb = () => {
+    const dbCheck = createDefaultDbAndEarthingPoints(project);
+    const preparedProject: ProjectData =
+      dbCheck.added.length > 0 ? { ...project, points: dbCheck.nextPoints } : project;
+    const routed = autoRouteUnwiredCables(preparedProject);
+    if (routed.addedCount === 0 && dbCheck.added.length === 0) {
+      notify('All branch electrical points are already connected with routed cables.');
+      return;
+    }
+    const nextProj: ProjectData = {
+      ...preparedProject,
+      wires: routed.nextWires,
+    };
+    const totalLen = routed.nextWires.reduce(
+      (sum, w) => sum + computeWireLengthMeters(w, nextProj),
+      0
+    );
+    onUpdateProject(() => nextProj, true);
+    notify(
+      `Routed ${routed.addedCount} wall-aligned cable run${routed.addedCount === 1 ? '' : 's'} from DB-1 (Total: ${totalLen.toFixed(1)} m)`
+    );
+  };
+
+  const handleFitSiteToGeometry = () => {
+    const fitted = fitSiteToActualGeometry(project);
+    if (!fitted.changed) {
+      notify('Site boundary already encloses all room and electrical geometry.');
+      return;
+    }
+    onUpdateProject(
+      (prev) => fitSiteToActualGeometry(prev).project,
+      true
+    );
+    notify(
+      `Expanded site boundary to ${fitted.nextLength} ${project.site.units} × ${fitted.nextWidth} ${project.site.units} (all rooms preserved)`
+    );
+  };
+
+  const handleAddCatalogueProductToProject = (product: ProductCatalogueItem) => {
+    const mappedType: ElectricalItemType =
+      product.mappedItemType ?? inferMappedItemType(product.category) ?? 'switch';
+    const cat = CATALOG_MAP[mappedType];
+    const targetRoom =
+      (selectedRoom && getItemFloor(selectedRoom) === activeFloor ? selectedRoom : null) ??
+      floorProject.rooms[0];
+    const { lengthM, widthM } = siteToMeters(project.site);
+
+    const existingCount = project.points.filter((p) => p.itemType === mappedType).length + 1;
+    const code = `${cat.shortCode}-${String(existingCount).padStart(2, '0')}`;
+    const offsetAngle = (existingCount * 1.35) % (Math.PI * 2);
+    const rx = targetRoom ? Math.min(targetRoom.width * 0.25, 0.7) : 0.6;
+    const ry = targetRoom ? Math.min(targetRoom.height * 0.25, 0.7) : 0.6;
+    const px = Number(
+      (
+        (targetRoom ? targetRoom.x + targetRoom.width / 2 : lengthM / 2) +
+        Math.cos(offsetAngle) * rx
+      ).toFixed(2)
+    );
+    const py = Number(
+      (
+        (targetRoom ? targetRoom.y + targetRoom.height / 2 : widthM / 2) +
+        Math.sin(offsetAngle) * ry
+      ).toFixed(2)
+    );
+
+    const newPoint: ElectricalPoint = {
+      id: `pt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      floor: activeFloor,
+      code,
+      name: `${product.brand || product.manufacturer} ${product.productName}`.trim(),
+      itemType: mappedType,
+      category: cat.category,
+      roomId: targetRoom?.id ?? 'site',
+      x: px,
+      y: py,
+      z: cat.defaultMountHeight,
+      rotation: 0,
+      wattage: product.wattageW ?? cat.defaultWattage,
+      voltage: 230,
+      circuit: cat.defaultCircuit,
+      unitCost: product.unitPrice ?? 0,
+      productId: product.id,
+      manufacturer: product.manufacturer,
+      brand: product.brand || product.manufacturer,
+      modelNumber: product.modelNumber,
+      specification: product.specification,
+      gstPercent: product.gstPercent ?? undefined,
+    };
+
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        points: [...prev.points, newPoint],
+      }),
+      true
+    );
+    setSelectedEntity({ kind: 'point', id: newPoint.id });
+    setCatalogueOpen(false);
+    setOpenDrawer('properties');
+    notify(
+      `Added ${product.manufacturer} ${product.productName} (${code}) to ${getFloorLabel(project, activeFloor)}`
+    );
+  };
+
+  const handleAssignCableToCircuit = (product: ProductCatalogueItem, circuit: CircuitId) => {
+    handleUpdateCircuitCableConfig(
+      circuit,
+      {
+        cableSizeSqMm: product.cableSizeSqMm ?? project.circuitCableConfigs?.[circuit]?.cableSizeSqMm ?? null,
+        productId: product.id,
+        manufacturer: product.manufacturer,
+        modelNumber: product.modelNumber,
+      },
+      true
+    );
+    setCatalogueOpen(false);
+    notify(
+      `Assigned ${product.manufacturer} ${product.productName}${product.cableSizeSqMm ? ` (${product.cableSizeSqMm} sq.mm)` : ''} to ${circuit}`
+    );
+  };
+
+  const handleSaveCurrentCameraView = () => {
+    const captured = captureCameraRef.current?.();
+    if (!captured) {
+      notify('Switch to 3D Preview to save the current camera angle.', 'warning');
+      return;
+    }
+    const existingCount = (project.savedCameraViews ?? []).length;
+    const namedView: SavedCameraView = {
+      ...captured,
+      name: savedViewLabel.trim() || `View ${existingCount + 1} (${cameraPreset.toUpperCase()})`,
+    };
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        savedCameraViews: [...(prev.savedCameraViews ?? []), namedView],
+      }),
+      true
+    );
+    setSavedViewLabel('');
+    notify(`Saved 3D camera view "${namedView.name}"`);
+  };
+
+  const handleDeleteSavedCameraView = (viewId: string) => {
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        savedCameraViews: (prev.savedCameraViews ?? []).filter((v) => v.id !== viewId),
+      }),
+      true
+    );
+    notify('Removed saved camera view');
   };
 
   // --- Electrical helpers (preserved & multi-floor aware) ---
@@ -1595,10 +2139,37 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   };
 
   const handleSiteChange = <K extends keyof SiteConfig>(field: K, value: SiteConfig[K]) => {
-    onUpdateProject((prev) => ({
-      ...prev,
-      site: { ...prev.site, [field]: value },
-    }));
+    if (field === 'floors') {
+      const safe = setProjectFloorCountSafely(project, Number(value));
+      if (safe.blockedReason) {
+        notify(safe.blockedReason, 'warning');
+        return;
+      }
+      onUpdateProject(() => safe.project, true);
+      return;
+    }
+
+    onUpdateProject((prev) => {
+      const nextSite = { ...prev.site, [field]: value };
+      return {
+        ...prev,
+        site: nextSite,
+      };
+    });
+
+    if (field === 'length' || field === 'width') {
+      const nextSite = { ...project.site, [field]: value };
+      const { lengthM: nextL, widthM: nextW } = siteToMeters(nextSite);
+      const overflowRooms = project.rooms.filter(
+        (r) => r.x + r.width > nextL + 0.04 || r.y + r.height > nextW + 0.04
+      );
+      if (overflowRooms.length > 0) {
+        notify(
+          `Validation Error: ${overflowRooms.length} room(s) now exceed the ${nextSite.length} × ${nextSite.width} ${nextSite.units} site boundary. Resize rooms or expand site dimensions.`,
+          'warning'
+        );
+      }
+    }
   };
 
   const handleSaveAsSubmit = (e: React.FormEvent) => {
@@ -1619,15 +2190,35 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      const result = onImportProject(String(reader.result ?? ''));
-      if (result.ok) {
-        notify(`Imported project from ${file.name}`);
-      } else {
-        notify(result.error ?? 'Failed to import project file.', 'warning');
+      const raw = String(reader.result ?? '');
+      const preview = projectStorage.parseNativeProjectFile(raw);
+      if (!preview) {
+        notify(
+          `Could not parse "${file.name}". Please select a valid Blue Space (.bluespace or .json) file.`,
+          'warning'
+        );
+        return;
       }
+      setImportPreview(preview);
     };
     reader.readAsText(file);
     e.target.value = '';
+  };
+
+  const handleConfirmSafeImport = (finalName: string) => {
+    if (!importPreview) return;
+    const renamedProject: ProjectData = {
+      ...importPreview.project,
+      name: finalName,
+    };
+    const serialized = projectStorage.exportNativeBluespace(renamedProject);
+    const result = onImportProject(serialized);
+    setImportPreview(null);
+    if (result.ok) {
+      notify(`Imported "${finalName}" as a new project (existing projects preserved)`);
+    } else {
+      notify(result.error ?? 'Failed to import project file.', 'warning');
+    }
   };
 
   const selectedRoomArea = selectedRoom
@@ -1644,11 +2235,19 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           ? 'WALL'
           : selectedOpening
             ? selectedOpening.kind
-            : selectedPoint
-              ? 'ELECTRICAL'
-              : selectedFurniture
-                ? 'FURNITURE'
-                : 'SITE';
+            : selectedStaircase
+              ? 'STAIRCASE'
+              : selectedWire
+                ? 'CABLE'
+                : selectedPoint
+                  ? selectedPoint.itemType === 'distribution_board'
+                    ? 'DIST. BOARD'
+                    : selectedPoint.itemType === 'earthing_point'
+                      ? 'EARTHING'
+                      : 'ELECTRICAL'
+                  : selectedFurniture
+                    ? 'FURNITURE'
+                    : 'SITE';
 
   return (
     <div className="min-h-screen lg:h-screen lg:overflow-hidden flex flex-col bg-surface text-on-surface">
@@ -1726,9 +2325,21 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
             {showExportMenu && (
               <div
-                className="absolute left-0 top-full mt-1 w-48 z-40 bg-surface-container border border-outline rounded-md shadow-xl py-1 flex flex-col"
+                className="absolute left-0 top-full mt-1 w-64 z-40 bg-surface-container border border-outline rounded-md shadow-xl py-1 flex flex-col"
                 onMouseLeave={() => setShowExportMenu(false)}
               >
+                <button
+                  type="button"
+                  onClick={() => {
+                    downloadNativeBluespace(project);
+                    setShowExportMenu(false);
+                    notify(`Downloaded lossless native project (${project.name}.bluespace)`);
+                  }}
+                  className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-primary hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-primary text-[16px]">deployed_code</span>
+                  <span>Download Native (.bluespace)</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -1739,31 +2350,55 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-on-surface hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-primary text-[16px]">data_object</span>
-                  <span>Download JSON</span>
+                  <span>Download JSON (.json)</span>
+                </button>
+                <div className="my-1 border-t border-outline-variant" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowExportMenu(false);
+                    setPdfModalOpen(true);
+                  }}
+                  className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-secondary hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-secondary text-[16px]">auto_stories</span>
+                  <span>Drawing Package (Multi-Page PDF)...</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    downloadExcelBoq(project);
+                    setShowExportMenu(false);
+                    notify(`Exported multi-sheet Excel BOQ (.xlsx) for "${project.name}"`);
+                  }}
+                  className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-on-surface hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-secondary text-[16px]">table_view</span>
+                  <span>Export Excel BOQ (.xlsx)</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     downloadFloorPlanPdf(project, activeFloor);
                     setShowExportMenu(false);
-                    notify(`Exported ${project.name} (${formatFloorLabel(activeFloor)}) PDF`);
+                    notify(`Exported ${project.name} (${getFloorLabel(project, activeFloor)}) PDF`);
                   }}
                   className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-on-surface hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-secondary text-[16px]">picture_as_pdf</span>
-                  <span>Export Floor Plan (PDF)</span>
+                  <span>Export Active Floor (PDF)</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     downloadFloorPlanPng(project, activeFloor);
                     setShowExportMenu(false);
-                    notify(`Exported ${project.name} (${formatFloorLabel(activeFloor)}) PNG`);
+                    notify(`Exported ${project.name} (${getFloorLabel(project, activeFloor)}) PNG`);
                   }}
                   className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-on-surface hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-primary text-[16px]">image</span>
-                  <span>Export Floor Plan (PNG)</span>
+                  <span>Export Active Floor (PNG)</span>
                 </button>
                 <div className="my-1 border-t border-outline-variant" />
                 <button
@@ -1775,14 +2410,14 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-[16px]">upload_file</span>
-                  <span>Import Project (.json)</span>
+                  <span>Import (.bluespace / .json)</span>
                 </button>
               </div>
             )}
             <input
               ref={importInputRef}
               type="file"
-              accept=".json,application/json"
+              accept=".bluespace,.json,application/json"
               className="hidden"
               onChange={handleImportFileChange}
             />
@@ -1932,7 +2567,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             )}
           </div>
 
-          {/* Separate Dropdown 2: 3D Camera Mode (Orbit / Walk) */}
+          {/* Separate Dropdown 2: 3D Camera Mode & Architectural Projections */}
           {viewMode === '3d' && (
             <div className="relative">
               <button
@@ -1941,13 +2576,19 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   setShowExportMenu(false);
                   setOpenToolbarDropdown((prev) => (prev === 'camera' ? null : 'camera'));
                 }}
-                title="3D Camera Navigation Mode"
+                title="3D Camera Modes, Elevations & Saved Views"
                 className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-surface-container border border-outline-variant text-on-surface hover:border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
               >
                 <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
-                  {cameraMode === 'orbit' ? '3d_rotation' : 'directions_walk'}
+                  {cameraMode === 'fps' ? 'directions_walk' : '3d_rotation'}
                 </span>
-                <span>{cameraMode === 'orbit' ? 'Orbit' : 'Walk'}</span>
+                <span>
+                  {cameraMode === 'fps'
+                    ? 'Walk'
+                    : cameraPreset === 'perspective'
+                      ? 'Orbit'
+                      : cameraPreset.charAt(0).toUpperCase() + cameraPreset.slice(1)}
+                </span>
                 <span className="material-symbols-outlined text-[14px] text-on-surface-variant" aria-hidden="true">
                   expand_more
                 </span>
@@ -1955,24 +2596,28 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
               {openToolbarDropdown === 'camera' && (
                 <div
-                  className="absolute right-0 top-full mt-1 w-44 z-40 bg-surface-container border border-outline rounded-md shadow-xl py-1 flex flex-col"
-                  onMouseLeave={() => setOpenToolbarDropdown(null)}
+                  className="absolute right-0 top-full mt-1 w-64 z-40 bg-surface-container border border-outline rounded-md shadow-xl py-1 flex flex-col max-h-[75vh] overflow-y-auto"
                 >
+                  <div className="px-gutter-md py-1 font-mono text-[10px] uppercase text-on-surface-variant">
+                    Navigation Modes
+                  </div>
                   <button
                     type="button"
                     onClick={() => {
                       setCameraMode('orbit');
+                      setCameraPreset('perspective');
+                      setAppliedSavedView(null);
                       setOpenToolbarDropdown(null);
                     }}
                     className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
-                      cameraMode === 'orbit' ? 'text-primary' : 'text-on-surface'
+                      cameraMode === 'orbit' && cameraPreset === 'perspective' ? 'text-primary' : 'text-on-surface'
                     }`}
                   >
                     <span className="inline-flex items-center gap-gutter-xs">
                       <span className="material-symbols-outlined text-[16px]" aria-hidden="true">3d_rotation</span>
-                      <span>Orbit</span>
+                      <span>Perspective Orbit</span>
                     </span>
-                    {cameraMode === 'orbit' && (
+                    {cameraMode === 'orbit' && cameraPreset === 'perspective' && (
                       <span className="material-symbols-outlined text-[15px]" aria-hidden="true">check</span>
                     )}
                   </button>
@@ -1980,8 +2625,10 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     type="button"
                     onClick={() => {
                       setCameraMode('fps');
+                      setCameraPreset('perspective');
+                      setAppliedSavedView(null);
                       setOpenToolbarDropdown(null);
-                      notify(`First-Person walkthrough (1:3 Scale) on ${formatFloorLabel(activeFloor)} — use W/A/S/D or Arrows & drag to look`);
+                      notify(`First-Person walkthrough (1:3 Scale) on ${getFloorLabel(project, activeFloor)} — use W/A/S/D or Arrows & drag to look`);
                     }}
                     className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
                       cameraMode === 'fps' ? 'text-primary' : 'text-on-surface'
@@ -1995,6 +2642,102 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                       <span className="material-symbols-outlined text-[15px]" aria-hidden="true">check</span>
                     )}
                   </button>
+
+                  <div className="my-1 border-t border-outline-variant" />
+                  <div className="px-gutter-md py-1 font-mono text-[10px] uppercase text-on-surface-variant">
+                    Orthographic &amp; Elevation Views
+                  </div>
+                  {(
+                    [
+                      { id: 'top', label: 'Orthographic Top', icon: 'vertical_align_top' },
+                      { id: 'isometric', label: 'Isometric 3D', icon: 'view_in_ar' },
+                      { id: 'front', label: 'Front Elevation', icon: 'crop_landscape' },
+                      { id: 'rear', label: 'Rear Elevation', icon: 'flip' },
+                      { id: 'left', label: 'Left Elevation', icon: 'west' },
+                      { id: 'right', label: 'Right Elevation', icon: 'east' },
+                    ] as const
+                  ).map((preset) => {
+                    const active = cameraMode === 'orbit' && cameraPreset === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => {
+                          setCameraMode('orbit');
+                          setCameraPreset(preset.id);
+                          setAppliedSavedView(null);
+                          setOpenToolbarDropdown(null);
+                          notify(`Switched 3D camera to ${preset.label}`);
+                        }}
+                        className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
+                          active ? 'text-primary' : 'text-on-surface'
+                        }`}
+                      >
+                        <span className="inline-flex items-center gap-gutter-xs">
+                          <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                            {preset.icon}
+                          </span>
+                          <span>{preset.label}</span>
+                        </span>
+                        {active && (
+                          <span className="material-symbols-outlined text-[15px]" aria-hidden="true">check</span>
+                        )}
+                      </button>
+                    );
+                  })}
+
+                  <div className="my-1 border-t border-outline-variant" />
+                  <div className="px-gutter-md py-1 font-mono text-[10px] uppercase text-on-surface-variant">
+                    Saved Camera Views ({(project.savedCameraViews ?? []).length})
+                  </div>
+                  <div className="px-gutter-sm py-1 flex items-center gap-1">
+                    <input
+                      type="text"
+                      placeholder="Angle name..."
+                      value={savedViewLabel}
+                      onChange={(e) => setSavedViewLabel(e.target.value)}
+                      className="flex-1 min-w-0 bg-surface border border-outline rounded-sm px-2 py-1 font-body text-xs text-on-surface focus:border-primary focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveCurrentCameraView}
+                      className="px-2 py-1 rounded-sm bg-primary text-on-primary font-label text-[11px] cursor-pointer whitespace-nowrap"
+                    >
+                      Save
+                    </button>
+                  </div>
+                  {(project.savedCameraViews ?? []).length > 0 && (
+                    <div className="flex flex-col px-1 pb-1 gap-0.5">
+                      {(project.savedCameraViews ?? []).map((sv) => (
+                        <div
+                          key={sv.id}
+                          className="flex items-center justify-between gap-1 px-2 py-1 rounded-sm hover:bg-surface-container-high"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCameraMode('orbit');
+                              setCameraPreset(sv.preset);
+                              setAppliedSavedView({ ...sv });
+                              setOpenToolbarDropdown(null);
+                              notify(`Loaded saved view "${sv.name}"`);
+                            }}
+                            className="flex-1 text-left font-body text-xs text-on-surface truncate cursor-pointer"
+                          >
+                            {sv.name}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteSavedCameraView(sv.id)}
+                            title="Delete saved view"
+                            className="text-on-surface-variant hover:text-error cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[14px]">delete</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -2242,9 +2985,15 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     <input
                       type="number"
                       step="0.5"
-                      min={5}
+                      min={1}
                       value={project.site.length}
-                      onChange={(e) => handleSiteChange('length', Math.max(5, Number(e.target.value) || 10))}
+                      onChange={(e) => {
+                        const raw = e.target.value.trim();
+                        if (!raw) return;
+                        const parsed = Number(raw);
+                        if (!Number.isFinite(parsed) || parsed < 1) return;
+                        handleSiteChange('length', parsed);
+                      }}
                       className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
                     />
                   </label>
@@ -2253,9 +3002,15 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     <input
                       type="number"
                       step="0.5"
-                      min={5}
+                      min={1}
                       value={project.site.width}
-                      onChange={(e) => handleSiteChange('width', Math.max(5, Number(e.target.value) || 10))}
+                      onChange={(e) => {
+                        const raw = e.target.value.trim();
+                        if (!raw) return;
+                        const parsed = Number(raw);
+                        if (!Number.isFinite(parsed) || parsed < 1) return;
+                        handleSiteChange('width', parsed);
+                      }}
                       className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
                     />
                   </label>
@@ -2266,7 +3021,13 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                       step="0.5"
                       min={2}
                       value={project.site.ceilingHeight}
-                      onChange={(e) => handleSiteChange('ceilingHeight', Math.max(2, Number(e.target.value) || 10))}
+                      onChange={(e) => {
+                        const raw = e.target.value.trim();
+                        if (!raw) return;
+                        const parsed = Number(raw);
+                        if (!Number.isFinite(parsed) || parsed < 2) return;
+                        handleSiteChange('ceilingHeight', parsed);
+                      }}
                       className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
                     />
                   </label>
@@ -2325,12 +3086,59 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     <input
                       type="number"
                       min={1}
-                      max={5}
-                      value={project.site.floors}
-                      onChange={(e) => handleSiteChange('floors', Math.max(1, Math.min(5, Number(e.target.value) || 1)))}
+                      max={8}
+                      value={projectFloors.length}
+                      onChange={(e) => {
+                        const raw = e.target.value.trim();
+                        if (!raw) return;
+                        const parsed = Number(raw);
+                        if (!Number.isFinite(parsed) || parsed < 1 || parsed > 8) return;
+                        handleSiteChange('floors', parsed);
+                      }}
                       className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums focus:border-primary focus:outline-none"
                     />
                   </label>
+                  <label className="col-span-2 flex items-center gap-1.5 pt-1 border-t border-outline-variant cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(project.site.allowFloorExceedSite)}
+                      onChange={(e) =>
+                        onUpdateProject(
+                          (prev) => ({
+                            ...prev,
+                            site: {
+                              ...prev.site,
+                              allowFloorExceedSite: e.target.checked,
+                            },
+                          }),
+                          true
+                        )
+                      }
+                      className="accent-primary"
+                    />
+                    <span className="font-label text-[10px] text-on-surface-variant">
+                      Allow floor overhangs beyond site
+                    </span>
+                  </label>
+                  {(() => {
+                    const geomBounds = computeActualGeometryBounds(project);
+                    if (!geomBounds.exceedsSite) return null;
+                    return (
+                      <div className="col-span-2 mt-0.5 p-1.5 rounded-sm bg-error/10 border border-error/60 flex flex-col gap-1">
+                        <span className="font-mono text-[10px] text-error leading-snug">
+                          Geometry ({formatLength(geomBounds.spanXM, units, 1)} × {formatLength(geomBounds.spanYM, units, 1)}) exceeds site ({project.site.length} × {project.site.width} {unitShort}).
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleFitSiteToGeometry}
+                          className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded-sm bg-primary text-on-primary font-label text-[10px] font-semibold cursor-pointer hover:brightness-110"
+                        >
+                          <span className="material-symbols-outlined text-[13px]" aria-hidden="true">fit_screen</span>
+                          Fit Site to Geometry
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
               </details>
 
@@ -2361,7 +3169,50 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     expand_more
                   </span>
                 </summary>
-                <div className="absolute left-0 top-full mt-1 w-64 max-h-80 overflow-y-auto z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-xs flex flex-col gap-1">
+                <div className="absolute left-0 top-full mt-1 w-72 max-h-96 overflow-y-auto z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-xs flex flex-col gap-1">
+                  {/* Multi-Brand Product Catalogue Launcher */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenDrawer(null);
+                      setCatalogueOpen(true);
+                    }}
+                    className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-sm bg-primary-container/35 border border-primary text-primary hover:bg-primary-container/50 text-left transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="material-symbols-outlined text-[16px] shrink-0" aria-hidden="true">
+                        inventory_2
+                      </span>
+                      <span className="font-label text-label-sm truncate">
+                        Multi-Brand Product Catalogue
+                      </span>
+                    </div>
+                    <span className="font-mono text-[10px] shrink-0">13 Brands</span>
+                  </button>
+
+                  {(!hasDbPoint || !hasEarthingPoint) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenDrawer(null);
+                        handleAddMissingDbAndEarthing();
+                      }}
+                      className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-sm bg-secondary-container/30 border border-secondary text-secondary hover:bg-secondary-container/45 text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="material-symbols-outlined text-[15px] shrink-0" aria-hidden="true">
+                          electrical_services
+                        </span>
+                        <span className="font-label text-label-sm truncate">
+                          Add Missing {!hasDbPoint && !hasEarthingPoint ? 'DB & Earthing' : !hasDbPoint ? 'Distribution Board' : 'Earthing Point'}
+                        </span>
+                      </div>
+                      <span className="font-mono text-[10px] shrink-0">GF</span>
+                    </button>
+                  )}
+
+                  <div className="my-0.5 border-t border-outline-variant" />
+
                   {ELECTRICAL_CATALOG.map((item) => (
                     <button
                       key={item.itemType}
@@ -2381,94 +3232,753 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                         </span>
                       </div>
                       <span className="font-mono text-[10px] text-on-surface-variant shrink-0">
-                        {item.defaultWattage}W
+                        {item.defaultWattage > 0 ? `${item.defaultWattage}W` : item.shortCode}
                       </span>
                     </button>
                   ))}
                 </div>
               </details>
+
+              {/* E. WIRING, CABLE SIZES & VALIDATION */}
+              <details
+                open={openDrawer === 'wiring'}
+                className="relative group bg-surface-container border border-outline-variant rounded-md"
+              >
+                <summary
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setOpenDrawer((prev) => (prev === 'wiring' ? null : 'wiring'));
+                  }}
+                  className={`flex items-center gap-1.5 px-gutter-sm py-1.5 cursor-pointer list-none select-none hover:bg-surface-container-high rounded-md ${
+                    openDrawer === 'wiring' ? 'bg-surface-container-high' : ''
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-secondary text-[15px]" aria-hidden="true">
+                    cable
+                  </span>
+                  <span className="font-label text-label-sm text-on-surface uppercase tracking-wider whitespace-nowrap">
+                    E. Wiring &amp; Cables ({(project.wires ?? []).length})
+                  </span>
+                  {validationIssues.length > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-secondary-container text-secondary font-mono text-[10px]">
+                      {validationIssues.length}
+                    </span>
+                  )}
+                  <span
+                    className="material-symbols-outlined text-on-surface-variant text-[16px] transition-transform duration-panel-toggle group-open:rotate-180"
+                    aria-hidden="true"
+                  >
+                    expand_more
+                  </span>
+                </summary>
+                <div
+                  onPointerDown={(e) => e.stopPropagation()}
+                  className="absolute left-0 top-full mt-1 w-[340px] max-w-[92vw] max-h-[72vh] overflow-y-auto z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-sm flex flex-col gap-2.5"
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleSelectTool('add-wire');
+                        setOpenDrawer(null);
+                      }}
+                      className={`flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-sm border font-label text-label-sm cursor-pointer ${
+                        activeTool === 'add-wire'
+                          ? 'bg-secondary text-on-secondary border-secondary'
+                          : 'bg-secondary-container/30 border-secondary text-secondary hover:bg-secondary-container/50'
+                      }`}
+                    >
+                      <span className="material-symbols-outlined text-[15px]">cable</span>
+                      <span>Route Cable</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleAutoRouteFromDb();
+                      }}
+                      title="Generate obstacle-aware editable cable runs from Main Distribution Board (DB-1) to unwired circuit points"
+                      className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-primary-container/30 border border-primary text-primary hover:bg-primary-container/50 font-label text-label-sm cursor-pointer whitespace-nowrap"
+                    >
+                      <span className="material-symbols-outlined text-[14px]">route</span>
+                      <span>Auto-Route DB</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenDrawer(null);
+                        setCatalogueOpen(true);
+                      }}
+                      className="px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-primary hover:border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
+                    >
+                      Catalogue
+                    </button>
+                  </div>
+
+                  {/* Active wire category & standard */}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <label className="flex flex-col gap-0.5">
+                      <span className="font-label text-[10px] text-on-surface-variant uppercase">Wire Category</span>
+                      <select
+                        value={activeWireCategory}
+                        onChange={(e) => setActiveWireCategory(e.target.value as WireCategory)}
+                        className="bg-surface border border-outline rounded-sm px-2 py-1 font-body text-xs text-on-surface"
+                      >
+                        {(Object.keys(WIRE_CATEGORY_LABELS) as WireCategory[]).map((cat) => (
+                          <option key={cat} value={cat} className="bg-surface-container">
+                            {WIRE_CATEGORY_LABELS[cat]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="flex flex-col gap-0.5">
+                      <span className="font-label text-[10px] text-on-surface-variant uppercase">Color Standard</span>
+                      <select
+                        value={wiringConfig.standard}
+                        onChange={(e) =>
+                          handleUpdateWiringConfig({ standard: e.target.value as WireStandard })
+                        }
+                        className="bg-surface border border-outline rounded-sm px-2 py-1 font-body text-xs text-on-surface"
+                      >
+                        {(Object.keys(WIRE_STANDARD_LABELS) as WireStandard[]).map((std) => (
+                          <option key={std} value={std} className="bg-surface-container">
+                            {std}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  {/* Layer Toggles */}
+                  <div className="grid grid-cols-2 gap-1 text-xs">
+                    <label className="flex items-center gap-1.5 cursor-pointer text-on-surface-variant">
+                      <input
+                        type="checkbox"
+                        checked={wiringConfig.showWires}
+                        onChange={(e) => handleUpdateWiringConfig({ showWires: e.target.checked })}
+                      />
+                      <span>2D Wires</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer text-on-surface-variant">
+                      <input
+                        type="checkbox"
+                        checked={wiringConfig.showWireLabels}
+                        onChange={(e) =>
+                          handleUpdateWiringConfig({ showWireLabels: e.target.checked })
+                        }
+                      />
+                      <span>Wire Labels</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer text-on-surface-variant">
+                      <input
+                        type="checkbox"
+                        checked={wiringConfig.show3DWires}
+                        onChange={(e) => handleUpdateWiringConfig({ show3DWires: e.target.checked })}
+                      />
+                      <span>3D Conduits</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer text-on-surface-variant">
+                      <input
+                        type="checkbox"
+                        checked={allowInterFloorWiring}
+                        onChange={(e) => setAllowInterFloorWiring(e.target.checked)}
+                      />
+                      <span>Inter-Floor Riser</span>
+                    </label>
+                  </div>
+
+                  {/* Per-Circuit Cable Size Configuration */}
+                  <div className="border-t border-outline-variant pt-2 flex flex-col gap-1.5">
+                    <span className="font-mono text-[10px] uppercase text-primary">
+                      Circuit Cable Size Configuration (sq.mm)
+                    </span>
+                    <p className="font-body text-[11px] text-on-surface-variant">
+                      Lighting: {CIRCUIT_CABLE_RANGES.lighting.minSqMm}–{CIRCUIT_CABLE_RANGES.lighting.maxSqMm} sq.mm · Heating/Power: {CIRCUIT_CABLE_RANGES.power.minSqMm}–{CIRCUIT_CABLE_RANGES.power.maxSqMm} sq.mm
+                    </p>
+                    {CIRCUITS.map((ckt) => {
+                      const cfg = project.circuitCableConfigs?.[ckt];
+                      const check = validateCableSizeForCircuit(ckt, cfg?.cableSizeSqMm);
+                      return (
+                        <div
+                          key={ckt}
+                          className="p-2 rounded-sm bg-surface-container-low border border-outline-variant flex flex-col gap-1"
+                        >
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="font-mono text-[11px] text-on-surface truncate">
+                              {ckt}
+                            </span>
+                            <span className="font-mono text-[10px] text-on-surface-variant shrink-0">
+                              {check.range.minSqMm}–{check.range.maxSqMm} mm²
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <select
+                              value={cfg?.cableSizeSqMm ?? ''}
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? null : Number(e.target.value);
+                                handleUpdateCircuitCableConfig(ckt, { cableSizeSqMm: val });
+                              }}
+                              className="w-28 bg-surface border border-outline rounded-sm px-1.5 py-1 font-mono text-[11px] text-on-surface"
+                            >
+                              <option value="">Not set</option>
+                              {[1.0, 1.5, 2.5, 4.0, 6.0, 10.0].map((sz) => (
+                                <option key={sz} value={sz}>
+                                  {sz} sq.mm
+                                </option>
+                              ))}
+                            </select>
+                            {cableCatalogueProducts.length > 0 && (
+                              <select
+                                value={cfg?.productId ?? ''}
+                                onChange={(e) => {
+                                  const prod = cableCatalogueProducts.find(
+                                    (p) => p.id === e.target.value
+                                  );
+                                  if (!prod) return;
+                                  handleAssignCableToCircuit(prod, ckt);
+                                }}
+                                className="flex-1 min-w-0 bg-surface border border-outline rounded-sm px-1.5 py-1 font-body text-[11px] text-on-surface"
+                              >
+                                <option value="">Link catalogue cable...</option>
+                                {cableCatalogueProducts.map((p) => (
+                                  <option key={p.id} value={p.id}>
+                                    {p.manufacturer} {p.productName}
+                                    {p.cableSizeSqMm ? ` (${p.cableSizeSqMm}mm²)` : ''}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                          {cfg?.manufacturer && (
+                            <span className="font-mono text-[10px] text-primary truncate">
+                              Linked: {cfg.manufacturer} {cfg.modelNumber ?? ''}
+                            </span>
+                          )}
+                          {check.status === 'out-of-range' && (
+                            <span className="font-body text-[10px] text-secondary">
+                              ⚠ {check.warning}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <span className="font-body text-[10px] text-on-surface-variant">
+                      Note: Configurable design ranges only — verify final conductor size against load current, voltage drop, breaker rating, and local wiring codes.
+                    </span>
+                  </div>
+
+                  {/* Engineering Validation Diagnostics (ERROR / WARNING / INFO) */}
+                  {validationIssues.length > 0 && (
+                    <div className="border-t border-outline-variant pt-2 flex flex-col gap-1">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-mono text-[10px] uppercase text-secondary">
+                          Diagnostics ({validationIssues.length})
+                        </span>
+                        <span className="font-mono text-[10px] text-on-surface-variant">
+                          {validationIssues.filter((i) => i.severity === 'error').length} ERR ·{' '}
+                          {validationIssues.filter((i) => i.severity === 'warning').length} WARN ·{' '}
+                          {validationIssues.filter((i) => i.severity === 'info').length} INFO
+                        </span>
+                      </div>
+                      {(() => {
+                        const needsSiteFit = computeActualGeometryBounds(project).exceedsSite;
+                        const needsDbOrEp = validationIssues.some(
+                          (i) => i.id === 'proj-missing-db' || i.id === 'proj-missing-ep'
+                        );
+                        const needsAutoRoute = validationIssues.some(
+                          (i) => i.id === 'proj-no-routed-cables'
+                        );
+                        if (!needsSiteFit && !needsDbOrEp && !needsAutoRoute) return null;
+                        return (
+                          <div className="flex flex-wrap gap-1 py-0.5">
+                            {needsSiteFit && (
+                              <button
+                                type="button"
+                                onClick={handleFitSiteToGeometry}
+                                className="px-1.5 py-0.5 rounded-sm bg-primary/15 border border-primary/60 text-primary font-label text-[10px] cursor-pointer hover:bg-primary/25"
+                              >
+                                Fit Site to Geometry
+                              </button>
+                            )}
+                            {needsDbOrEp && (
+                              <button
+                                type="button"
+                                onClick={handleAddMissingDbAndEarthing}
+                                className="px-1.5 py-0.5 rounded-sm bg-primary/15 border border-primary/60 text-primary font-label text-[10px] cursor-pointer hover:bg-primary/25"
+                              >
+                                Add DB-1 &amp; EP-1
+                              </button>
+                            )}
+                            {needsAutoRoute && (
+                              <button
+                                type="button"
+                                onClick={handleAutoRouteFromDb}
+                                className="px-1.5 py-0.5 rounded-sm bg-primary/15 border border-primary/60 text-primary font-label text-[10px] cursor-pointer hover:bg-primary/25"
+                              >
+                                Auto-Route DB
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
+                      <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
+                        {validationIssues.slice(0, 8).map((iss) => (
+                          <div
+                            key={iss.id}
+                            className={`px-2 py-1 rounded-sm border text-[11px] font-body ${
+                              iss.severity === 'error'
+                                ? 'bg-error/10 border-error text-error'
+                                : iss.severity === 'warning'
+                                  ? 'bg-secondary-container/25 border-secondary/60 text-on-surface'
+                                  : 'bg-surface-container-low border-outline-variant text-on-surface-variant'
+                            }`}
+                          >
+                            <span className="font-mono text-[9px] uppercase font-semibold mr-1">
+                              [{iss.severity}]
+                            </span>
+                            {iss.message}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </details>
             </div>
           </div>
 
-          {/* Multi-Floor Level Switcher Strip (1st Floor, 2nd Floor, 3rd Floor + Elevated) */}
+          {/* Multi-Floor Level Switcher Strip (Supports Ground, Upper, Basement, Terrace + Complete/Exploded 3D + Manage Floors) */}
           <div className="flex flex-wrap items-center justify-between gap-gutter-xs px-gutter-sm py-1 rounded-md bg-surface-container border border-outline-variant z-20">
             <div className="flex flex-wrap items-center gap-1">
               <span className="inline-flex items-center gap-1 pr-1.5 font-mono text-[11px] text-on-surface-variant uppercase">
                 <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
                   layers
                 </span>
-                <span>Floors ({totalFloors}):</span>
+                <span>
+                  {BUILDING_TYPE_LABELS[inferBuildingType(project)]} ({totalFloors}):
+                </span>
               </span>
-              {Array.from({ length: totalFloors }, (_, idx) => idx + 1).map((fl) => {
-                const isElevatedActive = viewMode === '3d' && floorView3D === 'all' && totalFloors > 1;
-                const isActive = fl === activeFloor && !isElevatedActive;
+              {projectFloors.map((fc) => {
+                const isMultiViewActive =
+                  viewMode === '3d' && (floorView3D === 'all' || floorView3D === 'exploded') && totalFloors > 1;
+                const isActive = fc.floor === activeFloor && !isMultiViewActive;
                 return (
                   <button
-                    key={fl}
+                    key={fc.floor}
                     type="button"
-                    onClick={() => handleSwitchFloor(fl)}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm border font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap ${
+                    onClick={() => handleSwitchFloor(fc.floor)}
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-sm border font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap ${
                       isActive
                         ? 'bg-primary text-on-primary border-primary'
                         : 'bg-surface-container-low text-on-surface-variant border-outline-variant hover:border-primary hover:text-on-surface'
-                    }`}
+                    } ${fc.visible === false ? 'opacity-50 line-through' : ''}`}
                   >
-                    <span>{formatFloorLabel(fl)}</span>
+                    <span>{fc.name}</span>
                   </button>
                 );
               })}
 
               {totalFloors > 1 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleToggleElevatedView}
+                    title={`Show all ${totalFloors} floors stacked together in Complete Building 3D view`}
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-sm border font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap ${
+                      viewMode === '3d' && floorView3D === 'all'
+                        ? 'bg-secondary text-on-secondary border-secondary'
+                        : 'bg-surface-container-low text-secondary border-secondary/50 hover:border-secondary hover:bg-secondary/10'
+                    }`}
+                  >
+                    <span className="material-symbols-outlined text-[14px]" aria-hidden="true">
+                      apartment
+                    </span>
+                    <span>Elevated</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleToggleExplodedView}
+                    title="Exploded 3D View separating storeys vertically"
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-sm border font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap ${
+                      viewMode === '3d' && floorView3D === 'exploded'
+                        ? 'bg-secondary text-on-secondary border-secondary'
+                        : 'bg-surface-container-low text-on-surface-variant border-outline-variant hover:border-secondary hover:text-secondary'
+                    }`}
+                  >
+                    <span className="material-symbols-outlined text-[14px]" aria-hidden="true">
+                      layers
+                    </span>
+                    <span>Exploded</span>
+                  </button>
+                </>
+              )}
+
+              {/* Manage Floors Popover Trigger */}
+              <div className="relative">
                 <button
                   type="button"
-                  onClick={handleToggleElevatedView}
-                  title={`Show all ${totalFloors} floors stacked together in Elevated 3D view`}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-sm border font-label text-label-sm transition-colors cursor-pointer whitespace-nowrap ${
-                    viewMode === '3d' && floorView3D === 'all'
-                      ? 'bg-secondary text-on-secondary border-secondary'
-                      : 'bg-surface-container-low text-secondary border-secondary/50 hover:border-secondary hover:bg-secondary/10'
+                  onClick={() =>
+                    setOpenDrawer((prev) => (prev === 'floors' ? null : 'floors'))
+                  }
+                  title="Manage Building Type & Floors (Duplex, Triplex, Basement, Terrace)"
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-sm border font-label text-label-sm cursor-pointer whitespace-nowrap ${
+                    openDrawer === 'floors'
+                      ? 'bg-primary-container border-primary text-primary'
+                      : 'border-dashed border-outline text-on-surface-variant hover:text-primary hover:border-primary'
                   }`}
                 >
                   <span className="material-symbols-outlined text-[14px]" aria-hidden="true">
-                    apartment
+                    add
                   </span>
-                  <span>Elevated</span>
+                  <span>Manage Floors</span>
                 </button>
-              )}
 
-              {totalFloors < 5 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const nextFloors = Math.min(5, totalFloors + 1);
-                    handleSiteChange('floors', nextFloors);
-                    setActiveFloor(nextFloors);
-                    setFloorView3D('active-only');
-                    setSelectedEntity(null);
-                    setAllSelected(false);
-                    notify(
-                      `Added ${formatFloorLabel(nextFloors)} — click Elevated to view all ${nextFloors} floors stacked`
-                    );
-                  }}
-                  title="Add an elevated floor (up to 5 floors)"
-                  className="inline-flex items-center gap-0.5 px-2 py-1 rounded-sm border border-dashed border-outline text-on-surface-variant hover:text-primary hover:border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
-                >
-                  <span className="material-symbols-outlined text-[14px]" aria-hidden="true">add</span>
-                  <span>Floor</span>
-                </button>
-              )}
+                {openDrawer === 'floors' && (
+                  <div
+                    onPointerDown={(e) => e.stopPropagation()}
+                    className="absolute left-0 top-full mt-1 w-[360px] max-w-[92vw] max-h-[70vh] overflow-y-auto z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-sm flex flex-col gap-2.5"
+                  >
+                    <div className="flex items-center justify-between border-b border-outline-variant pb-1.5">
+                      <span className="font-mono text-[11px] uppercase text-primary">
+                        Multi-Storey Floor Manager
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setOpenDrawer(null)}
+                        className="text-on-surface-variant hover:text-on-surface cursor-pointer"
+                      >
+                        <span className="material-symbols-outlined text-[16px]">close</span>
+                      </button>
+                    </div>
+
+                    {/* Building Type Quick Selector */}
+                    <label className="flex flex-col gap-1">
+                      <span className="font-label text-[11px] text-on-surface-variant">
+                        Building Typology (non-destructive)
+                      </span>
+                      <select
+                        value={inferBuildingType(project)}
+                        onChange={(e) => {
+                          const nextType = e.target.value as BuildingType;
+                          onUpdateProject((prev) => applyBuildingTypeSafely(prev, nextType), true);
+                          notify(`Updated building type to ${BUILDING_TYPE_LABELS[nextType]}`);
+                        }}
+                        className="bg-surface border border-outline rounded-sm px-2 py-1 font-body text-xs text-on-surface"
+                      >
+                        {(Object.keys(BUILDING_TYPE_LABELS) as BuildingType[]).map((bt) => (
+                          <option key={bt} value={bt} className="bg-surface-container">
+                            {BUILDING_TYPE_LABELS[bt]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    {/* Quick Add Floor Actions */}
+                    <div className="grid grid-cols-3 gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const res = addFloorToProject(project, 'upper');
+                          onUpdateProject(() => res.project, true);
+                          setActiveFloor(res.newFloor);
+                          notify(`Added upper floor (${getFloorLabel(res.project, res.newFloor)})`);
+                        }}
+                        className="px-2 py-1 rounded-sm bg-primary-container/30 border border-primary text-primary font-label text-[11px] cursor-pointer"
+                      >
+                        + Upper
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const res = addFloorToProject(project, 'basement');
+                          onUpdateProject(() => res.project, true);
+                          setActiveFloor(res.newFloor);
+                          notify(`Added ${getFloorLabel(res.project, res.newFloor)}`);
+                        }}
+                        className="px-2 py-1 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-[11px] cursor-pointer"
+                      >
+                        + Basement
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const res = addFloorToProject(project, 'terrace');
+                          onUpdateProject(() => res.project, true);
+                          setActiveFloor(res.newFloor);
+                          notify(`Added ${getFloorLabel(res.project, res.newFloor)}`);
+                        }}
+                        className="px-2 py-1 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-[11px] cursor-pointer"
+                      >
+                        + Terrace
+                      </button>
+                    </div>
+
+                    {/* Per-Floor Editor List */}
+                    <div className="flex flex-col gap-1.5">
+                      {projectFloors.map((fc) => {
+                        const elemCount = countElementsOnFloor(project, fc.floor);
+                        const confirmingDelete = pendingDeleteFloor === fc.floor;
+                        return (
+                          <div
+                            key={fc.floor}
+                            className="p-2 rounded-sm bg-surface-container-low border border-outline-variant flex flex-col gap-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <input
+                                type="text"
+                                value={fc.name}
+                                onChange={(e) =>
+                                  onUpdateProject(
+                                    (prev) =>
+                                      updateFloorConfigInProject(prev, fc.floor, {
+                                        name: e.target.value,
+                                      }),
+                                    false
+                                  )
+                                }
+                                className="flex-1 min-w-0 bg-surface border border-outline rounded-sm px-1.5 py-0.5 font-body text-xs text-on-surface"
+                              />
+                              <button
+                                type="button"
+                                title={fc.visible === false ? 'Show floor in 3D' : 'Hide floor in 3D'}
+                                onClick={() =>
+                                  onUpdateProject(
+                                    (prev) =>
+                                      updateFloorConfigInProject(prev, fc.floor, {
+                                        visible: fc.visible === false,
+                                      }),
+                                    true
+                                  )
+                                }
+                                className="p-1 text-on-surface-variant hover:text-primary cursor-pointer"
+                              >
+                                <span className="material-symbols-outlined text-[15px]">
+                                  {fc.visible === false ? 'visibility_off' : 'visibility'}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                title="Duplicate floor layout"
+                                onClick={() => {
+                                  const dup = duplicateFloorInProject(project, fc.floor);
+                                  onUpdateProject(() => dup.project, true);
+                                  setActiveFloor(dup.newFloor);
+                                  notify(`Duplicated ${fc.name}`);
+                                }}
+                                className="p-1 text-on-surface-variant hover:text-primary cursor-pointer"
+                              >
+                                <span className="material-symbols-outlined text-[15px]">content_copy</span>
+                              </button>
+                              {projectFloors.length > 1 && (
+                                <button
+                                  type="button"
+                                  title="Delete floor"
+                                  onClick={() => {
+                                    if (elemCount > 0 && !confirmingDelete) {
+                                      setPendingDeleteFloor(fc.floor);
+                                      return;
+                                    }
+                                    const rem = removeFloorFromProject(project, fc.floor);
+                                    if (rem) {
+                                      onUpdateProject(() => rem.project, true);
+                                      setActiveFloor(rem.fallbackFloor);
+                                      setPendingDeleteFloor(null);
+                                      notify(`Deleted ${fc.name}`);
+                                    }
+                                  }}
+                                  className="p-1 text-on-surface-variant hover:text-error cursor-pointer"
+                                >
+                                  <span className="material-symbols-outlined text-[15px]">delete</span>
+                                </button>
+                              )}
+                            </div>
+
+                            {confirmingDelete && (
+                              <div className="flex items-center justify-between gap-1 px-2 py-1 rounded-sm bg-error/15 border border-error text-[11px] text-error">
+                                <span>Remove {elemCount} items on {fc.name}?</span>
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const rem = removeFloorFromProject(project, fc.floor);
+                                      if (rem) {
+                                        onUpdateProject(() => rem.project, true);
+                                        setActiveFloor(rem.fallbackFloor);
+                                        setPendingDeleteFloor(null);
+                                        notify(`Deleted ${fc.name}`);
+                                      }
+                                    }}
+                                    className="px-1.5 py-0.5 bg-error text-on-primary rounded-sm cursor-pointer"
+                                  >
+                                    Delete
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setPendingDeleteFloor(null)}
+                                    className="px-1.5 py-0.5 bg-surface text-on-surface rounded-sm cursor-pointer"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-3 gap-1 font-mono text-[10px]">
+                              <label className="flex flex-col gap-0.5">
+                                <span className="text-on-surface-variant">Elev (m)</span>
+                                <input
+                                  type="number"
+                                  step="0.1"
+                                  value={fc.elevationM}
+                                  onChange={(e) =>
+                                    onUpdateProject(
+                                      (prev) =>
+                                        updateFloorConfigInProject(prev, fc.floor, {
+                                          elevationM: Number(e.target.value) || 0,
+                                        }),
+                                      true
+                                    )
+                                  }
+                                  className="bg-surface border border-outline rounded-sm px-1 py-0.5 text-on-surface"
+                                />
+                              </label>
+                              <label className="flex flex-col gap-0.5">
+                                <span className="text-on-surface-variant">Height (m)</span>
+                                <input
+                                  type="number"
+                                  step="0.1"
+                                  min={1}
+                                  value={fc.floorHeightM}
+                                  onChange={(e) =>
+                                    onUpdateProject(
+                                      (prev) =>
+                                        updateFloorConfigInProject(prev, fc.floor, {
+                                          floorHeightM: Math.max(1, Number(e.target.value) || 3),
+                                        }),
+                                      true
+                                    )
+                                  }
+                                  className="bg-surface border border-outline rounded-sm px-1 py-0.5 text-on-surface"
+                                />
+                              </label>
+                              <label className="flex flex-col gap-0.5">
+                                <span className="text-on-surface-variant">Slab (m)</span>
+                                <input
+                                  type="number"
+                                  step="0.02"
+                                  min={0.1}
+                                  value={fc.slabThicknessM}
+                                  onChange={(e) =>
+                                    onUpdateProject(
+                                      (prev) =>
+                                        updateFloorConfigInProject(prev, fc.floor, {
+                                          slabThicknessM: Math.max(0.1, Number(e.target.value) || 0.22),
+                                        }),
+                                      true
+                                    )
+                                  }
+                                  className="bg-surface border border-outline rounded-sm px-1 py-0.5 text-on-surface"
+                                />
+                              </label>
+                            </div>
+                            <div className="grid grid-cols-2 gap-1 font-mono text-[10px]">
+                              <label className="flex flex-col gap-0.5">
+                                <span className="text-on-surface-variant">
+                                  Floor Len ({unitShort}){fc.lengthM ? ' *' : ''}
+                                </span>
+                                <input
+                                  type="number"
+                                  step={units === 'ft' ? '0.5' : '0.1'}
+                                  min={1}
+                                  placeholder={`${project.site.length} (site)`}
+                                  value={
+                                    typeof fc.lengthM === 'number' && fc.lengthM > 0
+                                      ? Number(fromMeters(fc.lengthM, units).toFixed(2))
+                                      : ''
+                                  }
+                                  onChange={(e) => {
+                                    const raw = e.target.value.trim();
+                                    if (!raw) {
+                                      onUpdateProject(
+                                        (prev) =>
+                                          updateFloorConfigInProject(prev, fc.floor, {
+                                            lengthM: undefined,
+                                          }),
+                                        true
+                                      );
+                                      return;
+                                    }
+                                    const val = Number(raw);
+                                    if (!Number.isFinite(val) || val <= 0) return;
+                                    onUpdateProject(
+                                      (prev) =>
+                                        updateFloorConfigInProject(prev, fc.floor, {
+                                          lengthM: Number(toMeters(val, units).toFixed(3)),
+                                        }),
+                                      true
+                                    );
+                                  }}
+                                  className="bg-surface border border-outline rounded-sm px-1 py-0.5 text-on-surface"
+                                />
+                              </label>
+                              <label className="flex flex-col gap-0.5">
+                                <span className="text-on-surface-variant">
+                                  Floor Wid ({unitShort}){fc.widthM ? ' *' : ''}
+                                </span>
+                                <input
+                                  type="number"
+                                  step={units === 'ft' ? '0.5' : '0.1'}
+                                  min={1}
+                                  placeholder={`${project.site.width} (site)`}
+                                  value={
+                                    typeof fc.widthM === 'number' && fc.widthM > 0
+                                      ? Number(fromMeters(fc.widthM, units).toFixed(2))
+                                      : ''
+                                  }
+                                  onChange={(e) => {
+                                    const raw = e.target.value.trim();
+                                    if (!raw) {
+                                      onUpdateProject(
+                                        (prev) =>
+                                          updateFloorConfigInProject(prev, fc.floor, {
+                                            widthM: undefined,
+                                          }),
+                                        true
+                                      );
+                                      return;
+                                    }
+                                    const val = Number(raw);
+                                    if (!Number.isFinite(val) || val <= 0) return;
+                                    onUpdateProject(
+                                      (prev) =>
+                                        updateFloorConfigInProject(prev, fc.floor, {
+                                          widthM: Number(toMeters(val, units).toFixed(3)),
+                                        }),
+                                      true
+                                    );
+                                  }}
+                                  className="bg-surface border border-outline rounded-sm px-1 py-0.5 text-on-surface"
+                                />
+                              </label>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="flex items-center gap-gutter-xs">
-              {activeFloor > 1 && !(viewMode === '3d' && floorView3D === 'all') && (
+              {activeFloor > 1 && !(viewMode === '3d' && (floorView3D === 'all' || floorView3D === 'exploded')) && (
                 <button
                   type="button"
                   onClick={handleCopyFloorBelow}
-                  title={`Copy layout from ${formatFloorLabel(activeFloor - 1)} to ${formatFloorLabel(activeFloor)}`}
+                  title={`Copy layout from ${getFloorLabel(project, activeFloor - 1)} to ${getFloorLabel(project, activeFloor)}`}
                   className="inline-flex items-center gap-1 px-2 py-1 rounded-sm bg-surface-container-high border border-outline text-primary hover:border-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
                 >
                   <span className="material-symbols-outlined text-[14px]" aria-hidden="true">content_copy</span>
-                  <span>Copy {formatFloorLabel(activeFloor - 1)}</span>
+                  <span>Copy {getFloorLabel(project, activeFloor - 1)}</span>
                 </button>
               )}
               {/* PROPERTIES INSPECTOR DROPDOWN TRIGGER */}
@@ -2733,6 +4243,12 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 onDuplicateFurniture={handleDuplicateFurniture}
                 onDuplicateWall={handleDuplicateWall}
                 onPlacePointAt={handlePlacePointAt}
+                activeWireCategory={activeWireCategory}
+                allowInterFloorWiring={allowInterFloorWiring}
+                onAddStaircase={handleAddStaircase}
+                onMoveStaircase={handleMoveStaircase}
+                onCreateWire={handleCreateWire}
+                onUpdateWireWaypoints={handleUpdateWireWaypoints}
                 onRecordHistorySnapshot={onRecordSnapshot}
                 onValidationWarning={(msg) => notify(msg, 'warning')}
               />
@@ -2747,6 +4263,11 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 activeHighlightId={activeHighlightId}
                 focusTarget={focusTarget}
                 cameraMode={cameraMode}
+                cameraPreset={cameraPreset}
+                savedCameraView={appliedSavedView}
+                onCameraCaptureReady={(fn) => {
+                  captureCameraRef.current = fn;
+                }}
                 lightingMode={lightingMode}
                 zoom={zoom}
                 pendingPlaceItem={pendingPlaceItem}
@@ -2769,6 +4290,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   setOpenDrawer(null);
                   setCanvasContextMenu(pos);
                 }}
+                onSwitchTo2D={() => setViewMode('2d')}
               />
             )}
           </div>
@@ -3416,6 +4938,243 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 </label>
               </div>
 
+              {/* Brand / Catalogue Metadata & Unit Price Override */}
+              {(selectedPoint.manufacturer || selectedPoint.modelNumber) && (
+                <div className="p-2 rounded-sm bg-surface-container-low border border-outline-variant flex flex-col gap-0.5 font-mono text-[10px]">
+                  <span className="text-primary">
+                    {selectedPoint.brand || selectedPoint.manufacturer}
+                  </span>
+                  {selectedPoint.modelNumber && (
+                    <span className="text-on-surface-variant">Model: {selectedPoint.modelNumber}</span>
+                  )}
+                  {selectedPoint.specification && (
+                    <span className="text-on-surface-variant">{selectedPoint.specification}</span>
+                  )}
+                </div>
+              )}
+
+              <label className="flex flex-col gap-1">
+                <span className="font-label text-[11px] text-on-surface-variant">
+                  Unit Rate Override (₹, 0 = Not configured)
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  step={10}
+                  value={selectedPoint.unitCost ?? 0}
+                  onChange={(e) =>
+                    handleUpdateSelectedPoint(
+                      { unitCost: Math.max(0, Number(e.target.value) || 0) },
+                      true
+                    )
+                  }
+                  className="w-full bg-surface-container-low border border-outline rounded-sm px-2 py-1 font-mono text-mono-sm text-on-surface tabular-nums"
+                />
+              </label>
+
+              {/* Distribution Board Configuration */}
+              {selectedPoint.itemType === 'distribution_board' && (
+                <div className="p-2 rounded-sm bg-primary-container/15 border border-primary/50 flex flex-col gap-1.5">
+                  <span className="font-mono text-[10px] uppercase text-primary">
+                    Distribution Board Specification
+                  </span>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <label className="flex flex-col gap-0.5">
+                      <span className="font-label text-[10px] text-on-surface-variant">Phase</span>
+                      <select
+                        value={selectedPoint.dbConfig?.phaseType ?? 'Single Phase (1Φ)'}
+                        onChange={(e) =>
+                          handleUpdateSelectedPoint(
+                            {
+                              dbConfig: {
+                                incomingRatingAmps: selectedPoint.dbConfig?.incomingRatingAmps ?? 63,
+                                waysCount: selectedPoint.dbConfig?.waysCount ?? 12,
+                                rccbSensitivityMa: selectedPoint.dbConfig?.rccbSensitivityMa ?? 30,
+                                associatedCircuits: selectedPoint.dbConfig?.associatedCircuits ?? CIRCUITS,
+                                enclosureType: selectedPoint.dbConfig?.enclosureType ?? 'Double Door Flush Metal DB',
+                                phaseType: e.target.value as DistributionBoardConfig['phaseType'],
+                              },
+                            },
+                            true
+                          )
+                        }
+                        className="bg-surface border border-outline rounded-sm px-1.5 py-1 font-body text-[11px] text-on-surface"
+                      >
+                        <option value="Single Phase (1Φ)">Single Phase (1Φ)</option>
+                        <option value="Three Phase (3Φ)">Three Phase (3Φ)</option>
+                      </select>
+                    </label>
+                    <label className="flex flex-col gap-0.5">
+                      <span className="font-label text-[10px] text-on-surface-variant">Incoming (A)</span>
+                      <input
+                        type="number"
+                        min={16}
+                        step={1}
+                        value={selectedPoint.dbConfig?.incomingRatingAmps ?? 63}
+                        onChange={(e) =>
+                          handleUpdateSelectedPoint(
+                            {
+                              dbConfig: {
+                                ...(selectedPoint.dbConfig ?? {
+                                  waysCount: 12,
+                                  phaseType: 'Single Phase (1Φ)',
+                                  rccbSensitivityMa: 30,
+                                  associatedCircuits: CIRCUITS,
+                                  enclosureType: 'Double Door Flush Metal DB',
+                                }),
+                                incomingRatingAmps: Math.max(16, Number(e.target.value) || 63),
+                              },
+                            },
+                            true
+                          )
+                        }
+                        className="bg-surface border border-outline rounded-sm px-1.5 py-1 font-mono text-[11px] text-on-surface"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-0.5">
+                      <span className="font-label text-[10px] text-on-surface-variant">Ways</span>
+                      <input
+                        type="number"
+                        min={4}
+                        step={2}
+                        value={selectedPoint.dbConfig?.waysCount ?? 12}
+                        onChange={(e) =>
+                          handleUpdateSelectedPoint(
+                            {
+                              dbConfig: {
+                                ...(selectedPoint.dbConfig ?? {
+                                  incomingRatingAmps: 63,
+                                  phaseType: 'Single Phase (1Φ)',
+                                  rccbSensitivityMa: 30,
+                                  associatedCircuits: CIRCUITS,
+                                  enclosureType: 'Double Door Flush Metal DB',
+                                }),
+                                waysCount: Math.max(4, Number(e.target.value) || 12),
+                              },
+                            },
+                            true
+                          )
+                        }
+                        className="bg-surface border border-outline rounded-sm px-1.5 py-1 font-mono text-[11px] text-on-surface"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-0.5">
+                      <span className="font-label text-[10px] text-on-surface-variant">RCCB (mA)</span>
+                      <select
+                        value={selectedPoint.dbConfig?.rccbSensitivityMa ?? 30}
+                        onChange={(e) =>
+                          handleUpdateSelectedPoint(
+                            {
+                              dbConfig: {
+                                ...(selectedPoint.dbConfig ?? {
+                                  incomingRatingAmps: 63,
+                                  waysCount: 12,
+                                  phaseType: 'Single Phase (1Φ)',
+                                  associatedCircuits: CIRCUITS,
+                                  enclosureType: 'Double Door Flush Metal DB',
+                                }),
+                                rccbSensitivityMa: Number(e.target.value),
+                              },
+                            },
+                            true
+                          )
+                        }
+                        className="bg-surface border border-outline rounded-sm px-1.5 py-1 font-mono text-[11px] text-on-surface"
+                      >
+                        <option value={30}>30 mA</option>
+                        <option value={100}>100 mA</option>
+                        <option value={300}>300 mA</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {/* Earthing Point Configuration */}
+              {selectedPoint.itemType === 'earthing_point' && (
+                <div className="p-2 rounded-sm bg-emerald-500/10 border border-emerald-500/50 flex flex-col gap-1.5">
+                  <span className="font-mono text-[10px] uppercase text-emerald-400">
+                    Earthing Point Specification
+                  </span>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[10px] text-on-surface-variant">Electrode Type</span>
+                    <select
+                      value={selectedPoint.earthingConfig?.earthingType ?? 'Copper Plate'}
+                      onChange={(e) =>
+                        handleUpdateSelectedPoint(
+                          {
+                            earthingConfig: {
+                              ...(selectedPoint.earthingConfig ?? {
+                                targetResistanceOhm: 2,
+                                earthConductorSizeSqMm: 4,
+                              }),
+                              earthingType: e.target.value as EarthingPointConfig['earthingType'],
+                            },
+                          },
+                          true
+                        )
+                      }
+                      className="bg-surface border border-outline rounded-sm px-1.5 py-1 font-body text-[11px] text-on-surface"
+                    >
+                      <option value="Copper Plate">Copper Plate</option>
+                      <option value="GI Pipe">GI Pipe</option>
+                      <option value="Chemical Maintenance-Free">Chemical Maintenance-Free</option>
+                      <option value="Copper Rod">Copper Rod</option>
+                    </select>
+                  </label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <label className="flex flex-col gap-0.5">
+                      <span className="font-label text-[10px] text-on-surface-variant">Target Ω</span>
+                      <input
+                        type="number"
+                        step="0.5"
+                        min={0.5}
+                        value={selectedPoint.earthingConfig?.targetResistanceOhm ?? 2}
+                        onChange={(e) =>
+                          handleUpdateSelectedPoint(
+                            {
+                              earthingConfig: {
+                                ...(selectedPoint.earthingConfig ?? {
+                                  earthingType: 'Copper Plate',
+                                  earthConductorSizeSqMm: 4,
+                                }),
+                                targetResistanceOhm: Math.max(0.5, Number(e.target.value) || 2),
+                              },
+                            },
+                            true
+                          )
+                        }
+                        className="bg-surface border border-outline rounded-sm px-1.5 py-1 font-mono text-[11px] text-on-surface"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-0.5">
+                      <span className="font-label text-[10px] text-on-surface-variant">Earth Cond (mm²)</span>
+                      <input
+                        type="number"
+                        step="0.5"
+                        min={1.5}
+                        value={selectedPoint.earthingConfig?.earthConductorSizeSqMm ?? 4}
+                        onChange={(e) =>
+                          handleUpdateSelectedPoint(
+                            {
+                              earthingConfig: {
+                                ...(selectedPoint.earthingConfig ?? {
+                                  earthingType: 'Copper Plate',
+                                  targetResistanceOhm: 2,
+                                }),
+                                earthConductorSizeSqMm: Math.max(1.5, Number(e.target.value) || 4),
+                              },
+                            },
+                            true
+                          )
+                        }
+                        className="bg-surface border border-outline rounded-sm px-1.5 py-1 font-mono text-[11px] text-on-surface"
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-gutter-xs">
                 <button
                   type="button"
@@ -3445,6 +5204,380 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
               </button>
             </div>
           )}
+
+          {/* 4C. STAIRCASE INSPECTOR */}
+          {selectedStaircase && (
+            <div className="flex flex-col gap-gutter-sm">
+              <label className="flex flex-col gap-1">
+                <span className="font-label text-label-sm text-on-surface-variant">Staircase Name</span>
+                <input
+                  type="text"
+                  value={selectedStaircase.name}
+                  onChange={(e) =>
+                    handleUpdateStaircase(selectedStaircase.id, { name: e.target.value }, false)
+                  }
+                  className="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-1.5 font-body text-body-sm text-on-surface"
+                />
+              </label>
+
+              <label className="flex flex-col gap-1">
+                <span className="font-label text-label-sm text-on-surface-variant">Geometry Type</span>
+                <select
+                  value={selectedStaircase.type}
+                  onChange={(e) =>
+                    handleUpdateStaircase(
+                      selectedStaircase.id,
+                      { type: e.target.value as StaircaseType },
+                      true
+                    )
+                  }
+                  className="w-full bg-surface-container-low border border-outline rounded-sm px-gutter-sm py-1.5 font-body text-body-sm text-on-surface"
+                >
+                  <option value="straight">Straight Flight</option>
+                  <option value="l-shaped">L-Shaped (Quarter Turn)</option>
+                  <option value="u-shaped">U-Shaped (Half Turn)</option>
+                  <option value="spiral">Spiral Staircase</option>
+                </select>
+              </label>
+
+              <div className="grid grid-cols-2 gap-gutter-xs">
+                <label className="flex flex-col gap-1">
+                  <span className="font-label text-[11px] text-on-surface-variant">From Floor</span>
+                  <select
+                    value={selectedStaircase.fromFloor}
+                    onChange={(e) =>
+                      handleUpdateStaircase(
+                        selectedStaircase.id,
+                        { fromFloor: Number(e.target.value) },
+                        true
+                      )
+                    }
+                    className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-body text-xs text-on-surface"
+                  >
+                    {projectFloors.map((fc) => (
+                      <option key={fc.floor} value={fc.floor}>
+                        {fc.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="font-label text-[11px] text-on-surface-variant">To Floor</span>
+                  <select
+                    value={selectedStaircase.toFloor}
+                    onChange={(e) =>
+                      handleUpdateStaircase(
+                        selectedStaircase.id,
+                        { toFloor: Number(e.target.value) },
+                        true
+                      )
+                    }
+                    className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-body text-xs text-on-surface"
+                  >
+                    {projectFloors.map((fc) => (
+                      <option key={fc.floor} value={fc.floor}>
+                        {fc.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-3 gap-gutter-xs">
+                <label className="flex flex-col gap-1">
+                  <span className="font-label text-[11px] text-on-surface-variant">Width (m)</span>
+                  <input
+                    type="number"
+                    step="0.05"
+                    min={0.75}
+                    value={selectedStaircase.width}
+                    onChange={(e) =>
+                      handleUpdateStaircase(
+                        selectedStaircase.id,
+                        { width: Math.max(0.75, Number(e.target.value) || 1.05) },
+                        true
+                      )
+                    }
+                    className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="font-label text-[11px] text-on-surface-variant">Steps</span>
+                  <input
+                    type="number"
+                    min={6}
+                    max={30}
+                    value={selectedStaircase.steps}
+                    onChange={(e) =>
+                      handleUpdateStaircase(
+                        selectedStaircase.id,
+                        { steps: Math.max(6, Math.min(30, Number(e.target.value) || 16)) },
+                        true
+                      )
+                    }
+                    className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="font-label text-[11px] text-on-surface-variant">Tread (m)</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min={0.2}
+                    max={0.4}
+                    value={selectedStaircase.treadDepth}
+                    onChange={(e) =>
+                      handleUpdateStaircase(
+                        selectedStaircase.id,
+                        { treadDepth: Math.max(0.2, Number(e.target.value) || 0.27) },
+                        true
+                      )
+                    }
+                    className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
+                  />
+                </label>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handleRotateEntity({ kind: 'staircase', id: selectedStaircase.id })}
+                className="w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-sm cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[15px]">rotate_right</span>
+                <span>Rotate 90° ({selectedStaircase.rotation}°)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleEraseEntity({ kind: 'staircase', id: selectedStaircase.id })}
+                className="w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-low border border-error text-error hover:bg-error/15 font-label text-label-sm cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[15px]">delete</span>
+                <span>Delete Staircase</span>
+              </button>
+            </div>
+          )}
+
+          {/* 4D. ELECTRICAL WIRE / CABLE INSPECTOR */}
+          {selectedWire && (() => {
+            const fromPt = project.points.find((p) => p.id === selectedWire.fromPointId);
+            const toPt = project.points.find((p) => p.id === selectedWire.toPointId);
+            const routedLen = computeWireLengthMeters(selectedWire, project);
+            const cableValidation = validateCableSizeForCircuit(
+              selectedWire.circuit,
+              selectedWire.cableSizeSqMm
+            );
+            return (
+              <div className="flex flex-col gap-gutter-sm">
+                <div className="px-gutter-sm py-1.5 rounded-sm bg-surface-container-low border border-outline-variant flex items-center justify-between font-mono text-[11px]">
+                  <span className="text-on-surface-variant">
+                    {selectedWire.code} ({fromPt?.code ?? '?'} → {toPt?.code ?? '?'})
+                  </span>
+                  <span className="text-secondary">{routedLen.toFixed(2)} m</span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-gutter-xs">
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">Category</span>
+                    <select
+                      value={selectedWire.category}
+                      onChange={(e) => {
+                        const cat = e.target.value as WireCategory;
+                        handleUpdateWire(selectedWire.id, {
+                          category: cat,
+                          color: WIRE_STANDARD_COLORS[wiringConfig.standard][cat],
+                        });
+                      }}
+                      className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-body text-xs text-on-surface"
+                    >
+                      {(Object.keys(WIRE_CATEGORY_LABELS) as WireCategory[]).map((cat) => (
+                        <option key={cat} value={cat}>
+                          {WIRE_CATEGORY_LABELS[cat]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">Circuit</span>
+                    <select
+                      value={selectedWire.circuit}
+                      onChange={(e) =>
+                        handleUpdateWire(selectedWire.id, {
+                          circuit: e.target.value as CircuitId | '',
+                        })
+                      }
+                      className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-[11px] text-on-surface"
+                    >
+                      <option value="">Unassigned</option>
+                      {CIRCUITS.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-gutter-xs">
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">
+                      Cable Size (sq.mm)
+                    </span>
+                    <select
+                      value={selectedWire.cableSizeSqMm ?? ''}
+                      onChange={(e) =>
+                        handleUpdateWire(selectedWire.id, {
+                          cableSizeSqMm: e.target.value === '' ? null : Number(e.target.value),
+                        })
+                      }
+                      className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
+                    >
+                      <option value="">Not configured</option>
+                      {[1.0, 1.5, 2.5, 4.0, 6.0, 10.0].map((sz) => (
+                        <option key={sz} value={sz}>
+                          {sz} sq.mm
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[11px] text-on-surface-variant">Conductor</span>
+                    <select
+                      value={selectedWire.cableMaterial}
+                      onChange={(e) =>
+                        handleUpdateWire(selectedWire.id, {
+                          cableMaterial: e.target.value as CableMaterial,
+                        })
+                      }
+                      className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-body text-xs text-on-surface"
+                    >
+                      <option value="Copper">Copper</option>
+                      <option value="Aluminium">Aluminium</option>
+                      <option value="Data/Fiber">Data / Fiber</option>
+                    </select>
+                  </label>
+                </div>
+
+                {cableValidation.warning && (
+                  <div className="p-2 rounded-sm bg-secondary-container/25 border border-secondary/70 font-body text-[11px] text-on-surface">
+                    ⚠ {cableValidation.warning}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-3 gap-gutter-xs">
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[10px] text-on-surface-variant">Cores</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={6}
+                      value={selectedWire.cores}
+                      onChange={(e) =>
+                        handleUpdateWire(selectedWire.id, {
+                          cores: Math.max(1, Math.min(6, Number(e.target.value) || 2)),
+                        })
+                      }
+                      className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[10px] text-on-surface-variant">Phase</span>
+                    <select
+                      value={selectedWire.phaseDesignation}
+                      onChange={(e) =>
+                        handleUpdateWire(selectedWire.id, {
+                          phaseDesignation: e.target.value as PhaseDesignation,
+                        })
+                      }
+                      className="bg-surface-container-low border border-outline rounded-sm px-1 py-1 font-mono text-[11px] text-on-surface"
+                    >
+                      {(['L1', 'L2', 'L3', 'N', 'PE', 'SW', 'DATA'] as PhaseDesignation[]).map(
+                        (ph) => (
+                          <option key={ph} value={ph}>
+                            {ph}
+                          </option>
+                        )
+                      )}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[10px] text-on-surface-variant">Line Style</span>
+                    <select
+                      value={selectedWire.lineStyle}
+                      onChange={(e) =>
+                        handleUpdateWire(selectedWire.id, {
+                          lineStyle: e.target.value as WireLineStyle,
+                        })
+                      }
+                      className="bg-surface-container-low border border-outline rounded-sm px-1 py-1 font-body text-[11px] text-on-surface"
+                    >
+                      <option value="solid">Solid</option>
+                      <option value="dashed">Dashed</option>
+                      <option value="dotted">Dotted</option>
+                    </select>
+                  </label>
+                </div>
+
+                {/* Route Shaping Actions */}
+                <div className="flex flex-col gap-1">
+                  <span className="font-label text-[10px] text-on-surface-variant uppercase">
+                    Route Editing ({selectedWire.waypoints.length} bends — drag handles or + in 2D)
+                  </span>
+                  <div className="grid grid-cols-3 gap-1">
+                    <button
+                      type="button"
+                      disabled={!fromPt || !toPt}
+                      onClick={() => {
+                        if (!fromPt || !toPt) return;
+                        handleUpdateWire(selectedWire.id, {
+                          waypoints: generateAutoRouteWaypoints(fromPt, toPt, 'horizontal-first'),
+                        });
+                      }}
+                      className="px-1.5 py-1 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-[11px] cursor-pointer"
+                    >
+                      90° Route
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!fromPt || !toPt}
+                      onClick={() => {
+                        if (!fromPt || !toPt) return;
+                        const { lengthM, widthM } = siteToMeters(project.site);
+                        handleUpdateWire(selectedWire.id, {
+                          waypoints: generateWallAlignedWaypoints(
+                            fromPt,
+                            toPt,
+                            floorProject.rooms,
+                            lengthM,
+                            widthM
+                          ),
+                        });
+                      }}
+                      className="px-1.5 py-1 rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-[11px] cursor-pointer"
+                    >
+                      Wall-Align
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateWire(selectedWire.id, { waypoints: [] })}
+                      className="px-1.5 py-1 rounded-sm bg-surface-container-high border border-outline text-on-surface-variant hover:border-outline font-label text-[11px] cursor-pointer"
+                    >
+                      Direct
+                    </button>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleEraseEntity({ kind: 'wire', id: selectedWire.id })}
+                  className="w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-low border border-error text-error hover:bg-error/15 font-label text-label-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">delete</span>
+                  <span>Delete Wire (Keep Endpoints)</span>
+                </button>
+              </div>
+            );
+          })()}
 
           {/* 4B. FURNITURE INSPECTOR */}
           {selectedFurniture && (
@@ -3552,6 +5685,8 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             !selectedRoom &&
             !selectedWall &&
             !selectedOpening &&
+            !selectedStaircase &&
+            !selectedWire &&
             !selectedPoint &&
             !selectedFurniture && (
             <div className="flex flex-col gap-gutter-md">
@@ -3740,6 +5875,35 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           </form>
         </div>
       )}
+      {/* MULTI-BRAND ELECTRICAL PRODUCT CATALOGUE MODAL */}
+      <ProductCatalogueModal
+        open={catalogueOpen}
+        onClose={() => {
+          setCatalogueOpen(false);
+          setCatalogueVersion((v) => v + 1);
+        }}
+        isAdmin={isAdmin}
+        activeCircuit={(selectedPoint?.circuit ?? selectedWire?.circuit) || CIRCUITS[0]}
+        onAddProductToProject={handleAddCatalogueProductToProject}
+        onAssignCableToCircuit={handleAssignCableToCircuit}
+      />
+
+      {/* MULTI-PAGE ARCHITECTURAL & ELECTRICAL PDF PACKAGE MODAL */}
+      <PdfExportModal
+        open={pdfModalOpen}
+        project={project}
+        onClose={() => setPdfModalOpen(false)}
+        onExported={(count) =>
+          notify(`Exported ${count}-page Architectural & Electrical PDF Drawing Package`)
+        }
+      />
+
+      {/* SAFE PROJECT IMPORT PREVIEW MODAL (.bluespace / .json) */}
+      <ImportProjectPreviewModal
+        preview={importPreview}
+        onCancel={() => setImportPreview(null)}
+        onConfirmImport={handleConfirmSafeImport}
+      />
     </div>
   );
 };

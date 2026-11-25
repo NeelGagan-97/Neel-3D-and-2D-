@@ -6,19 +6,33 @@ import {
   CircuitId,
   ElectricalItemType,
   ElectricalPoint,
+  ElectricalWire,
   FurnitureItem,
   ProjectData,
   RoomZone,
   SelectedEntity,
+  StaircaseItem,
   StudioEntityRef,
   StudioFocusTarget,
+  WireCategory,
+  WireWaypoint,
 } from '../types/design';
+import {
+  checkTerminalCompatibility,
+  computeStaircaseFootprint,
+  computeWireLengthMeters,
+  getFloorBoundaryMeters,
+  getFloorLabel,
+  getWiringConfig,
+  WIRE_STANDARD_COLORS,
+} from '../utils/buildingWiring';
 import {
   extractMergedWalls,
   findNearestWallAttachment,
   formatArea,
   formatFloorLabel,
   formatLength,
+  getItemFloor,
   isPointInsideRoom,
   sliceProjectForFloor,
   snapCoordinate,
@@ -70,6 +84,16 @@ interface FloorPlan2DProps {
   onDuplicateFurniture?: (furnitureId: string) => FurnitureItem | null;
   onDuplicateWall?: (wallId: string) => void;
   onPlacePointAt?: (itemType: ElectricalItemType, x: number, y: number, roomId: string) => void;
+  activeWireCategory?: WireCategory;
+  allowInterFloorWiring?: boolean;
+  onAddStaircase?: (x: number, y: number) => void;
+  onMoveStaircase?: (staircaseId: string, x: number, y: number) => void;
+  onCreateWire?: (fromPointId: string, toPointId: string, waypoints: WireWaypoint[]) => void;
+  onUpdateWireWaypoints?: (
+    wireId: string,
+    waypoints: WireWaypoint[],
+    recordHistory?: boolean
+  ) => void;
   onRecordHistorySnapshot?: () => void;
   onValidationWarning?: (message: string) => void;
 }
@@ -157,6 +181,12 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   onDuplicateFurniture,
   onDuplicateWall,
   onPlacePointAt,
+  activeWireCategory = 'phase',
+  allowInterFloorWiring = false,
+  onAddStaircase,
+  onMoveStaircase,
+  onCreateWire,
+  onUpdateWireWaypoints,
   onRecordHistorySnapshot,
   onValidationWarning,
 }) => {
@@ -164,6 +194,29 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     () => sliceProjectForFloor(fullProject, activeFloor),
     [fullProject, activeFloor]
   );
+  const wiringConfig = useMemo(() => getWiringConfig(fullProject), [fullProject]);
+  const floorStaircases = useMemo<StaircaseItem[]>(
+    () =>
+      (fullProject.staircases ?? []).filter(
+        (s) => s.fromFloor === activeFloor || s.toFloor === activeFloor
+      ),
+    [fullProject.staircases, activeFloor]
+  );
+  const visibleWires = useMemo<ElectricalWire[]>(() => {
+    if (!wiringConfig.showWires) return [];
+    const all = fullProject.wires ?? [];
+    return all.filter((w) => {
+      if (wiringConfig.visibleCategories[w.category] === false) return false;
+      if (wiringConfig.showAllFloorsElectrical) return true;
+      return w.floor === activeFloor || w.fromFloor === activeFloor || w.toFloor === activeFloor;
+    });
+  }, [fullProject.wires, activeFloor, wiringConfig]);
+  const pointLookup = useMemo(() => {
+    const m = new Map<string, ElectricalPoint>();
+    fullProject.points.forEach((p) => m.set(p.id, p));
+    return m;
+  }, [fullProject.points]);
+
   const underlayRooms = useMemo(
     () => (activeFloor > 1 ? sliceProjectForFloor(fullProject, activeFloor - 1).rooms : []),
     [fullProject, activeFloor]
@@ -191,6 +244,33 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     moved: boolean;
     snapshotRecorded: boolean;
   } | null>(null);
+  const [draggingStaircase, setDraggingStaircase] = useState<{
+    id: string;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+    moved: boolean;
+    snapshotRecorded: boolean;
+  } | null>(null);
+  const [wireDraft, setWireDraft] = useState<{
+    fromPointId: string;
+    waypoints: WireWaypoint[];
+    preview: { x: number; y: number } | null;
+  } | null>(null);
+  const [draggingWaypoint, setDraggingWaypoint] = useState<{
+    wireId: string;
+    index: number;
+    snapshotRecorded: boolean;
+  } | null>(null);
+  const [draggingWireRoute, setDraggingWireRoute] = useState<{
+    wireId: string;
+    startX: number;
+    startY: number;
+    origWaypoints: WireWaypoint[];
+    moved: boolean;
+    snapshotRecorded: boolean;
+  } | null>(null);
   const [roomDrag, setRoomDrag] = useState<RoomDragState | null>(null);
   const [groupDrag, setGroupDrag] = useState<GroupDragState | null>(null);
   const [lineStart, setLineStart] = useState<{ x: number; y: number } | null>(null);
@@ -209,7 +289,33 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     pointerId: number;
   } | null>(null);
 
+  // Clear active wire draft when switching away from add-wire or pressing Escape
+  useEffect(() => {
+    if (activeTool !== 'add-wire' && wireDraft) {
+      setWireDraft(null);
+    }
+  }, [activeTool, wireDraft]);
+
+  useEffect(() => {
+    if (!wireDraft) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        setWireDraft(null);
+      } else if (ev.key === 'Backspace' && wireDraft.waypoints.length > 0) {
+        setWireDraft((prev) =>
+          prev ? { ...prev, waypoints: prev.waypoints.slice(0, -1) } : null
+        );
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [wireDraft]);
+
   const { lengthM, widthM, ceilingM } = useMemo(() => siteToMeters(project.site), [project.site]);
+  const floorBounds = useMemo(
+    () => getFloorBoundaryMeters(fullProject, activeFloor),
+    [fullProject, activeFloor]
+  );
   const mergedWalls = useMemo(() => extractMergedWalls(project), [project]);
   const units = project.site.units;
 
@@ -290,6 +396,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   const circuitPaths = useMemo(() => {
     const groups = new Map<CircuitId, ElectricalPoint[]>();
     project.points.forEach((pt) => {
+      if (!pt.circuit) return;
       const list = groups.get(pt.circuit) ?? [];
       list.push(pt);
       groups.set(pt.circuit, list);
@@ -399,6 +506,47 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       } else {
         onValidationWarning?.(
           `Click closer to an exterior or room wall to place a ${kind}.`
+        );
+      }
+      return;
+    }
+
+    // Add Staircase tool: click inside site boundary to place parametric staircase
+    if (activeTool === 'add-staircase' && onAddStaircase) {
+      if (!raw.inside) return;
+      onAddStaircase(snapped.x, snapped.y);
+      return;
+    }
+
+    // Add Wire tool: clicking open canvas while a draft is active appends an orthogonal/angled routing waypoint
+    if (activeTool === 'add-wire') {
+      if (wireDraft && raw.inside) {
+        const fromPt = pointLookup.get(wireDraft.fromPointId);
+        const anchor =
+          wireDraft.waypoints.length > 0
+            ? wireDraft.waypoints[wireDraft.waypoints.length - 1]
+            : fromPt ?? snapped;
+        let wx = snapped.x;
+        let wy = snapped.y;
+        if (!e.shiftKey) {
+          if (Math.abs(wx - anchor.x) >= Math.abs(wy - anchor.y)) {
+            wy = anchor.y;
+          } else {
+            wx = anchor.x;
+          }
+        }
+        setWireDraft((prev) =>
+          prev
+            ? {
+                ...prev,
+                waypoints: [...prev.waypoints, { x: Number(wx.toFixed(2)), y: Number(wy.toFixed(2)) }],
+                preview: { x: Number(wx.toFixed(2)), y: Number(wy.toFixed(2)) },
+              }
+            : null
+        );
+      } else if (!wireDraft) {
+        onValidationWarning?.(
+          'Click a source electrical component first, then optional routing waypoints, then a destination component.'
         );
       }
       return;
@@ -618,6 +766,96 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
+    // Dragging a staircase freely
+    if (draggingStaircase && onMoveStaircase) {
+      const dx = raw.x - draggingStaircase.startX;
+      const dy = raw.y - draggingStaircase.startY;
+      if (!draggingStaircase.moved && Math.hypot(dx, dy) < 0.06) return;
+      if (!draggingStaircase.snapshotRecorded) {
+        onRecordHistorySnapshot?.();
+      }
+      if (!draggingStaircase.moved || !draggingStaircase.snapshotRecorded) {
+        setDraggingStaircase((prev) =>
+          prev ? { ...prev, moved: true, snapshotRecorded: true } : null
+        );
+      }
+      const snapped = snapCoordinateFree(
+        draggingStaircase.origX + dx,
+        draggingStaircase.origY + dy,
+        project,
+        snapEnabled
+      );
+      onMoveStaircase(draggingStaircase.id, snapped.x, snapped.y);
+      return;
+    }
+
+    // Dragging a single wire waypoint handle
+    if (draggingWaypoint && onUpdateWireWaypoints) {
+      const wire = (fullProject.wires ?? []).find((w) => w.id === draggingWaypoint.wireId);
+      if (!wire) return;
+      if (!draggingWaypoint.snapshotRecorded) {
+        onRecordHistorySnapshot?.();
+        setDraggingWaypoint((prev) => (prev ? { ...prev, snapshotRecorded: true } : null));
+      }
+      const snapped = snapCoordinate(raw.x, raw.y, project, snapEnabled);
+      const nextWps = wire.waypoints.map((wp, idx) =>
+        idx === draggingWaypoint.index
+          ? { x: Number(snapped.x.toFixed(2)), y: Number(snapped.y.toFixed(2)) }
+          : wp
+      );
+      onUpdateWireWaypoints(wire.id, nextWps, false);
+      return;
+    }
+
+    // Dragging a wire segment to shift the intermediate route while keeping endpoints anchored
+    if (draggingWireRoute && onUpdateWireWaypoints) {
+      const rawDx = raw.x - draggingWireRoute.startX;
+      const rawDy = raw.y - draggingWireRoute.startY;
+      if (!draggingWireRoute.moved && Math.hypot(rawDx, rawDy) < 0.06) return;
+      if (!draggingWireRoute.snapshotRecorded) {
+        onRecordHistorySnapshot?.();
+      }
+      if (!draggingWireRoute.moved || !draggingWireRoute.snapshotRecorded) {
+        setDraggingWireRoute((prev) =>
+          prev ? { ...prev, moved: true, snapshotRecorded: true } : null
+        );
+      }
+      const step = snapEnabled ? (units === 'ft' ? 0.5 * FT_TO_M : 0.1) : 0.01;
+      const dx = Math.round(rawDx / step) * step;
+      const dy = Math.round(rawDy / step) * step;
+      const maxBoundX = Math.max(lengthM, floorBounds.lengthM);
+      const maxBoundY = Math.max(widthM, floorBounds.widthM);
+      const shifted = draggingWireRoute.origWaypoints.map((wp) => ({
+        x: Number(Math.max(0.05, Math.min(maxBoundX - 0.05, wp.x + dx)).toFixed(2)),
+        y: Number(Math.max(0.05, Math.min(maxBoundY - 0.05, wp.y + dy)).toFixed(2)),
+      }));
+      onUpdateWireWaypoints(draggingWireRoute.wireId, shifted, false);
+      return;
+    }
+
+    // Live interactive cable routing preview
+    if (activeTool === 'add-wire' && wireDraft) {
+      const snapped = snapCoordinate(raw.x, raw.y, project, snapEnabled);
+      const fromPt = pointLookup.get(wireDraft.fromPointId);
+      const anchor =
+        wireDraft.waypoints.length > 0
+          ? wireDraft.waypoints[wireDraft.waypoints.length - 1]
+          : fromPt ?? snapped;
+      let px = snapped.x;
+      let py = snapped.y;
+      if (!e.shiftKey) {
+        if (Math.abs(px - anchor.x) >= Math.abs(py - anchor.y)) {
+          py = anchor.y;
+        } else {
+          px = anchor.x;
+        }
+      }
+      setWireDraft((prev) =>
+        prev ? { ...prev, preview: { x: Number(px.toFixed(2)), y: Number(py.toFixed(2)) } } : null
+      );
+      return;
+    }
+
     // Wall drawing or Dimension drawing preview (orthogonal H/V snap unless Shift held)
     if (lineStart && (activeTool === 'draw-wall' || activeTool === 'dimension')) {
       const snapped = snapCoordinate(raw.x, raw.y, project, snapEnabled);
@@ -678,6 +916,21 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
+    if (draggingStaircase) {
+      setDraggingStaircase(null);
+      return;
+    }
+
+    if (draggingWaypoint) {
+      setDraggingWaypoint(null);
+      return;
+    }
+
+    if (draggingWireRoute) {
+      setDraggingWireRoute(null);
+      return;
+    }
+
     if (roomDrag) {
       if (roomDrag.moved) {
         // Allow freely dismantling & placing room sections anywhere on the canvas
@@ -727,6 +980,8 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       activeTool === 'dimension' ||
       activeTool === 'add-door' ||
       activeTool === 'add-window' ||
+      activeTool === 'add-staircase' ||
+      activeTool === 'add-wire' ||
       (allSelected && mode === 'move' && (activeTool === 'select' || activeTool === 'move'))
     ) {
       return;
@@ -820,6 +1075,8 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
         activeTool === 'add-room' ||
         activeTool === 'add-door' ||
         activeTool === 'add-window' ||
+        activeTool === 'add-staircase' ||
+        activeTool === 'add-wire' ||
         activeTool === 'dimension'
       ? 'cursor-crosshair'
       : activeTool === 'pan'
@@ -1010,6 +1267,34 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                   {siteWidLabel}
                 </text>
               </g>
+            </g>
+          )}
+
+          {/* Independent Per-Floor Boundary Outline (when custom lengthM/widthM is set) */}
+          {floorBounds.isCustom && (
+            <g pointerEvents="none">
+              <rect
+                x={PAD}
+                y={PAD}
+                width={floorBounds.lengthM * SCALE}
+                height={floorBounds.widthM * SCALE}
+                fill="none"
+                stroke={floorBounds.exceedsSite ? '#FF9D00' : '#38BDF8'}
+                strokeWidth="2"
+                strokeDasharray="7,4"
+              />
+              {!previewOnly && (
+                <text
+                  x={PAD + floorBounds.lengthM * SCALE - 6}
+                  y={PAD + 14}
+                  textAnchor="end"
+                  fill={floorBounds.exceedsSite ? '#FDBA74' : '#7DD3FC'}
+                  fontFamily="Red Hat Mono, monospace"
+                  fontSize="9.5"
+                >
+                  FLOOR BOUNDARY: {formatLength(floorBounds.lengthM, units, 1)} × {formatLength(floorBounds.widthM, units, 1)}
+                </text>
+              )}
             </g>
           )}
 
@@ -1589,19 +1874,486 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
               );
             })}
 
-          {/* Electrical Circuit Bus Wiring Overlay */}
-          {circuitPaths.map((c) => (
-            <path
-              key={c.circuit}
-              d={c.d}
-              fill="none"
-              stroke={c.color}
-              strokeWidth={previewOnly ? 1.1 : 1.3}
-              strokeOpacity="0.4"
-              strokeDasharray="5,4"
-              pointerEvents="none"
-            />
-          ))}
+          {/* Parametric Staircases on Active Floor */}
+          {floorStaircases.map((st) => {
+            const { footprintW, footprintD } = computeStaircaseFootprint(st);
+            const sx = PAD + st.x * SCALE;
+            const sy = PAD + st.y * SCALE;
+            const sw = footprintW * SCALE;
+            const sd = footprintD * SCALE;
+            const isSelStair = isEntitySelected('staircase', st.id);
+            const isDestination = st.toFloor === activeFloor && st.fromFloor !== activeFloor;
+            const stepLines = Math.max(4, Math.min(18, st.steps));
+
+            return (
+              <g
+                key={st.id}
+                transform={`translate(${sx} ${sy}) rotate(${st.rotation || 0})`}
+                className={
+                  previewOnly || activeTool === 'pan'
+                    ? ''
+                    : activeTool === 'erase'
+                      ? 'cursor-not-allowed'
+                      : 'cursor-pointer'
+                }
+                onPointerDown={(e) => {
+                  if (
+                    previewOnly ||
+                    e.button === 1 ||
+                    activeTool === 'pan' ||
+                    activeTool === 'draw-wall' ||
+                    activeTool === 'dimension' ||
+                    activeTool === 'add-wire' ||
+                    allSelected
+                  ) {
+                    return;
+                  }
+                  e.stopPropagation();
+                  if (activeTool === 'erase') {
+                    onEraseEntity?.({ kind: 'staircase', id: st.id });
+                    return;
+                  }
+                  if (activeTool === 'rotate') {
+                    onClearAllSelection?.();
+                    onSelectEntity?.({ kind: 'staircase', id: st.id }, false);
+                    onRotateEntity?.({ kind: 'staircase', id: st.id });
+                    return;
+                  }
+                  onClearAllSelection?.();
+                  onSelectEntity?.({ kind: 'staircase', id: st.id }, e.shiftKey);
+                  if (!e.shiftKey && (activeTool === 'select' || activeTool === 'move')) {
+                    const raw = clientToRawMeters(e.clientX, e.clientY);
+                    setDraggingStaircase({
+                      id: st.id,
+                      startX: raw.x,
+                      startY: raw.y,
+                      origX: st.x,
+                      origY: st.y,
+                      moved: false,
+                      snapshotRecorded: false,
+                    });
+                  }
+                }}
+              >
+                {st.type === 'spiral' ? (
+                  <>
+                    <circle
+                      cx={sw / 2}
+                      cy={sd / 2}
+                      r={Math.min(sw, sd) / 2}
+                      fill={isSelStair ? 'rgba(0, 168, 255, 0.22)' : 'rgba(56, 189, 248, 0.12)'}
+                      stroke={isSelStair ? '#00A8FF' : '#94A3B8'}
+                      strokeWidth={isSelStair ? 2.2 : 1.4}
+                      strokeDasharray={isDestination ? '4,3' : undefined}
+                    />
+                    {Array.from({ length: 10 }).map((_, i) => {
+                      const a = (i * Math.PI * 2) / 10;
+                      const r = Math.min(sw, sd) / 2;
+                      return (
+                        <line
+                          key={i}
+                          x1={sw / 2}
+                          y1={sd / 2}
+                          x2={sw / 2 + Math.cos(a) * r}
+                          y2={sd / 2 + Math.sin(a) * r}
+                          stroke="#64748B"
+                          strokeWidth="0.9"
+                        />
+                      );
+                    })}
+                    <circle cx={sw / 2} cy={sd / 2} r={4} fill="#CBD5E1" />
+                  </>
+                ) : (
+                  <>
+                    <rect
+                      x={0}
+                      y={0}
+                      width={sw}
+                      height={sd}
+                      rx="2"
+                      fill={isSelStair ? 'rgba(0, 168, 255, 0.22)' : 'rgba(56, 189, 248, 0.12)'}
+                      stroke={isSelStair ? '#00A8FF' : '#94A3B8'}
+                      strokeWidth={isSelStair ? 2.2 : 1.4}
+                      strokeDasharray={isDestination ? '4,3' : undefined}
+                    />
+                    {Array.from({ length: stepLines - 1 }).map((_, idx) => {
+                      const xStep = ((idx + 1) / stepLines) * sw;
+                      return (
+                        <line
+                          key={idx}
+                          x1={xStep}
+                          y1={0}
+                          x2={xStep}
+                          y2={sd}
+                          stroke="#64748B"
+                          strokeWidth="0.9"
+                        />
+                      );
+                    })}
+                    <line
+                      x1={6}
+                      y1={sd / 2}
+                      x2={Math.max(12, sw - 6)}
+                      y2={sd / 2}
+                      stroke={isSelStair ? '#00A8FF' : '#FF9D00'}
+                      strokeWidth="1.4"
+                    />
+                  </>
+                )}
+                {!previewOnly && (
+                  <text
+                    x={sw / 2}
+                    y={-6}
+                    textAnchor="middle"
+                    fill={isSelStair ? '#E0F4FF' : '#CBD5E1'}
+                    fontFamily="Red Hat Mono, monospace"
+                    fontSize="8.5"
+                    pointerEvents="none"
+                  >
+                    {st.name} ({isDestination ? 'DN' : 'UP'} {getFloorLabel(fullProject, st.fromFloor).split(' ')[0]}→{getFloorLabel(fullProject, st.toFloor).split(' ')[0]})
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+          {/* Electrical Auto Circuit Bus Overlay (toggleable via Wiring Config) */}
+          {wiringConfig.showAutoCircuitBus &&
+            circuitPaths.map((c) => (
+              <path
+                key={c.circuit}
+                d={c.d}
+                fill="none"
+                stroke={c.color}
+                strokeWidth={previewOnly ? 1.1 : 1.3}
+                strokeOpacity="0.35"
+                strokeDasharray="5,4"
+                pointerEvents="none"
+              />
+            ))}
+
+          {/* Interactive Routed Electrical Wires & Waypoint Editing Layer */}
+          {visibleWires.map((wire) => {
+            const fromPt = pointLookup.get(wire.fromPointId);
+            const toPt = pointLookup.get(wire.toPointId);
+            if (!fromPt || !toPt) return null;
+
+            const isSelWire = isEntitySelected('wire', wire.id);
+            const isActiveFindWire = !previewOnly && activeHighlightId === wire.id;
+            const isFindMatchWire = !previewOnly && !!highlightedIds?.has(wire.id);
+            const nodes = [
+              { x: fromPt.x, y: fromPt.y },
+              ...(wire.waypoints ?? []),
+              { x: toPt.x, y: toPt.y },
+            ];
+            const pathD = nodes
+              .map(
+                (n, idx) =>
+                  `${idx === 0 ? 'M' : 'L'} ${(PAD + n.x * SCALE).toFixed(1)} ${(PAD + n.y * SCALE).toFixed(1)}`
+              )
+              .join(' ');
+            const wireLenM = computeWireLengthMeters(wire, fullProject);
+            const midNodeIdx = Math.floor((nodes.length - 1) / 2);
+            const labelX = PAD + ((nodes[midNodeIdx].x + nodes[midNodeIdx + 1].x) / 2) * SCALE;
+            const labelY = PAD + ((nodes[midNodeIdx].y + nodes[midNodeIdx + 1].y) / 2) * SCALE;
+
+            return (
+              <g key={wire.id}>
+                {/* Selection glow underlay */}
+                {(isSelWire || isActiveFindWire || isFindMatchWire) && (
+                  <path
+                    d={pathD}
+                    fill="none"
+                    stroke={isActiveFindWire ? '#FF9D00' : isSelWire ? '#00A8FF' : '#FBBF24'}
+                    strokeWidth={wire.lineThickness + 5}
+                    strokeOpacity="0.32"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    pointerEvents="none"
+                  />
+                )}
+                {/* Actual styled wire conductor */}
+                <path
+                  d={pathD}
+                  fill="none"
+                  stroke={wire.color}
+                  strokeWidth={previewOnly ? 1.4 : Math.max(1.6, wire.lineThickness)}
+                  strokeDasharray={wire.lineStyle === 'dashed' ? '6,4' : undefined}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  pointerEvents="none"
+                />
+                {/* Generous hit target for selecting, deleting, or shifting route */}
+                {!previewOnly && (
+                  <path
+                    d={pathD}
+                    fill="none"
+                    stroke="transparent"
+                    strokeWidth="14"
+                    className={
+                      activeTool === 'erase'
+                        ? 'cursor-not-allowed'
+                        : activeTool === 'pan'
+                          ? ''
+                          : 'cursor-pointer'
+                    }
+                    onPointerDown={(e) => {
+                      if (
+                        e.button === 1 ||
+                        activeTool === 'pan' ||
+                        activeTool === 'draw-wall' ||
+                        activeTool === 'dimension' ||
+                        activeTool === 'add-wire' ||
+                        allSelected
+                      ) {
+                        return;
+                      }
+                      e.stopPropagation();
+                      if (activeTool === 'erase') {
+                        // Delete ONLY the wire, preserving connected components
+                        onEraseEntity?.({ kind: 'wire', id: wire.id });
+                        return;
+                      }
+                      onClearAllSelection?.();
+                      onSelectEntity?.({ kind: 'wire', id: wire.id }, e.shiftKey);
+                      // Allow dragging the wire path to shift intermediate waypoints cleanly
+                      if (
+                        !e.shiftKey &&
+                        (activeTool === 'select' || activeTool === 'move') &&
+                        wire.waypoints.length > 0 &&
+                        onUpdateWireWaypoints
+                      ) {
+                        const raw = clientToRawMeters(e.clientX, e.clientY);
+                        setDraggingWireRoute({
+                          wireId: wire.id,
+                          startX: raw.x,
+                          startY: raw.y,
+                          origWaypoints: wire.waypoints.map((wp) => ({ ...wp })),
+                          moved: false,
+                          snapshotRecorded: false,
+                        });
+                      }
+                    }}
+                  />
+                )}
+
+                {/* Endpoint connection rings */}
+                {!previewOnly && wiringConfig.showEndpointMarkers && (
+                  <>
+                    <circle
+                      cx={PAD + fromPt.x * SCALE}
+                      cy={PAD + fromPt.y * SCALE}
+                      r={isSelWire ? 10 : 8}
+                      fill="none"
+                      stroke={wire.color}
+                      strokeWidth="1.2"
+                      strokeOpacity="0.8"
+                      pointerEvents="none"
+                    />
+                    <circle
+                      cx={PAD + toPt.x * SCALE}
+                      cy={PAD + toPt.y * SCALE}
+                      r={isSelWire ? 10 : 8}
+                      fill="none"
+                      stroke={wire.color}
+                      strokeWidth="1.2"
+                      strokeOpacity="0.8"
+                      pointerEvents="none"
+                    />
+                  </>
+                )}
+
+                {/* Wire Label & Live Length Readout */}
+                {!previewOnly && (wiringConfig.showWireLabels || isSelWire) && (
+                  <g transform={`translate(${labelX} ${labelY - 12})`} pointerEvents="none">
+                    <rect
+                      x={isSelWire ? -44 : -26}
+                      y="-9"
+                      width={isSelWire ? 88 : 52}
+                      height="16"
+                      rx="2"
+                      fill="#080F20"
+                      stroke={isSelWire ? '#00A8FF' : wire.color}
+                      strokeWidth="0.9"
+                    />
+                    <text
+                      x="0"
+                      y="2.5"
+                      textAnchor="middle"
+                      fill="#E0F4FF"
+                      fontFamily="Red Hat Mono, monospace"
+                      fontSize="8.5"
+                    >
+                      {wire.code}
+                      {isSelWire
+                        ? ` · ${wireLenM.toFixed(1)}m${wire.cableSizeSqMm ? ` (${wire.cableSizeSqMm}mm²)` : ''}`
+                        : wire.isInterFloor
+                          ? ' ↕'
+                          : ''}
+                    </text>
+                  </g>
+                )}
+
+                {/* Waypoint Drag Handles & Midpoint Insert Handles when Wire is Selected */}
+                {!previewOnly && isSelWire && onUpdateWireWaypoints && (
+                  <g>
+                    {/* Segment Midpoint '+' handles to insert new waypoint */}
+                    {nodes.slice(0, -1).map((a, segIdx) => {
+                      const b = nodes[segIdx + 1];
+                      const segDist = Math.hypot(b.x - a.x, b.y - a.y);
+                      if (segDist < 0.35) return null;
+                      const mx = PAD + ((a.x + b.x) / 2) * SCALE;
+                      const my = PAD + ((a.y + b.y) / 2) * SCALE;
+                      return (
+                        <g
+                          key={`mid-${segIdx}`}
+                          transform={`translate(${mx} ${my})`}
+                          className="cursor-copy"
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            onRecordHistorySnapshot?.();
+                            const inserted: WireWaypoint = {
+                              x: Number(((a.x + b.x) / 2).toFixed(2)),
+                              y: Number(((a.y + b.y) / 2).toFixed(2)),
+                            };
+                            const nextWps = [...wire.waypoints];
+                            nextWps.splice(segIdx, 0, inserted);
+                            onUpdateWireWaypoints(wire.id, nextWps, false);
+                            setDraggingWaypoint({
+                              wireId: wire.id,
+                              index: segIdx,
+                              snapshotRecorded: true,
+                            });
+                          }}
+                        >
+                          <circle r="5.5" fill="#0D1528" stroke="#00A8FF" strokeWidth="1.2" />
+                          <text
+                            y="3"
+                            textAnchor="middle"
+                            fill="#00A8FF"
+                            fontSize="9"
+                            fontWeight="700"
+                            pointerEvents="none"
+                          >
+                            +
+                          </text>
+                          <title>Click &amp; drag to add waypoint bend</title>
+                        </g>
+                      );
+                    })}
+
+                    {/* Existing Waypoint Handles (Drag to move · Double-click or Right-click to remove) */}
+                    {wire.waypoints.map((wp, wpIdx) => (
+                      <circle
+                        key={`wp-${wpIdx}`}
+                        cx={PAD + wp.x * SCALE}
+                        cy={PAD + wp.y * SCALE}
+                        r="5.5"
+                        fill="#00A8FF"
+                        stroke="#080F20"
+                        strokeWidth="1.6"
+                        className="cursor-move"
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          if (e.button === 2) return;
+                          setDraggingWaypoint({
+                            wireId: wire.id,
+                            index: wpIdx,
+                            snapshotRecorded: false,
+                          });
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          onRecordHistorySnapshot?.();
+                          onUpdateWireWaypoints(
+                            wire.id,
+                            wire.waypoints.filter((_, i) => i !== wpIdx),
+                            false
+                          );
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          onRecordHistorySnapshot?.();
+                          onUpdateWireWaypoints(
+                            wire.id,
+                            wire.waypoints.filter((_, i) => i !== wpIdx),
+                            false
+                          );
+                        }}
+                      >
+                        <title>Drag to move waypoint · Double-click or Right-click to remove</title>
+                      </circle>
+                    ))}
+                  </g>
+                )}
+              </g>
+            );
+          })}
+
+          {/* Live Interactive Cable Routing Draft Preview */}
+          {!previewOnly && activeTool === 'add-wire' && wireDraft && (() => {
+            const fromPt = pointLookup.get(wireDraft.fromPointId);
+            if (!fromPt) return null;
+            const draftNodes = [
+              { x: fromPt.x, y: fromPt.y },
+              ...wireDraft.waypoints,
+              ...(wireDraft.preview ? [wireDraft.preview] : []),
+            ];
+            const draftD = draftNodes
+              .map(
+                (n, idx) =>
+                  `${idx === 0 ? 'M' : 'L'} ${(PAD + n.x * SCALE).toFixed(1)} ${(PAD + n.y * SCALE).toFixed(1)}`
+              )
+              .join(' ');
+            let draftLen = 0;
+            for (let i = 0; i < draftNodes.length - 1; i++) {
+              draftLen += Math.hypot(
+                draftNodes[i + 1].x - draftNodes[i].x,
+                draftNodes[i + 1].y - draftNodes[i].y
+              );
+            }
+            const lastNode = draftNodes[draftNodes.length - 1];
+            const draftColor = WIRE_STANDARD_COLORS[wiringConfig.standard][activeWireCategory];
+            return (
+              <g pointerEvents="none">
+                <path
+                  d={draftD}
+                  fill="none"
+                  stroke={draftColor}
+                  strokeWidth="2.4"
+                  strokeDasharray="6,4"
+                  strokeLinecap="round"
+                />
+                {wireDraft.waypoints.map((wp, idx) => (
+                  <circle
+                    key={`draft-wp-${idx}`}
+                    cx={PAD + wp.x * SCALE}
+                    cy={PAD + wp.y * SCALE}
+                    r="4"
+                    fill={draftColor}
+                    stroke="#080F20"
+                    strokeWidth="1.2"
+                  />
+                ))}
+                <g
+                  transform={`translate(${PAD + lastNode.x * SCALE} ${PAD + lastNode.y * SCALE - 18})`}
+                >
+                  <rect x="-54" y="-10" width="108" height="18" rx="3" fill="#080F20" stroke={draftColor} />
+                  <text
+                    x="0"
+                    y="2.5"
+                    textAnchor="middle"
+                    fill="#E0F4FF"
+                    fontFamily="Red Hat Mono, monospace"
+                    fontSize="8.5"
+                  >
+                    {fromPt.code} → {draftLen.toFixed(1)}m (Esc cancel)
+                  </text>
+                </g>
+              </g>
+            );
+          })()}
 
           {/* Electrical Points */}
           {project.points.map((pt) => {
@@ -1644,6 +2396,39 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                     return;
                   }
                   e.stopPropagation();
+                  if (activeTool === 'add-wire') {
+                    if (!wireDraft) {
+                      setWireDraft({
+                        fromPointId: pt.id,
+                        waypoints: [],
+                        preview: { x: pt.x, y: pt.y },
+                      });
+                    } else {
+                      const fromPt = pointLookup.get(wireDraft.fromPointId);
+                      if (!fromPt) {
+                        setWireDraft(null);
+                        return;
+                      }
+                      const compat = checkTerminalCompatibility(
+                        fromPt,
+                        pt,
+                        activeWireCategory,
+                        allowInterFloorWiring
+                      );
+                      if (!compat.compatible) {
+                        onValidationWarning?.(
+                          compat.reason || 'Selected electrical terminals are incompatible.'
+                        );
+                        return;
+                      }
+                      if (compat.warning) {
+                        onValidationWarning?.(compat.warning);
+                      }
+                      onCreateWire?.(fromPt.id, pt.id, wireDraft.waypoints);
+                      setWireDraft(null);
+                    }
+                    return;
+                  }
                   if (activeTool === 'erase') {
                     onEraseEntity?.({ kind: 'point', id: pt.id });
                     return;
@@ -1689,24 +2474,88 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                 {isActiveFind && (
                   <circle r="19" fill="rgba(255, 157, 0, 0.16)" stroke="#FF9D00" strokeWidth="2" />
                 )}
-                {(isSelected || isFindMatch) && (
+                {(isSelected || isFindMatch || wireDraft?.fromPointId === pt.id) && (
                   <circle
                     r="14"
                     fill="none"
-                    stroke={isActiveFind ? '#FF9D00' : isSelected ? '#00A8FF' : '#FBBF24'}
-                    strokeWidth="1.6"
+                    stroke={
+                      wireDraft?.fromPointId === pt.id
+                        ? '#22C55E'
+                        : isActiveFind
+                          ? '#FF9D00'
+                          : isSelected
+                            ? '#00A8FF'
+                            : '#FBBF24'
+                    }
+                    strokeWidth="1.8"
                     strokeDasharray="3,2"
                   />
                 )}
-                <circle r={radius} fill={fill} stroke={stroke} strokeWidth={isSelected || isActiveFind ? 2 : 1.5} />
+                {pt.itemType === 'distribution_board' ? (
+                  <g>
+                    <rect
+                      x={previewOnly ? -6 : -10}
+                      y={previewOnly ? -4.5 : -7}
+                      width={previewOnly ? 12 : 20}
+                      height={previewOnly ? 9 : 14}
+                      rx="1.5"
+                      fill={isSelected ? '#00A8FF' : '#0D1528'}
+                      stroke={isSelected ? '#F5F7FA' : '#38BDF8'}
+                      strokeWidth={isSelected ? 2 : 1.6}
+                    />
+                    <line
+                      x1={previewOnly ? -6 : -10}
+                      y1={previewOnly ? 4.5 : 7}
+                      x2={previewOnly ? 6 : 10}
+                      y2={previewOnly ? -4.5 : -7}
+                      stroke={isSelected ? '#080F20' : '#38BDF8'}
+                      strokeWidth="1.4"
+                    />
+                  </g>
+                ) : pt.itemType === 'earthing_point' ? (
+                  <g>
+                    <circle
+                      r={previewOnly ? 5 : 8.5}
+                      fill={isSelected ? '#16A34A' : '#0D1528'}
+                      stroke="#22C55E"
+                      strokeWidth={isSelected ? 2.2 : 1.6}
+                    />
+                    {/* Standard IEC Earthing Symbol */}
+                    <line x1="0" y1="-4.5" x2="0" y2="0.5" stroke="#4ADE80" strokeWidth="1.4" />
+                    <line x1="-4.5" y1="0.5" x2="4.5" y2="0.5" stroke="#4ADE80" strokeWidth="1.4" />
+                    <line x1="-3" y1="2.8" x2="3" y2="2.8" stroke="#4ADE80" strokeWidth="1.3" />
+                    <line x1="-1.5" y1="5" x2="1.5" y2="5" stroke="#4ADE80" strokeWidth="1.2" />
+                  </g>
+                ) : (
+                  <circle
+                    r={radius}
+                    fill={fill}
+                    stroke={stroke}
+                    strokeWidth={isSelected || isActiveFind ? 2 : 1.5}
+                  />
+                )}
                 {!previewOnly && (
                   <text
                     y={-12}
                     textAnchor="middle"
-                    fill={isActiveFind ? '#FFE2B3' : isSelected ? '#FFFFFF' : isFindMatch ? '#FDE68A' : isHighPower ? '#FFE2B3' : '#C5CDD8'}
+                    fill={
+                      pt.itemType === 'earthing_point'
+                        ? '#4ADE80'
+                        : pt.itemType === 'distribution_board'
+                          ? '#7DD3FC'
+                          : isActiveFind
+                            ? '#FFE2B3'
+                            : isSelected
+                              ? '#FFFFFF'
+                              : isFindMatch
+                                ? '#FDE68A'
+                                : isHighPower
+                                  ? '#FFE2B3'
+                                  : '#C5CDD8'
+                    }
                     fontFamily="Red Hat Mono, monospace"
                     fontSize={isSelected || isActiveFind ? '9.5' : '8.5'}
-                    fontWeight={isSelected || isActiveFind ? '700' : '500'}
+                    fontWeight={isSelected || isActiveFind || pt.category === 'Distribution' ? '700' : '500'}
                     pointerEvents="none"
                   >
                     {pt.code}

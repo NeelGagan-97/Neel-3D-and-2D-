@@ -74,12 +74,15 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const handleLogout = async () => {
     setAccountMenuOpen(false);
-    await signOut();
-    goRoute('login');
+    try {
+      await signOut();
+    } finally {
+      goRoute('login');
+    }
   };
 
   return (
-    <header className="sticky top-0 z-30 bg-surface-container border-b border-outline-variant no-print">
+    <header className="sticky top-0 z-[45] bg-surface-container border-b border-outline-variant no-print">
       <div
         className={`${
           compact

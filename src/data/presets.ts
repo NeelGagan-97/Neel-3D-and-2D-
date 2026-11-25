@@ -222,6 +222,32 @@ export const ELECTRICAL_CATALOG: ElectricalCatalogItem[] = [
     unitCost: 3500,
     icon: 'kitchen',
   },
+  {
+    itemType: 'distribution_board',
+    label: 'Distribution Board',
+    shortCode: 'DB',
+    productName: 'Main Distribution Board (DB)',
+    category: 'Distribution',
+    boqCategory: 'Distribution Boards',
+    defaultWattage: 0,
+    defaultMountHeight: 1.5,
+    defaultCircuit: 'CKT-L1 (Lighting)',
+    unitCost: 0,
+    icon: 'electrical_services',
+  },
+  {
+    itemType: 'earthing_point',
+    label: 'Earthing Point',
+    shortCode: 'EP',
+    productName: 'Main Earthing Point (PE Pit / Bus)',
+    category: 'Distribution',
+    boqCategory: 'Earthing Accessories',
+    defaultWattage: 0,
+    defaultMountHeight: 0.35,
+    defaultCircuit: 'CKT-P2 (Power 16A)',
+    unitCost: 0,
+    icon: 'bolt',
+  },
 ];
 
 export const CATALOG_MAP: Record<ElectricalItemType, ElectricalCatalogItem> =
@@ -277,6 +303,7 @@ function mkPt(
   const cat = CATALOG_MAP[itemType];
   return {
     id,
+    floor: overrides?.floor ?? 1,
     code,
     name,
     itemType,
@@ -290,6 +317,75 @@ function mkPt(
     voltage: overrides?.voltage ?? 230,
     circuit: overrides?.circuit ?? cat.defaultCircuit,
     unitCost: overrides?.unitCost ?? cat.unitCost,
+  };
+}
+
+function mkPresetDbAndEarthing(prefix: string, roomId: string, x: number, y: number): ElectricalPoint[] {
+  const dbId = `${prefix}-db-1`;
+  return [
+    {
+      id: dbId,
+      floor: 1,
+      code: 'DB-1',
+      name: 'Main Distribution Board',
+      itemType: 'distribution_board',
+      category: 'Distribution',
+      roomId,
+      x: Number(x.toFixed(2)),
+      y: Number(y.toFixed(2)),
+      z: 1.5,
+      rotation: 0,
+      wattage: 0,
+      voltage: 230,
+      circuit: '',
+      unitCost: 4850,
+      dbConfig: {
+        incomingRatingAmps: 63,
+        waysCount: 12,
+        phaseType: 'Single Phase (1Φ)',
+        rccbSensitivityMa: 30,
+        associatedCircuits: [
+          'CKT-L1 (Lighting)',
+          'CKT-L2 (Bedrooms)',
+          'CKT-P1 (Kitchen)',
+          'CKT-P2 (Power 16A)',
+        ],
+        enclosureType: 'Double Door Flush Metal DB',
+      },
+    },
+    {
+      id: `${prefix}-ep-1`,
+      floor: 1,
+      code: 'EP-1',
+      name: 'Main Earthing Point',
+      itemType: 'earthing_point',
+      category: 'Distribution',
+      roomId,
+      x: Number(x.toFixed(2)),
+      y: Number((y + 0.65).toFixed(2)),
+      z: 0.35,
+      rotation: 0,
+      wattage: 0,
+      voltage: 0,
+      circuit: '',
+      unitCost: 2600,
+      earthingConfig: {
+        earthingType: 'Copper Plate',
+        targetResistanceOhm: 2.0,
+        earthConductorSizeSqMm: 4.0,
+        connectedDbId: dbId,
+        notes: 'Dedicated copper plate earthing pit bonded to Main DB earth bar.',
+      },
+    },
+  ];
+}
+
+function defaultCircuitCableConfigs(): ProjectData['circuitCableConfigs'] {
+  return {
+    'CKT-L1 (Lighting)': { circuit: 'CKT-L1 (Lighting)', cableSizeSqMm: 1.5, cableMaterial: 'Copper' },
+    'CKT-L2 (Bedrooms)': { circuit: 'CKT-L2 (Bedrooms)', cableSizeSqMm: 1.5, cableMaterial: 'Copper' },
+    'CKT-P1 (Kitchen)': { circuit: 'CKT-P1 (Kitchen)', cableSizeSqMm: 2.5, cableMaterial: 'Copper' },
+    'CKT-P2 (Power 16A)': { circuit: 'CKT-P2 (Power 16A)', cableSizeSqMm: 2.5, cableMaterial: 'Copper' },
   };
 }
 
@@ -370,14 +466,17 @@ function createIndiranagar3BHK(): ProjectData {
     mkPt('p-pnl-14', 'PNL-14', 'LED Panel — Bath Shower', 'panel_light', 'r-bath', 11.4, 8.8),
     mkPt('p-sb-09', 'SB-09', 'Switchboard 8M — Bath Exterior', 'switchboard', 'r-bath', 10.3, 5.7),
     mkPt('p-gys-01', 'GYS-01', '25L Storage Geyser — Bath', 'geyser', 'r-bath', 12.2, 8.2, { rotation: 270 }),
+    // DISTRIBUTION BOARD & MAIN EARTHING (Ground Floor inside Living Room entry wall)
+    ...mkPresetDbAndEarthing('ind', 'r-living', 0.45, 0.55),
   ];
 
   return {
     id: 'proj-indiranagar-3bhk',
     refCode: 'ASD-2026-IND-04',
     name: 'Indiranagar 3BHK Residence',
+    buildingType: 'single',
     status: 'Active',
-    description: '7 rooms, 48 electrical points, complete 3-phase circuit distribution.',
+    description: '7 rooms, 50 electrical items (48 points + DB-1 + EP-1), complete circuit distribution.',
     site: {
       length: 42,
       width: 34,
@@ -386,6 +485,10 @@ function createIndiranagar3BHK(): ProjectData {
       units: 'ft',
       floors: 1,
     },
+    floorConfigs: [
+      { floor: 1, name: 'Ground Floor', kind: 'ground', elevationM: 0, floorHeightM: 3.05, slabThicknessM: 0.22, visible: true },
+    ],
+    circuitCableConfigs: defaultCircuitCableConfigs(),
     rooms,
     customWalls: [],
     openings: [
@@ -460,14 +563,16 @@ function createBandra2BHK(): ProjectData {
     mkPt('bp-27', 'SPT-01', 'Vanity Spotlight — Bath', 'spotlight', 'b-bath', 6.4, 6.6),
     mkPt('bp-28', 'SB-05', 'Switchboard — Bath', 'switchboard', 'b-bath', 5.6, 5.4),
     mkPt('bp-29', 'GYS-01', '25L Geyser — Bath', 'geyser', 'b-bath', 9.6, 6.6, { wattage: 1000 }),
+    ...mkPresetDbAndEarthing('bnd', 'b-living', 0.42, 0.52),
   ];
 
   return {
     id: 'proj-bandra-2bhk',
     refCode: 'ASD-2026-BOM-12',
     name: 'Bandra West 2BHK Suite',
+    buildingType: 'single',
     status: 'Saved',
-    description: '5 rooms, 29 electrical points, cove strip lighting & USB modular switches.',
+    description: '5 rooms, 31 electrical items (29 points + DB-1 + EP-1), cove strip lighting & USB modular switches.',
     site: {
       length: 36,
       width: 28,
@@ -476,6 +581,10 @@ function createBandra2BHK(): ProjectData {
       units: 'ft',
       floors: 1,
     },
+    floorConfigs: [
+      { floor: 1, name: 'Ground Floor', kind: 'ground', elevationM: 0, floorHeightM: 3.05, slabThicknessM: 0.22, visible: true },
+    ],
+    circuitCableConfigs: defaultCircuitCableConfigs(),
     rooms,
     customWalls: [],
     openings: [
@@ -554,14 +663,16 @@ function createJubilee4BHK(): ProjectData {
 
     mkPt('jp-37', 'SPT-02', 'Deck Spotlight — Veranda N', 'spotlight', 'j-balcony', 15.2, 8.6),
     mkPt('jp-38', 'SPT-03', 'Deck Spotlight — Veranda S', 'spotlight', 'j-balcony', 15.2, 11.4),
+    ...mkPresetDbAndEarthing('jub', 'j-living', 0.5, 0.6),
   ];
 
   return {
     id: 'proj-jubilee-4bhk',
     refCode: 'ASD-2026-HYD-09',
     name: 'Jubilee Hills 4BHK Villa',
+    buildingType: 'duplex',
     status: 'BOQ Ready',
-    description: '2 floors, 7 primary zones, 38 electrical points, HVAC & geyser sub-circuits.',
+    description: '2 floors, 7 primary zones, 40 electrical items (38 points + DB-1 + EP-1), HVAC & geyser sub-circuits.',
     site: {
       length: 55,
       width: 44,
@@ -570,6 +681,11 @@ function createJubilee4BHK(): ProjectData {
       units: 'ft',
       floors: 2,
     },
+    floorConfigs: [
+      { floor: 1, name: 'Ground Floor', kind: 'ground', elevationM: 0, floorHeightM: 3.35, slabThicknessM: 0.22, visible: true },
+      { floor: 2, name: 'First Floor', kind: 'upper', elevationM: 3.57, floorHeightM: 3.35, slabThicknessM: 0.22, visible: true },
+    ],
+    circuitCableConfigs: defaultCircuitCableConfigs(),
     rooms,
     customWalls: [],
     openings: [
@@ -615,6 +731,7 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
     Switches: 0,
     Sockets: 0,
     Appliances: 0,
+    Distribution: 0,
   };
 
   let totalWatts = 0;
@@ -703,7 +820,12 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
   const totalKw = Number((totalWatts / 1000).toFixed(2));
   const estimatedAmps = Number((totalWatts / 230).toFixed(1));
 
-  const area = Math.round(project.site.length * project.site.width * project.site.floors);
+  const effectiveFloors =
+    Array.isArray(project.floorConfigs) && project.floorConfigs.length > 0
+      ? project.floorConfigs.length
+      : Math.max(1, Math.round(project.site.floors || 1));
+
+  const area = Math.round(project.site.length * project.site.width * effectiveFloors);
   const unitLabel = project.site.units === 'ft' ? 'ft' : 'm';
   const areaUnit = project.site.units === 'ft' ? 'sq.ft' : 'sq.m';
   const dimensionsDisplay = `${project.site.length} ${unitLabel} × ${project.site.width} ${unitLabel}`;
@@ -712,7 +834,7 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
   const { lengthM, widthM } = siteToMeters(project.site);
   const siteAreaSqM = lengthM * widthM;
   const builtUpAreaSqM = project.rooms.reduce((sum, r) => sum + r.width * r.height, 0);
-  const remainingAreaSqM = Math.max(0, siteAreaSqM - builtUpAreaSqM);
+  const remainingAreaSqM = Math.max(0, siteAreaSqM * effectiveFloors - builtUpAreaSqM);
 
   const order: Array<ElectricalItemType | 'custom'> = ELECTRICAL_CATALOG.map((c) => c.itemType);
   const boqRows = Array.from(boqMap.values()).sort(

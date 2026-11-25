@@ -14,10 +14,17 @@ import {
   RoomBreakdownRow,
   RoomRowOverride,
   ScreenId,
+  WireCategory,
 } from '../types/design';
+import {
+  computeBuildingElectricalSummary,
+  WIRE_CATEGORY_LABELS,
+} from '../utils/buildingWiring';
+import { downloadExcelBoq } from '../utils/excelBoqExporter';
 import { downloadFloorPlanPdf } from '../utils/exporters';
 import { FloorPlan2D } from './FloorPlan2D';
 import { Navbar } from './Navbar';
+import { PdfExportModal } from './PdfExportModal';
 import { Viewport3D } from './Viewport3D';
 
 interface ProjectSummaryPageProps {
@@ -45,7 +52,12 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
   onUpdateProject,
 }) => {
   const metrics = useMemo(() => computeProjectMetrics(project), [project]);
+  const buildingSummary = useMemo(
+    () => computeBuildingElectricalSummary(project),
+    [project]
+  );
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [showQuoteModal, setShowQuoteModal] = useState(false);
   const [quoteSubmitted, setQuoteSubmitted] = useState(false);
   const [clientName, setClientName] = useState('');
@@ -561,13 +573,36 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
             </button>
             <button
               type="button"
+              onClick={() => setPdfModalOpen(true)}
+              className="inline-flex items-center justify-center gap-gutter-xs bg-surface-container-high text-primary border border-primary/70 px-gutter-md py-gutter-sm rounded-sm font-label text-label-md hover:bg-primary-container/30 transition-colors duration-state-change cursor-pointer whitespace-nowrap"
+            >
+              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                auto_stories
+              </span>
+              <span>Drawing Package (PDF)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                downloadExcelBoq(project);
+                notify(`Exported multi-sheet Excel BOQ workbook (.xlsx) for "${project.name}".`);
+              }}
+              className="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-sm rounded-sm bg-surface-container-high border border-primary/70 text-primary hover:bg-primary-container/30 font-label text-label-md transition-colors duration-state-change cursor-pointer whitespace-nowrap"
+            >
+              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                dataset
+              </span>
+              <span>Export BOQ (.xlsx)</span>
+            </button>
+            <button
+              type="button"
               onClick={handleExportExcel}
               className="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-sm rounded-sm bg-surface-container-high border border-outline text-on-surface hover:border-primary font-label text-label-md transition-colors duration-state-change cursor-pointer whitespace-nowrap"
             >
               <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
                 table_view
               </span>
-              <span>Export Excel</span>
+              <span>Export CSV</span>
             </button>
             <button
               type="button"
@@ -652,7 +687,7 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
                 {effectiveTotalPoints} Points
               </span>
               <span className="font-mono text-mono-sm text-on-surface-variant">
-                4 Sub-Circuits (230V)
+                {effectiveTotalPoints - metrics.categoryCounts.Distribution} Branch + {metrics.categoryCounts.Distribution} DB/PE · {buildingSummary.activeCircuitCount} Circuits
               </span>
             </div>
 
@@ -1159,6 +1194,118 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
             </table>
           </div>
         </section>
+
+        {/* Multi-Storey Building, Distribution & Electrical Wiring Schedule (Additive) */}
+        <section className="flex flex-col gap-gutter-md">
+          <div className="flex flex-wrap items-center justify-between gap-gutter-sm">
+            <div>
+              <h2 className="font-headline text-headline-md text-on-surface">
+                Multi-Storey Floor, Distribution &amp; Wiring Schedule
+              </h2>
+              <p className="font-body text-body-sm text-on-surface-variant">
+                {buildingSummary.buildingTypeLabel} · {buildingSummary.floorCount} floor
+                {buildingSummary.floorCount === 1 ? '' : 's'} · {buildingSummary.totalWires} routed cable
+                {buildingSummary.totalWires === 1 ? '' : 's'} ({buildingSummary.totalWireLengthM.toFixed(1)} m total)
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 font-mono text-mono-sm">
+              <span className="px-2.5 py-1 rounded-sm bg-surface-container border border-outline-variant text-on-surface">
+                DB Boards: {project.points.filter((p) => p.itemType === 'distribution_board').length}
+              </span>
+              <span className="px-2.5 py-1 rounded-sm bg-surface-container border border-outline-variant text-on-surface">
+                Earthing Points: {project.points.filter((p) => p.itemType === 'earthing_point').length}
+              </span>
+              <span className="px-2.5 py-1 rounded-sm bg-surface-container border border-outline-variant text-secondary">
+                Inter-Floor Risers: {buildingSummary.interFloorWireCount}
+              </span>
+            </div>
+          </div>
+
+          {/* Floor-Wise Schedule */}
+          <div className="w-full overflow-x-auto bg-surface-container border border-outline-variant rounded-lg">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-outline bg-surface-container-high">
+                  <th scope="col" className="px-gutter-md py-gutter-sm font-label text-label-sm text-on-surface-variant">Floor</th>
+                  <th scope="col" className="px-gutter-sm py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">Elevation (m)</th>
+                  <th scope="col" className="px-gutter-sm py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">Height (m)</th>
+                  <th scope="col" className="px-gutter-sm py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">Rooms</th>
+                  <th scope="col" className="px-gutter-sm py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">Built-up (m²)</th>
+                  <th scope="col" className="px-gutter-sm py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">Points</th>
+                  <th scope="col" className="px-gutter-sm py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">Wires</th>
+                  <th scope="col" className="px-gutter-md py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">Floor Load (W)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-outline-variant">
+                {buildingSummary.floorRows.map((fr) => (
+                  <tr key={fr.floor} className="hover:bg-surface-container-high/70">
+                    <td className="px-gutter-md py-2 font-body text-body-sm text-on-surface">
+                      {fr.name}
+                    </td>
+                    <td className="px-gutter-sm py-2 font-mono text-mono-sm text-on-surface-variant text-right tabular-nums">
+                      {fr.elevationM >= 0 ? `+${fr.elevationM.toFixed(2)}` : fr.elevationM.toFixed(2)}
+                    </td>
+                    <td className="px-gutter-sm py-2 font-mono text-mono-sm text-on-surface-variant text-right tabular-nums">
+                      {fr.floorHeightM.toFixed(2)}
+                    </td>
+                    <td className="px-gutter-sm py-2 font-mono text-mono-sm text-on-surface text-right tabular-nums">
+                      {fr.roomCount}
+                    </td>
+                    <td className="px-gutter-sm py-2 font-mono text-mono-sm text-primary text-right tabular-nums">
+                      {fr.builtUpAreaSqM.toFixed(1)}
+                    </td>
+                    <td className="px-gutter-sm py-2 font-mono text-mono-sm text-on-surface text-right tabular-nums">
+                      {fr.pointCount}
+                    </td>
+                    <td className="px-gutter-sm py-2 font-mono text-mono-sm text-on-surface text-right tabular-nums">
+                      {fr.wireCount}
+                    </td>
+                    <td className="px-gutter-md py-2 font-mono text-mono-sm text-secondary text-right tabular-nums">
+                      {fr.loadWatts.toLocaleString('en-IN')} W
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Wire Length by Category Strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-gutter-sm">
+            {(Object.keys(WIRE_CATEGORY_LABELS) as WireCategory[]).map((cat) => (
+              <div
+                key={cat}
+                className="bg-surface-container border border-outline-variant rounded-md px-gutter-md py-gutter-sm flex flex-col gap-0.5"
+              >
+                <span className="font-label text-[11px] text-on-surface-variant">
+                  {WIRE_CATEGORY_LABELS[cat]}
+                </span>
+                <span className="font-mono text-mono-md text-primary tabular-nums">
+                  {buildingSummary.wireLengthByCategory[cat].toFixed(1)} m
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {buildingSummary.issues.length > 0 && (
+            <div className="bg-surface-container border border-outline-variant rounded-md p-gutter-md flex flex-col gap-1.5">
+              <span className="font-mono text-[11px] uppercase text-secondary">
+                Engineering Verification Notes ({buildingSummary.issues.length})
+              </span>
+              <ul className="space-y-1">
+                {buildingSummary.issues.map((iss) => (
+                  <li
+                    key={iss.id}
+                    className={`font-body text-body-sm ${
+                      iss.severity === 'error' ? 'text-error' : 'text-on-surface-variant'
+                    }`}
+                  >
+                    • {iss.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
       </main>
 
       {/* Footer */}
@@ -1288,6 +1435,15 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
           </div>
         </div>
       )}
+      {/* Multi-Page PDF Drawing Package Export Modal */}
+      <PdfExportModal
+        open={pdfModalOpen}
+        project={project}
+        onClose={() => setPdfModalOpen(false)}
+        onExported={(count) =>
+          notify(`Exported ${count}-page Architectural & Electrical PDF Drawing Package.`)
+        }
+      />
     </div>
   );
 };

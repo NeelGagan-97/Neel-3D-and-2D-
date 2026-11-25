@@ -1,9 +1,11 @@
 import React, { useRef, useState } from 'react';
 import { computeProjectMetrics, INITIAL_PROJECTS } from '../data/presets';
+import { ParsedImportPreview, projectStorage } from '../services/projectStorage';
 import { ProjectData, ScreenId, ViewMode } from '../types/design';
 import { downloadProjectJson } from '../utils/exporters';
 import { DrawingInstructionsModal } from './DrawingInstructionsModal';
 import { FloorPlan2D } from './FloorPlan2D';
+import { ImportProjectPreviewModal } from './ImportProjectPreviewModal';
 import { Navbar } from './Navbar';
 import { ProjectCreationInput, ProjectCreationModal } from './ProjectCreationModal';
 import { Viewport3D } from './Viewport3D';
@@ -31,6 +33,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importPreview, setImportPreview] = useState<ParsedImportPreview | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const heroProject =
@@ -43,15 +46,32 @@ export const HomePage: React.FC<HomePageProps> = ({
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      const res = onImportProject(String(reader.result ?? ''));
-      if (!res.ok) {
-        setImportError(res.error ?? 'Could not import project JSON file.');
-      } else {
-        setImportError(null);
+      const raw = String(reader.result ?? '');
+      const preview = projectStorage.parseNativeProjectFile(raw);
+      if (!preview) {
+        setImportError('Could not parse project file. Please select a valid .bluespace or .json project.');
+        return;
       }
+      setImportError(null);
+      setImportPreview(preview);
     };
     reader.readAsText(file);
     e.target.value = '';
+  };
+
+  const handleConfirmSafeImport = (finalName: string) => {
+    if (!importPreview) return;
+    const renamed: ProjectData = {
+      ...importPreview.project,
+      name: finalName,
+    };
+    const res = onImportProject(projectStorage.exportNativeBluespace(renamed));
+    setImportPreview(null);
+    if (!res.ok) {
+      setImportError(res.error ?? 'Could not import project file.');
+    } else {
+      setImportError(null);
+    }
   };
 
   return (
@@ -348,12 +368,12 @@ export const HomePage: React.FC<HomePageProps> = ({
                 <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
                   upload_file
                 </span>
-                <span>Import JSON</span>
+                <span>Import (.bluespace / .json)</span>
               </button>
               <input
                 ref={importInputRef}
                 type="file"
-                accept=".json,application/json"
+                accept=".bluespace,.json,application/json"
                 className="hidden"
                 onChange={handleImportFile}
               />
@@ -606,6 +626,13 @@ export const HomePage: React.FC<HomePageProps> = ({
           onStartDesigning={() => setShowNewModal(true)}
         />
       )}
+
+      {/* Safe Native Project Import Preview Modal */}
+      <ImportProjectPreviewModal
+        preview={importPreview}
+        onCancel={() => setImportPreview(null)}
+        onConfirmImport={handleConfirmSafeImport}
+      />
     </div>
   );
 };

@@ -15,11 +15,19 @@ import { ProjectCreationInput } from './components/ProjectCreationModal';
 import { ProjectSummaryPage } from './components/ProjectSummaryPage';
 import { useAuth } from './context/AuthContext';
 import { RouteNavigationProvider } from './context/RouteNavigationContext';
-import { INITIAL_PROJECTS } from './data/presets';
+import { INITIAL_PROJECTS, siteToMeters } from './data/presets';
 import { projectStorage } from './services/projectStorage';
 import { AppRoute } from './types/auth';
 import { ProjectData, ScreenId, SiteConfig, ViewMode } from './types/design';
 import { evaluateRouteAccess, isApprovedUser } from './utils/authValidation';
+import {
+  buildDefaultFloorConfigs,
+  createDefaultDbAndEarthingPoints,
+  createDefaultWiringConfig,
+  DEFAULT_SLAB_THICKNESS_M,
+  getProjectFloors,
+  inferBuildingType,
+} from './utils/buildingWiring';
 import { parseRouteFromLocation, syncBrowserPath } from './utils/router';
 import { cloneProject, MAX_HISTORY_ENTRIES } from './utils/studioEditor';
 
@@ -130,16 +138,80 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
     case 'COMPLETE_SITE_CONFIG': {
       return {
         ...state,
-        projects: state.projects.map((p) =>
-          p.id === state.activeProjectId
-            ? {
-                ...p,
-                site: action.site,
-                siteConfigured: true,
-                updatedAt: new Date().toISOString(),
-              }
-            : p
-        ),
+        projects: state.projects.map((p) => {
+          if (p.id !== state.activeProjectId) return p;
+          const { ceilingM } = siteToMeters(action.site);
+          const slabM = action.site.slabThicknessM ?? DEFAULT_SLAB_THICKNESS_M;
+          const existingFloors = getProjectFloors(p);
+          const hasBasement = existingFloors.some((f) => f.kind === 'basement');
+          const hasTerrace = existingFloors.some((f) => f.kind === 'terrace');
+          const bType = inferBuildingType(p);
+
+          // Rebuild default elevations cleanly from finalized ceilingHeight + slabThickness
+          // while preserving Basement / Terrace & matching requested floor count.
+          const extraCount = (hasBasement ? 1 : 0) + (hasTerrace ? 1 : 0);
+          const mainStoreys = Math.max(1, action.site.floors - extraCount);
+          const rebuiltFloors = buildDefaultFloorConfigs({
+            buildingType:
+              hasBasement || hasTerrace || action.site.floors > 3
+                ? 'custom'
+                : action.site.floors === 1
+                  ? 'single'
+                  : action.site.floors === 2
+                    ? 'duplex'
+                    : action.site.floors === 3
+                      ? 'triplex'
+                      : bType,
+            ceilingHeightM: ceilingM,
+            slabThicknessM: slabM,
+            customStoreys: mainStoreys,
+            includeBasement: hasBasement,
+            includeTerrace: hasTerrace,
+          });
+
+          // Never orphan existing elements on upper/lower floors if the user re-opens site config
+          const rebuiltNums = new Set(rebuiltFloors.map((f) => f.floor));
+          const preservedFloors = existingFloors.filter((ef) => {
+            if (rebuiltNums.has(ef.floor)) return false;
+            return (
+              p.rooms.some((r) => (r.floor ?? 1) === ef.floor) ||
+              p.points.some((pt) => (pt.floor ?? 1) === ef.floor) ||
+              p.customWalls.some((w) => (w.floor ?? 1) === ef.floor)
+            );
+          });
+          const mergedFloors = [...rebuiltFloors, ...preservedFloors].sort(
+            (a, b) => a.elevationM - b.elevationM || a.floor - b.floor
+          );
+
+          const configuredProject: ProjectData = {
+            ...p,
+            buildingType:
+              hasBasement || hasTerrace || mergedFloors.length > 3
+                ? 'custom'
+                : mergedFloors.length === 1
+                  ? 'single'
+                  : mergedFloors.length === 2
+                    ? 'duplex'
+                    : 'triplex',
+            site: {
+              ...action.site,
+              slabThicknessM: slabM,
+              floors: mergedFloors.length,
+            },
+            floorConfigs: mergedFloors,
+            siteConfigured: true,
+            updatedAt: new Date().toISOString(),
+          };
+
+          // Auto-initialize Main Distribution Board (DB-1) & Main Earthing Point (EP-1)
+          // for newly configured designs (idempotent — never creates duplicates).
+          if (p.siteConfigured === false) {
+            const { nextPoints } = createDefaultDbAndEarthingPoints(configuredProject);
+            configuredProject.points = nextPoints;
+          }
+
+          return configuredProject;
+        }),
       };
     }
     case 'DELETE_PROJECT': {
@@ -360,31 +432,47 @@ export default function App() {
       const uid = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const id = `proj-${uid}`;
       const isFeet = input.units === 'ft';
+      const defaultCeilingM = isFeet ? 10 * 0.3048 : 3.0;
+      const buildingType = input.buildingType ?? 'single';
+      const initialFloors = buildDefaultFloorConfigs({
+        buildingType,
+        ceilingHeightM: defaultCeilingM,
+        slabThicknessM: DEFAULT_SLAB_THICKNESS_M,
+        customStoreys: input.customStoreys,
+        includeBasement: input.includeBasement,
+        includeTerrace: input.includeTerrace,
+      });
 
       const newProject: ProjectData = {
         id,
         refCode: `N3D-2026-${String(projects.length + 1).padStart(3, '0')}`,
         name: input.name,
         projectType: input.projectType,
+        buildingType,
         status: 'Active',
         description:
           input.description ||
-          `${input.projectType} architectural floor plan workspace.`,
+          `${input.projectType} ${buildingType} architectural floor plan workspace.`,
         siteConfigured: false,
         site: {
           length: isFeet ? 40 : 12,
           width: isFeet ? 30 : 10,
           ceilingHeight: isFeet ? 10 : 3,
           wallThickness: isFeet ? 0.5 : 0.15,
+          slabThicknessM: DEFAULT_SLAB_THICKNESS_M,
           units: input.units,
-          floors: 1,
+          floors: initialFloors.length,
         },
+        floorConfigs: initialFloors,
         rooms: [],
         customWalls: [],
         openings: [],
         dimensions: [],
         furniture: [],
+        staircases: [],
         points: [],
+        wires: [],
+        wiringConfig: createDefaultWiringConfig('IS-732'),
         updatedAt: new Date().toISOString(),
       };
 
