@@ -137,8 +137,8 @@ export function buildFloorCollisionObstacles(
   const obstacles: FpsObstacleBox[] = [];
   const doors = floorSlice.openings.filter((op) => op.kind === 'door');
 
-  // 1. Structural exterior & interior partition walls (with doorways carved out)
-  const mergedWalls = extractMergedWalls(floorSlice);
+  // 1. Structural exterior & interior partition walls (with doorways carved out, excluding hidden cutaway walls)
+  const mergedWalls = extractMergedWalls(floorSlice, { floor: activeFloor });
   mergedWalls.forEach((seg) => {
     const dx = seg.x2 - seg.x1;
     const dy = seg.y2 - seg.y1;

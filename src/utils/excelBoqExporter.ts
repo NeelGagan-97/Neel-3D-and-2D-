@@ -117,6 +117,8 @@ export function buildExcelBoqSheets(
       'Price/Unit (₹)',
       'Estimated Cost (₹)',
       'Price Source',
+      'MRP (₹)',
+      'Discount (%)',
       'GST %',
       'GST Amount (INR)',
       'Total (INR)',
@@ -140,6 +142,8 @@ export function buildExcelBoqSheets(
     r.unitPrice !== null ? r.unitPrice : 'Not configured',
     r.subtotal !== null ? r.subtotal : 'Pending rate',
     PRICE_SOURCE_LABEL[r.priceSource],
+    r.mrp !== undefined && r.mrp !== null ? r.mrp : '—',
+    r.discountPercent !== undefined && r.discountPercent !== null ? r.discountPercent : '—',
     r.gstPercent !== null ? r.gstPercent : 'Not configured',
     r.gstAmount !== null ? r.gstAmount : '—',
     r.total !== null ? r.total : 'Pending rate',
@@ -237,6 +241,8 @@ export function buildExcelBoqSheets(
       '',
       '',
       '',
+      '',
+      '',
       boq.subtotalConfigured,
       boq.unpricedRowCount > 0
         ? `${boq.unpricedRowCount} line item(s) have unconfigured unit rates (never invented)`
@@ -244,6 +250,8 @@ export function buildExcelBoqSheets(
     ],
     [
       'CONFIGURED GST TOTAL',
+      '',
+      '',
       '',
       '',
       '',
@@ -280,6 +288,8 @@ export function buildExcelBoqSheets(
       boq.subtotalConfigured,
       '',
       '',
+      '',
+      '',
       boq.totalGstConfigured,
       boq.grandTotalConfigured,
       boq.allowancePercent > 0
@@ -291,7 +301,7 @@ export function buildExcelBoqSheets(
   const sheet1: ExcelBoqSheetDefinition = {
     name: 'Consolidated BOQ',
     rows: [...sheet1Header, ...sheet1Rows, ...sheet1Footer, ...wireSummaryBlock],
-    columnWidths: [24, 18, 16, 32, 18, 36, 22, 13, 13, 14, 8, 10, 16, 18, 16, 12, 16, 16, 42],
+    columnWidths: [24, 18, 16, 32, 18, 36, 22, 13, 13, 14, 8, 10, 16, 18, 16, 14, 12, 12, 16, 16, 42],
   };
 
   // SHEET 2: Category Subtotals (100% reconciled with Consolidated BOQ)

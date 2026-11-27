@@ -91,6 +91,7 @@ test('1. All 17 ElectricalItemType values map cleanly into the 7 electrical symb
     strip_light: 'other',
     chandelier: 'other',
     appliance: 'other',
+    refrigerator: 'other',
     earthing_point: 'other',
   };
 

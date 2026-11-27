@@ -1,10 +1,17 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   computeProjectMetrics,
   ELECTRICAL_CATALOG,
   formatINR,
   ROOM_LIBRARY,
 } from '../data/presets';
+import {
+  hydrateCentralCatalogue,
+  loadCatalogueProducts,
+  resolveProductWithVariant,
+  subscribeCentralCatalogue,
+} from '../services/productCatalogueStorage';
+import { ProductCatalogueItem } from '../types/catalogue';
 import {
   BoqRow,
   BoqRowOverride,
@@ -80,6 +87,39 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
   const [clientName, setClientName] = useState('');
   const [clientEmail, setClientEmail] = useState('');
   const [clientCity, setClientCity] = useState('Bengaluru');
+  const [centralCatalogueProducts, setCentralCatalogueProducts] = useState<ProductCatalogueItem[]>(
+    () => loadCatalogueProducts()
+  );
+  const [boqCatalogueOpen, setBoqCatalogueOpen] = useState(false);
+  const [boqCatalogueQuery, setBoqCatalogueQuery] = useState('');
+  const [boqVariantByProduct, setBoqVariantByProduct] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    const unsub = subscribeCentralCatalogue(() => {
+      setCentralCatalogueProducts(loadCatalogueProducts());
+    });
+    hydrateCentralCatalogue().then((res) => {
+      setCentralCatalogueProducts(res.products);
+    });
+    return unsub;
+  }, []);
+
+  const filteredBoqCatalogueProducts = useMemo(() => {
+    const q = boqCatalogueQuery.trim().toLowerCase();
+    if (!q) return centralCatalogueProducts.slice(0, 18);
+    return centralCatalogueProducts
+      .filter(
+        (p) =>
+          p.productName.toLowerCase().includes(q) ||
+          p.manufacturer.toLowerCase().includes(q) ||
+          p.brand.toLowerCase().includes(q) ||
+          p.category.toLowerCase().includes(q) ||
+          (p.subcategory || '').toLowerCase().includes(q) ||
+          p.modelNumber.toLowerCase().includes(q) ||
+          p.specification.toLowerCase().includes(q)
+      )
+      .slice(0, 24);
+  }, [centralCatalogueProducts, boqCatalogueQuery]);
 
   const overrides: ProjectSummaryOverrides = project.summaryOverrides ?? {};
 
@@ -487,6 +527,57 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
       cat
         ? `Added "${cat.productName}" from Electrical Library to BOQ.`
         : 'Added new editable row to Bill of Quantities (BOQ).'
+    );
+  };
+
+  const handleAddCentralCatalogueBoqRow = (
+    rawProduct: ProductCatalogueItem,
+    variantSku?: string
+  ) => {
+    const resolved = resolveProductWithVariant(rawProduct, variantSku);
+    const chosenVariant = variantSku
+      ? rawProduct.variants?.find((v) => v.sku === variantSku)
+      : rawProduct.variants?.[0];
+    const unitPrice = resolved.unitPrice !== null ? Number(resolved.unitPrice.toFixed(2)) : 0;
+    onUpdateProject(
+      (prev) => {
+        const cur: ProjectSummaryOverrides = prev.summaryOverrides ?? {};
+        const newRow: BoqRow = {
+          id: `cat-boq-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          itemType: resolved.mappedItemType ?? 'custom',
+          productId: resolved.id,
+          manufacturer: resolved.manufacturer,
+          brand: resolved.brand || resolved.manufacturer,
+          modelNumber: resolved.modelNumber,
+          specification: resolved.specification,
+          productName: `${resolved.brand || resolved.manufacturer} ${resolved.productName}`.trim(),
+          category: resolved.category,
+          unit: resolved.unit || 'Nos',
+          quantity: 1,
+          unitPrice,
+          mrp: resolved.mrp ?? null,
+          discountPercent: resolved.discountPercent ?? null,
+          gstPercent: resolved.gstPercent ?? null,
+          variantSku: resolved.sku || undefined,
+          variantLabel: chosenVariant?.label,
+          priceCapturedAt: new Date().toISOString(),
+          totalWattage: resolved.wattageW ?? 0,
+          estimatedCost: unitPrice,
+        };
+        return {
+          ...prev,
+          summaryOverrides: {
+            ...cur,
+            addedBoqRows: [...(cur.addedBoqRows ?? []), newRow],
+          },
+        };
+      },
+      true
+    );
+    notify(
+      `Added "${resolved.productName}" to BOQ with locked snapshot price (${
+        resolved.unitPrice !== null ? formatINR(resolved.unitPrice) : 'Rate pending'
+      }${resolved.gstPercent !== null ? ` + ${resolved.gstPercent}% GST` : ''}).`
     );
   };
 
@@ -1235,6 +1326,18 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
               </select>
               <button
                 type="button"
+                onClick={() => setBoqCatalogueOpen((v) => !v)}
+                className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-primary/15 border border-primary text-primary hover:bg-primary/25 font-label text-label-sm cursor-pointer transition-colors no-print"
+              >
+                <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                  inventory_2
+                </span>
+                <span>
+                  + From Central Catalogue ({centralCatalogueProducts.length.toLocaleString('en-IN')})
+                </span>
+              </button>
+              <button
+                type="button"
                 onClick={() => handleAddBoqRow()}
                 className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-surface-container-high border border-outline text-primary hover:border-primary font-label text-label-sm cursor-pointer transition-colors no-print"
               >
@@ -1258,6 +1361,93 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
               )}
             </div>
           </div>
+
+          {boqCatalogueOpen && (
+            <div className="bg-surface-container border border-primary/60 rounded-lg p-3 space-y-2.5 no-print">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 flex-1 min-w-[240px]">
+                  <span className="material-symbols-outlined text-primary text-[18px]">
+                    search
+                  </span>
+                  <input
+                    type="text"
+                    value={boqCatalogueQuery}
+                    onChange={(e) => setBoqCatalogueQuery(e.target.value)}
+                    placeholder="Search central catalogue by brand, product, SKU, category, or spec..."
+                    className="flex-1 bg-surface border border-outline rounded-sm px-2.5 py-1.5 font-body text-xs text-on-surface"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setBoqCatalogueOpen(false)}
+                  className="px-2.5 py-1 text-xs font-label border border-outline bg-surface text-on-surface-variant hover:text-on-surface cursor-pointer"
+                >
+                  Close Picker
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-72 overflow-y-auto">
+                {filteredBoqCatalogueProducts.map((rawProd) => {
+                  const chosenSku = boqVariantByProduct[rawProd.id];
+                  const prod = resolveProductWithVariant(rawProd, chosenSku);
+                  return (
+                    <div
+                      key={rawProd.id}
+                      className="border border-outline-variant bg-surface p-2.5 rounded-sm flex flex-col justify-between gap-2"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between gap-1 text-[10px] font-mono text-secondary">
+                          <span className="truncate">{prod.manufacturer}</span>
+                          <span className="truncate text-on-surface-variant">{prod.category}</span>
+                        </div>
+                        <div className="font-body text-xs text-on-surface font-medium line-clamp-2">
+                          {prod.productName}
+                        </div>
+                        {rawProd.variants && rawProd.variants.length > 1 && (
+                          <select
+                            aria-label={`Select variant for ${rawProd.productName}`}
+                            value={chosenSku ?? rawProd.variants[0]?.sku ?? ''}
+                            onChange={(e) =>
+                              setBoqVariantByProduct((prev) => ({
+                                ...prev,
+                                [rawProd.id]: e.target.value,
+                              }))
+                            }
+                            className="w-full bg-surface-container-low border border-outline px-1.5 py-0.5 text-[10px] font-mono text-on-surface"
+                          >
+                            {rawProd.variants.map((v) => (
+                              <option key={v.sku} value={v.sku}>
+                                {v.label}
+                                {v.unitPrice !== null ? ` — ${formatINR(v.unitPrice)}` : ''}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <div className="font-mono text-[10px] text-on-surface-variant flex flex-wrap gap-1.5">
+                          <span className="text-on-surface font-semibold">
+                            {prod.unitPrice !== null ? formatINR(prod.unitPrice) : 'Rate pending'}/
+                            {prod.unit}
+                          </span>
+                          {prod.discountPercent ? (
+                            <span className="text-emerald-400">{prod.discountPercent}% off</span>
+                          ) : null}
+                          {prod.gstPercent !== null ? (
+                            <span className="text-secondary">+{prod.gstPercent}% GST</span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleAddCentralCatalogueBoqRow(rawProd, chosenSku)}
+                        className="w-full py-1 text-[11px] font-label bg-primary text-on-primary rounded-sm cursor-pointer"
+                      >
+                        + Add to BOQ (Lock Snapshot Price)
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <datalist id="boq-product-suggestions">
             {ELECTRICAL_CATALOG.map((item) => (
@@ -1306,6 +1496,32 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
                           onChange={(e) => handleUpdateBoqRow(row, 'productName', e.target.value)}
                           className="w-full min-w-[180px] bg-surface/70 border border-outline-variant/60 hover:border-outline focus:border-primary focus:outline-none rounded-sm px-2 py-1 font-body text-body-md text-on-surface"
                         />
+                        {(row.manufacturer ||
+                          row.specification ||
+                          row.unit ||
+                          row.discountPercent ||
+                          row.gstPercent !== undefined) && (
+                          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] text-on-surface-variant">
+                            {row.manufacturer && (
+                              <span className="text-primary">{row.manufacturer}</span>
+                            )}
+                            {row.modelNumber && <span>SKU: {row.modelNumber}</span>}
+                            {row.unit && <span>Unit: {row.unit}</span>}
+                            {row.discountPercent ? (
+                              <span className="text-emerald-400">
+                                Disc: {row.discountPercent}%
+                              </span>
+                            ) : null}
+                            {row.gstPercent !== undefined && row.gstPercent !== null && (
+                              <span className="text-secondary">GST: {row.gstPercent}%</span>
+                            )}
+                            {row.specification && (
+                              <span className="truncate max-w-[260px]" title={row.specification}>
+                                {row.specification}
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className="px-gutter-md py-2">
                         <input

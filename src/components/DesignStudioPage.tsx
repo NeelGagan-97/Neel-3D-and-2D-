@@ -11,9 +11,14 @@ import {
   siteToMeters,
 } from '../data/presets';
 import {
+  hydrateCentralCatalogue,
   inferMappedItemType,
+  loadCatalogueManufacturers,
   loadCatalogueProducts,
+  resolveProductWithVariant,
+  subscribeCentralCatalogue,
 } from '../services/productCatalogueStorage';
+import { sanitizeSafeCatalogueImageUrl } from '../utils/urlSecurity';
 import { ParsedImportPreview, projectStorage } from '../services/projectStorage';
 import { ProductCatalogueItem } from '../types/catalogue';
 import { ConvertTo2DResult } from '../utils/aiDrawingConverter';
@@ -51,6 +56,7 @@ import {
   ViewMode,
   WireCategory,
   WireLineStyle,
+  WireRoutingMode,
   WireStandard,
   WireWaypoint,
   WiringDisplayConfig,
@@ -63,12 +69,14 @@ import {
   BUILDING_TYPE_LABELS,
   CIRCUIT_CABLE_RANGES,
   computeActualGeometryBounds,
+  computeWireLengthBreakdown,
   computeWireLengthMeters,
   countElementsOnFloor,
   createDefaultDbAndEarthingPoints,
   createDefaultStaircase,
   createElectricalWire,
   duplicateFloorInProject,
+  evaluateCableSizingEngineering,
   fitSiteToActualGeometry,
   generateAutoRouteWaypoints,
   generateWallAlignedWaypoints,
@@ -78,6 +86,7 @@ import {
   inferBuildingType,
   isDuplicateWireConnection,
   removeFloorFromProject,
+  SELECTABLE_WIRE_SIZES_SQ_MM,
   setProjectFloorCountSafely,
   updateFloorConfigInProject,
   validateBuildingAndElectrical,
@@ -97,23 +106,29 @@ import {
   downloadProjectJson,
 } from '../utils/exporters';
 import {
+  extractMergedWalls,
   findNearestValidPosition,
   formatArea,
   formatFloorLabel,
   formatLength,
   fromMeters,
   getItemFloor,
+  MergedWallSegment,
   sliceProjectForFloor,
   toMeters,
   validateRoomPlacement,
 } from '../utils/geometry';
 import {
+  addWireWaypointToProject,
   applyCircuitCableConfigToProject,
+  applyWallCutawayPreset,
   assignCatalogueCableToCircuit,
   clearFloorInProject,
   copyEntitiesToClipboard,
   copyFloorBelowInProject,
+  countHiddenWallsOnFloor,
   deleteEntitiesFromProject,
+  deleteWireWaypointFromProject,
   duplicateEntitiesInProject,
   eraseEntityFromProject,
   FindCategoryFilter,
@@ -122,18 +137,28 @@ import {
   getEntityFocusPoint,
   getFloorBelow,
   isEditableEventTarget,
+  materializeWallForEdit,
   moveAllOnFloorInProject,
+  moveWireWaypointInProject,
   pasteClipboardIntoProject,
+  placeElectricalPointInRoom,
   pruneSelectionToProject,
+  removeWallFromProject,
   resolve3DWalkCommand,
   resolveStudioShortcut,
+  restoreAllHiddenWallsInProject,
   rotateEntitiesInProject,
   searchStudioComponents,
   selectAllEntitiesOnFloor,
   StudioClipboard,
   StudioSearchResult,
   toggleEntityInSelection,
+  toggleWallVisibilityInProject,
+  updateCustomWallEndpoints,
+  updateWireRoutingModeInProject,
+  WallCutawayPreset,
 } from '../utils/studioEditor';
+import { ActiveCableConfigState, CableConfigModal } from './CableConfigModal';
 import { CanvasContextMenu, CanvasContextMenuItem } from './CanvasContextMenu';
 import { CreateRoomModal } from './CreateRoomModal';
 import { DrawingInstructionsModal } from './DrawingInstructionsModal';
@@ -165,13 +190,14 @@ interface DesignStudioPageProps {
 }
 
 const DRAWING_TOOLS: { id: CanvasTool; label: string; icon: string; hint: string }[] = [
-  { id: 'select', label: 'Select', icon: 'arrow_selector_tool', hint: 'Click empty space to create a room, or click/drag rooms to edit' },
+  { id: 'select', label: 'Select', icon: 'arrow_selector_tool', hint: 'Default mouse Select: click any object, cable, room, or wall to select & move (double-click a room for isolated room view)' },
   { id: 'draw-wall', label: 'Draw Wall', icon: 'horizontal_rule', hint: 'Click & drag to draw a wall (auto H/V snap; hold Shift for angled)' },
+  { id: 'hide-wall', label: 'Hide / Cut Wall', icon: 'visibility_off', hint: 'Click any wall in 2D or 3D to hide/show it for cross-section & cutaway views (rooms & wiring stay intact)' },
   { id: 'add-room', label: 'Add Room', icon: 'add_box', hint: 'Click any empty area inside the site boundary to create a room' },
   { id: 'add-door', label: 'Add Door', icon: 'door_front', hint: 'Click on any exterior or interior wall to place a door' },
   { id: 'add-window', label: 'Add Window', icon: 'window', hint: 'Click on any wall to snap a parametric window' },
   { id: 'add-staircase', label: 'Staircase', icon: 'stairs', hint: 'Click inside the plan to place a parametric inter-floor staircase' },
-  { id: 'add-wire', label: 'Route Cable', icon: 'cable', hint: 'Click a source electrical point, click to place waypoints (Shift for angled), click destination point (Esc to cancel)' },
+  { id: 'add-wire', label: 'Route Cable', icon: 'cable', hint: 'Click once on the canvas to start cable, move cursor freely, and click once more to end (Esc to cancel)' },
   { id: 'erase', label: 'Erase', icon: 'ink_eraser', hint: 'Click any room, wall, door, window, staircase, wire, dimension, or electrical point to remove' },
   { id: 'dimension', label: 'Dimension', icon: 'straighten', hint: 'Click & drag between two points to place a measurement annotation' },
   { id: 'move', label: 'Move', icon: 'open_with', hint: 'Drag any room, staircase, wire waypoint, or electrical point to reposition it' },
@@ -221,6 +247,25 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
   // Interactive wiring, product catalogue, PDF package & safe import states
   const [activeWireCategory, setActiveWireCategory] = useState<WireCategory>('phase');
+  const [activeWireRoutingMode, setActiveWireRoutingMode] = useState<WireRoutingMode>('freeform');
+  const [wireGridSnap, setWireGridSnap] = useState<boolean>(false);
+  const [wireConfigModalOpen, setWireConfigModalOpen] = useState<boolean>(false);
+  const [wireConfigConfirmed, setWireConfigConfirmed] = useState<boolean>(true);
+  const [pendingStartWirePointId, setPendingStartWirePointId] = useState<string | null>(null);
+  const [pendingStartWireCoord, setPendingStartWireCoord] = useState<{ x: number; y: number } | null>(null);
+  const [activeCableSpec, setActiveCableSpec] = useState<ActiveCableConfigState>({
+    productId: '',
+    wireType: 'FR PVC Insulated Copper',
+    brand: '',
+    manufacturer: '',
+    productName: '',
+    modelNumber: '',
+    specification: 'IS 694 1100V',
+    cableSizeSqMm: 1.5,
+    cableMaterial: 'Copper',
+    routeHeightZ: '',
+  });
+  const [isolatedRoomId, setIsolatedRoomId] = useState<string | null>(null);
   const [allowInterFloorWiring, setAllowInterFloorWiring] = useState<boolean>(false);
   const [catalogueOpen, setCatalogueOpen] = useState<boolean>(false);
   const [catalogueVersion, setCatalogueVersion] = useState<number>(0);
@@ -234,12 +279,35 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     setOpenToolbarDropdown(null);
   }, [viewMode, activeFloor, project.id]);
 
+  useEffect(() => {
+    setActiveTool('select');
+    setPendingPlaceItem(null);
+  }, [project.id]);
+
   const projectFloors = useMemo(() => getProjectFloors(project), [project]);
   const totalFloors = projectFloors.length;
   const wiringConfig = useMemo(() => getWiringConfig(project), [project]);
   const validationIssues = useMemo(() => validateBuildingAndElectrical(project), [project]);
+  const [libraryCatalogueSearch, setLibraryCatalogueSearch] = useState('');
+  const [inspectorCatalogueSearch, setInspectorCatalogueSearch] = useState('');
+
+  useEffect(() => {
+    const unsub = subscribeCentralCatalogue(() => {
+      setCatalogueVersion((v) => v + 1);
+    });
+    hydrateCentralCatalogue().then(() => {
+      setCatalogueVersion((v) => v + 1);
+    });
+    return unsub;
+  }, []);
+
   const catalogueProducts = useMemo(
     () => loadCatalogueProducts(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [catalogueVersion, catalogueOpen]
+  );
+  const catalogueManufacturers = useMemo(
+    () => loadCatalogueManufacturers(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [catalogueVersion, catalogueOpen]
   );
@@ -247,6 +315,21 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     () => catalogueProducts.filter((p) => p.category === 'Cables & Wires'),
     [catalogueProducts]
   );
+  const quickLibraryProducts = useMemo(() => {
+    const q = libraryCatalogueSearch.trim().toLowerCase();
+    if (!q) return catalogueProducts.slice(0, 8);
+    return catalogueProducts
+      .filter(
+        (p) =>
+          p.productName.toLowerCase().includes(q) ||
+          p.manufacturer.toLowerCase().includes(q) ||
+          p.brand.toLowerCase().includes(q) ||
+          p.category.toLowerCase().includes(q) ||
+          (p.subcategory || '').toLowerCase().includes(q) ||
+          p.modelNumber.toLowerCase().includes(q)
+      )
+      .slice(0, 12);
+  }, [catalogueProducts, libraryCatalogueSearch]);
   const hasDbPoint = useMemo(
     () => project.points.some((p) => p.itemType === 'distribution_board'),
     [project.points]
@@ -478,6 +561,22 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const units = project.site.units;
   const unitShort = units === 'ft' ? 'ft' : 'm';
 
+  const isolatedRoom = useMemo(() => {
+    if (!isolatedRoomId) return null;
+    return project.rooms.find((r) => r.id === isolatedRoomId) ?? null;
+  }, [project.rooms, isolatedRoomId]);
+
+  useEffect(() => {
+    if (isolatedRoomId && !project.rooms.some((r) => r.id === isolatedRoomId)) {
+      setIsolatedRoomId(null);
+    }
+  }, [project.rooms, isolatedRoomId]);
+
+  const hiddenWallCount = useMemo(
+    () => countHiddenWallsOnFloor(project, activeFloor),
+    [project, activeFloor]
+  );
+
   const selectedRoom = useMemo(() => {
     if (selectedEntity?.kind !== 'room') return null;
     return project.rooms.find((r) => r.id === selectedEntity.id) ?? null;
@@ -485,8 +584,40 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
   const selectedWall = useMemo(() => {
     if (selectedEntity?.kind !== 'wall') return null;
-    return project.customWalls.find((w) => w.id === selectedEntity.id) ?? null;
-  }, [project.customWalls, selectedEntity]);
+    const custom = project.customWalls.find((w) => w.id === selectedEntity.id);
+    if (custom) {
+      return {
+        id: custom.id,
+        x1: custom.x1,
+        y1: custom.y1,
+        x2: custom.x2,
+        y2: custom.y2,
+        thickness: custom.thickness,
+        wallKind: custom.wallKind ?? ('internal' as const),
+        source: 'custom' as const,
+        isHidden: Boolean(custom.hidden) || Boolean(project.hiddenWallIds?.includes(`f${getItemFloor(custom)}:${custom.id}`)),
+        floor: getItemFloor(custom),
+        segment: null as MergedWallSegment | null,
+      };
+    }
+    const seg = extractMergedWalls(floorProject, { includeHidden: true, floor: activeFloor }).find(
+      (s) => s.id === selectedEntity.id
+    );
+    if (!seg) return null;
+    return {
+      id: seg.id,
+      x1: seg.x1,
+      y1: seg.y1,
+      x2: seg.x2,
+      y2: seg.y2,
+      thickness: seg.thickness,
+      wallKind: (seg.isExterior ? 'external' : 'internal') as 'internal' | 'external',
+      source: seg.source,
+      isHidden: Boolean(seg.isHidden),
+      floor: seg.floor ?? activeFloor,
+      segment: seg,
+    };
+  }, [project.customWalls, project.hiddenWallIds, floorProject, activeFloor, selectedEntity]);
 
   const selectedOpening = useMemo(() => {
     if (selectedEntity?.kind !== 'opening') return null;
@@ -746,7 +877,13 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const modalBlocking = Boolean(
-        pendingRoomModal || showSaveAsModal || showGuideModal || catalogueOpen || pdfModalOpen || importPreview
+        pendingRoomModal ||
+          showSaveAsModal ||
+          showGuideModal ||
+          catalogueOpen ||
+          pdfModalOpen ||
+          importPreview ||
+          wireConfigModalOpen
       );
 
       // Allow Ctrl+S save even when Find input is open (prevent browser Save Page dialog)
@@ -870,6 +1007,12 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           } else if (pendingPlaceItem) {
             setPendingPlaceItem(null);
             notify('Cancelled component placement');
+          } else if (activeTool !== 'select') {
+            setActiveTool('select');
+            notify('Switched back to Select tool');
+          } else if (isolatedRoomId) {
+            setIsolatedRoomId(null);
+            notify('Exited Room Top View — restored complete building view');
           } else {
             setAllSelected(false);
             setSelectedEntities([]);
@@ -887,6 +1030,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     viewMode,
     cameraMode,
     activeFloor,
+    activeTool,
     canvasContextMenu,
     openToolbarDropdown,
     pendingRoomModal,
@@ -895,9 +1039,11 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     catalogueOpen,
     pdfModalOpen,
     importPreview,
+    wireConfigModalOpen,
     findOpen,
     openDrawer,
     pendingPlaceItem,
+    isolatedRoomId,
     canUndo,
     canRedo,
     selectedEntities.length,
@@ -950,11 +1096,42 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const handleSelectTool = (tool: CanvasTool) => {
     setActiveTool(tool);
     setPendingPlaceItem(null);
-    if (tool !== 'select') {
+    if (tool === 'add-wire') {
+      setWireConfigConfirmed(true);
+      setPendingStartWirePointId(null);
+      setPendingStartWireCoord(null);
+    }
+    if (tool !== 'select' && tool !== 'hide-wall') {
       setViewMode('2d');
     }
     const meta = DRAWING_TOOLS.find((t) => t.id === tool);
     if (meta) notify(meta.hint);
+  };
+
+  const handleEnterRoomView = (roomId: string) => {
+    const room = project.rooms.find((r) => r.id === roomId);
+    if (!room) return;
+    const roomFloor = getItemFloor(room);
+    if (roomFloor !== activeFloor) {
+      setActiveFloor(roomFloor);
+    }
+    if (cameraMode === 'fps') {
+      try {
+        if (document.pointerLockElement) {
+          document.exitPointerLock?.();
+        }
+      } catch {
+        // Ignore
+      }
+      setCameraMode('orbit');
+    }
+    setIsolatedRoomId(room.id);
+    setSelectedEntity({ kind: 'room', id: room.id });
+    setAllSelected(false);
+    setOpenDrawer(null);
+    notify(
+      `Room Top View: "${room.name}" — drag & drop or click electrical products to design this room (Press ESC to exit)`
+    );
   };
 
   const handleSwitchFloor = (floorNum: number) => {
@@ -1293,38 +1470,111 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
   const handleUpdateWall = (
     wallId: string,
-    patch: { thickness?: number; wallKind?: 'internal' | 'external'; lengthM?: number }
+    patch: {
+      x1?: number;
+      y1?: number;
+      x2?: number;
+      y2?: number;
+      thickness?: number;
+      wallKind?: 'internal' | 'external';
+      lengthM?: number;
+    }
   ) => {
-    const wall = project.customWalls.find((w) => w.id === wallId);
-    if (!wall) return;
-    const { lengthM: siteL, widthM: siteW } = siteToMeters(project.site);
+    let workingProject = project;
+    let targetId = wallId;
+    let wall = workingProject.customWalls.find((w) => w.id === targetId);
 
-    let x2 = wall.x2;
-    let y2 = wall.y2;
+    if (!wall) {
+      const seg = extractMergedWalls(floorProject, { includeHidden: true, floor: activeFloor }).find(
+        (s) => s.id === wallId
+      );
+      if (!seg) return;
+      const mat = materializeWallForEdit(workingProject, activeFloor, seg);
+      workingProject = mat.project;
+      targetId = mat.customWallId;
+      wall = workingProject.customWalls.find((w) => w.id === targetId);
+      if (!wall) return;
+      setSelectedEntity({ kind: 'wall', id: targetId });
+    }
+
+    const { lengthM: siteL, widthM: siteW } = siteToMeters(workingProject.site);
+    let x1 = patch.x1 ?? wall.x1;
+    let y1 = patch.y1 ?? wall.y1;
+    let x2 = patch.x2 ?? wall.x2;
+    let y2 = patch.y2 ?? wall.y2;
+
     if (patch.lengthM !== undefined && patch.lengthM >= 0.2) {
-      const dx = wall.x2 - wall.x1;
-      const dy = wall.y2 - wall.y1;
+      const dx = x2 - x1;
+      const dy = y2 - y1;
       const curLen = Math.hypot(dx, dy) || 1;
       const ux = dx / curLen;
       const uy = dy / curLen;
-      x2 = Number(Math.max(0, Math.min(siteL, wall.x1 + ux * patch.lengthM)).toFixed(3));
-      y2 = Number(Math.max(0, Math.min(siteW, wall.y1 + uy * patch.lengthM)).toFixed(3));
+      x2 = Number(Math.max(0, Math.min(siteL, x1 + ux * patch.lengthM)).toFixed(3));
+      y2 = Number(Math.max(0, Math.min(siteW, y1 + uy * patch.lengthM)).toFixed(3));
     }
 
-    onUpdateProject((prev) => ({
-      ...prev,
-      customWalls: prev.customWalls.map((w) =>
-        w.id === wallId
-          ? {
-              ...w,
-              x2,
-              y2,
-              thickness: patch.thickness ?? w.thickness,
-              wallKind: patch.wallKind ?? w.wallKind,
-            }
-          : w
-      ),
-    }));
+    const updated = updateCustomWallEndpoints(workingProject, targetId, {
+      x1,
+      y1,
+      x2,
+      y2,
+      thickness: patch.thickness ?? wall.thickness,
+      wallKind: patch.wallKind ?? wall.wallKind,
+    });
+    onUpdateProject(() => updated, true);
+  };
+
+  const handleToggleHideWall = (floorNum: number, wallId: string) => {
+    const res = toggleWallVisibilityInProject(project, floorNum, wallId);
+    onUpdateProject(() => res.project, true);
+    notify(
+      res.hidden
+        ? 'Wall hidden for cutaway / cross-section view (rooms, appliances & wiring preserved — Ctrl+Z or Restore to bring back)'
+        : 'Restored hidden wall'
+    );
+  };
+
+  const handleRestoreAllHiddenWalls = () => {
+    const res = restoreAllHiddenWallsInProject(project, activeFloor);
+    if (res.restoredCount === 0) {
+      notify('No hidden walls on this floor.');
+      return;
+    }
+    onUpdateProject(() => res.project, true);
+    notify(
+      `Restored ${res.restoredCount} hidden wall${res.restoredCount === 1 ? '' : 's'} on ${formatFloorLabel(activeFloor)}`
+    );
+  };
+
+  const handleApplyWallCutawayPreset = (preset: WallCutawayPreset) => {
+    const nextProj = applyWallCutawayPreset(project, activeFloor, preset);
+    onUpdateProject(() => nextProj, true);
+    const labelMap: Record<WallCutawayPreset, string> = {
+      front: 'Front Wall Cutaway active — interior exposed (rooms & wiring preserved)',
+      'south-east': 'South + East Corner Cutaway active — cross-section view ready',
+      exterior: 'All Exterior Walls hidden — interior cutaway view active',
+      restore: `Restored all walls on ${formatFloorLabel(activeFloor)}`,
+    };
+    notify(labelMap[preset]);
+  };
+
+  const handleUpdateWallEndpoints = (
+    wallId: string,
+    patch: { x1?: number; y1?: number; x2?: number; y2?: number },
+    recordHistory = false
+  ) => {
+    onUpdateProject((prev) => updateCustomWallEndpoints(prev, wallId, patch), recordHistory);
+  };
+
+  const handleMaterializeAndSelectWall = (wallSeg: MergedWallSegment): string | null => {
+    if (wallSeg.source === 'custom' && wallSeg.customWallId) {
+      setSelectedEntity({ kind: 'wall', id: wallSeg.customWallId });
+      return wallSeg.customWallId;
+    }
+    const mat = materializeWallForEdit(project, wallSeg.floor ?? activeFloor, wallSeg);
+    onUpdateProject(() => mat.project, true);
+    setSelectedEntity({ kind: 'wall', id: mat.customWallId });
+    return mat.customWallId;
   };
 
   const handleAddOpening = (kind: 'door' | 'window', x: number, y: number, rotation: number) => {
@@ -1372,6 +1622,21 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const handleEraseEntity = (
     entity: NonNullable<SelectedEntity> | { kind: 'dimension'; id: string }
   ) => {
+    if (entity.kind === 'wall') {
+      const removed = removeWallFromProject(project, activeFloor, entity.id);
+      if (!removed.removed) return;
+      onUpdateProject(() => removed.project, true);
+      setSelectedEntities((prev) =>
+        prev.filter((s) => !(s.kind === 'wall' && s.id === entity.id))
+      );
+      notify(
+        removed.mode === 'deleted-custom'
+          ? 'Removed custom wall (rooms, electrical objects & wiring preserved — Ctrl+Z to undo)'
+          : 'Removed wall segment for cutaway view (rooms, electrical objects & wiring preserved — Restore All or Ctrl+Z to bring back)'
+      );
+      return;
+    }
+
     const result = eraseEntityFromProject(project, entity);
     if (!result.deleted) return;
 
@@ -1388,9 +1653,8 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     }
 
     if (entity.kind === 'room') {
+      if (isolatedRoomId === entity.id) setIsolatedRoomId(null);
       notify(`Deleted room "${rm?.name ?? 'Room'}"`);
-    } else if (entity.kind === 'wall') {
-      notify('Deleted custom wall');
     } else if (entity.kind === 'opening') {
       notify('Deleted door/window');
     } else if (entity.kind === 'point') {
@@ -1526,6 +1790,14 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
     const targetCircuit = fromPt.circuit || toPt.circuit;
     const circuitCfg = targetCircuit ? project.circuitCableConfigs?.[targetCircuit] : undefined;
+    const chosenSize = activeCableSpec.cableSizeSqMm ?? circuitCfg?.cableSizeSqMm ?? null;
+    const chosenMaterial = activeCableSpec.cableMaterial ?? circuitCfg?.cableMaterial ?? 'Copper';
+    const hasCustomSpec = Boolean(
+      activeCableSpec.productId ||
+        activeCableSpec.brand.trim() ||
+        activeCableSpec.wireType.trim() ||
+        activeCableSpec.specification.trim()
+    );
 
     const newWire = createElectricalWire({
       project,
@@ -1534,14 +1806,50 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       waypoints,
       category: activeWireCategory,
       circuit: targetCircuit,
-      cableMaterial: circuitCfg?.cableMaterial ?? 'Copper',
-      cableSizeSqMm: circuitCfg?.cableSizeSqMm ?? null,
+      cableMaterial: chosenMaterial,
+      cableSizeSqMm: chosenSize,
+      routingMode: activeWireRoutingMode,
+      wireType: activeCableSpec.wireType.trim() || undefined,
+      productId: activeCableSpec.productId || undefined,
+      manufacturer: activeCableSpec.manufacturer.trim() || activeCableSpec.brand.trim() || undefined,
+      brand: activeCableSpec.brand.trim() || activeCableSpec.manufacturer.trim() || undefined,
+      productName: activeCableSpec.productName.trim() || undefined,
+      modelNumber: activeCableSpec.modelNumber.trim() || undefined,
+      specification: activeCableSpec.specification.trim() || undefined,
+      unitPricePerM: activeCableSpec.unitPricePerM,
+      gstPercent: activeCableSpec.gstPercent,
     });
 
-    const enrichedWire: ElectricalWire = {
-      ...newWire,
-      ...buildCircuitCableWireFields(circuitCfg),
-    };
+    const circuitFields = buildCircuitCableWireFields(circuitCfg);
+    const enrichedWire: ElectricalWire = hasCustomSpec
+      ? {
+          ...circuitFields,
+          ...newWire,
+          ...(activeCableSpec.productId
+            ? {
+                productId: activeCableSpec.productId,
+                manufacturer: activeCableSpec.manufacturer || activeCableSpec.brand,
+                brand: activeCableSpec.brand || activeCableSpec.manufacturer,
+                productName: activeCableSpec.productName,
+                modelNumber: activeCableSpec.modelNumber,
+                specification: activeCableSpec.specification,
+                unit: activeCableSpec.unit || 'm',
+                unitPricePerM: activeCableSpec.unitPricePerM,
+                mrpPerM: activeCableSpec.mrpPerM ?? null,
+                discountPercent: activeCableSpec.discountPercent ?? null,
+                gstPercent: activeCableSpec.gstPercent,
+                ...(activeCableSpec.variantSku ? { variantSku: activeCableSpec.variantSku } : {}),
+                ...(activeCableSpec.variantLabel
+                  ? { variantLabel: activeCableSpec.variantLabel }
+                  : {}),
+                priceCapturedAt: activeCableSpec.priceCapturedAt ?? new Date().toISOString(),
+              }
+            : {}),
+        }
+      : {
+          ...newWire,
+          ...circuitFields,
+        };
 
     onUpdateProject(
       (prev) => ({
@@ -1556,7 +1864,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       wires: [...(project.wires ?? []), enrichedWire],
     });
     notify(
-      `Routed ${enrichedWire.code} (${fromPt.code} → ${toPt.code}, ${wireLen.toFixed(1)} m)`
+      `Routed ${enrichedWire.code} (${fromPt.code} → ${toPt.code}, ${wireLen.toFixed(2)} m · ${activeWireRoutingMode})`
     );
   };
 
@@ -1574,6 +1882,44 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       }),
       recordHistory
     );
+  };
+
+  const handleUpdateWireWaypoint = (
+    wireId: string,
+    index: number,
+    patch: { x?: number; y?: number; z?: number },
+    recordHistory = false
+  ) => {
+    onUpdateProject(
+      (prev) => moveWireWaypointInProject(prev, wireId, index, patch),
+      recordHistory
+    );
+  };
+
+  const handleAddWireWaypoint = (wireId: string) => {
+    const wire = (project.wires ?? []).find((w) => w.id === wireId);
+    if (!wire) return;
+    const fromPt = project.points.find((p) => p.id === wire.fromPointId);
+    const toPt = project.points.find((p) => p.id === wire.toPointId);
+    if (!fromPt || !toPt) return;
+    const pts = wire.waypoints ?? [];
+    const lastA = pts.length > 0 ? pts[pts.length - 1] : { x: fromPt.x, y: fromPt.y, z: fromPt.z };
+    const midX = Number(((lastA.x + toPt.x) / 2).toFixed(2));
+    const midY = Number(((lastA.y + toPt.y) / 2).toFixed(2));
+    const midZ =
+      typeof lastA.z === 'number'
+        ? lastA.z
+        : Number((((fromPt.z ?? 1.2) + (toPt.z ?? 1.2)) / 2).toFixed(2));
+    onUpdateProject(
+      (prev) => addWireWaypointToProject(prev, wireId, pts.length, { x: midX, y: midY, z: midZ }),
+      true
+    );
+    notify(`Added waypoint #${pts.length + 1} on ${wire.code}`);
+  };
+
+  const handleDeleteWireWaypoint = (wireId: string, index: number) => {
+    onUpdateProject((prev) => deleteWireWaypointFromProject(prev, wireId, index), true);
+    notify(`Deleted waypoint #${index + 1}`);
   };
 
   const handleUpdateWire = (
@@ -1729,13 +2075,18 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
       wattage: product.wattageW ?? cat.defaultWattage,
       voltage: 230,
       circuit: cat.defaultCircuit,
+      unit: product.unit || 'Nos',
       unitCost: product.unitPrice ?? 0,
+      mrp: product.mrp ?? null,
+      discountPercent: product.discountPercent ?? null,
       productId: product.id,
       manufacturer: product.manufacturer,
       brand: product.brand || product.manufacturer,
       modelNumber: product.modelNumber,
       specification: product.specification,
       gstPercent: product.gstPercent ?? undefined,
+      variantSku: product.sku || undefined,
+      priceCapturedAt: new Date().toISOString(),
     };
 
     onUpdateProject(
@@ -1803,10 +2154,11 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     notify('Removed saved camera view');
   };
 
-  // --- Electrical helpers (preserved & multi-floor aware) ---
+  // --- Electrical helpers (preserved & multi-floor + room-isolation aware) ---
   const handlePlaceElectrical = (itemType: ElectricalItemType) => {
     const cat = CATALOG_MAP[itemType];
     const targetRoom =
+      (isolatedRoom && getItemFloor(isolatedRoom) === activeFloor ? isolatedRoom : null) ??
       (selectedRoom && getItemFloor(selectedRoom) === activeFloor ? selectedRoom : null) ??
       floorProject.rooms[0];
     if (!targetRoom) {
@@ -1820,46 +2172,35 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     }
 
     const existingCount = project.points.filter((p) => p.itemType === itemType).length + 1;
-    const code = `${cat.shortCode}-${String(existingCount).padStart(2, '0')}`;
     const offsetAngle = (existingCount * 1.35) % (Math.PI * 2);
-    const rx = Math.min(targetRoom.width * 0.28, 0.8);
-    const ry = Math.min(targetRoom.height * 0.28, 0.8);
+    const rx = Math.min(targetRoom.width * 0.26, 0.75);
+    const ry = Math.min(targetRoom.height * 0.26, 0.75);
     const px = Number((targetRoom.x + targetRoom.width / 2 + Math.cos(offsetAngle) * rx).toFixed(2));
     const py = Number((targetRoom.y + targetRoom.height / 2 + Math.sin(offsetAngle) * ry).toFixed(2));
 
-    const newPoint: ElectricalPoint = {
-      id: `pt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      floor: activeFloor,
-      code,
-      name: `${cat.label.replace(/s$/, '')} — ${targetRoom.name}`,
-      itemType,
-      category: cat.category,
-      roomId: targetRoom.id,
-      x: px,
-      y: py,
-      z: cat.defaultMountHeight,
-      rotation: 0,
-      wattage: cat.defaultWattage,
-      voltage: 230,
-      circuit: cat.defaultCircuit,
-      unitCost: cat.unitCost,
-    };
+    const placed = placeElectricalPointInRoom(project, itemType, targetRoom.id, px, py);
+    if (!placed) return;
+    const newPoint = placed.point;
 
-    onUpdateProject((prev) => ({
-      ...prev,
-      points: [...prev.points, newPoint],
-      ...(prev.summaryOverrides?.deletedBoqKeys?.includes(itemType)
-        ? {
-            summaryOverrides: {
-              ...prev.summaryOverrides,
-              deletedBoqKeys: prev.summaryOverrides.deletedBoqKeys.filter((k) => k !== itemType),
-            },
-          }
-        : {}),
-    }));
+    onUpdateProject((prev) => {
+      const res = placeElectricalPointInRoom(prev, itemType, targetRoom.id, px, py);
+      if (!res) return prev;
+      return {
+        ...res.project,
+        points: [...prev.points, newPoint],
+        ...(prev.summaryOverrides?.deletedBoqKeys?.includes(itemType)
+          ? {
+              summaryOverrides: {
+                ...prev.summaryOverrides,
+                deletedBoqKeys: prev.summaryOverrides.deletedBoqKeys.filter((k) => k !== itemType),
+              },
+            }
+          : {}),
+      };
+    });
 
     setSelectedEntity({ kind: 'point', id: newPoint.id });
-    notify(`Placed ${newPoint.name} (${newPoint.wattage} W) on ${formatFloorLabel(activeFloor)}`);
+    notify(`Placed ${newPoint.name} (${newPoint.wattage} W) in ${targetRoom.name}`);
   };
 
   const handlePlacePointAt = (
@@ -1868,17 +2209,43 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     y: number,
     roomId: string
   ) => {
+    const effectiveRoomId = isolatedRoom ? isolatedRoom.id : roomId;
+    const targetRoom =
+      floorProject.rooms.find((r) => r.id === effectiveRoomId) ?? floorProject.rooms[0];
+
+    if (targetRoom) {
+      const placed = placeElectricalPointInRoom(project, itemType, targetRoom.id, x, y);
+      if (placed) {
+        const newPoint = placed.point;
+        onUpdateProject((prev) => ({
+          ...prev,
+          points: [...prev.points, newPoint],
+          ...(prev.summaryOverrides?.deletedBoqKeys?.includes(itemType)
+            ? {
+                summaryOverrides: {
+                  ...prev.summaryOverrides,
+                  deletedBoqKeys: prev.summaryOverrides.deletedBoqKeys.filter((k) => k !== itemType),
+                },
+              }
+            : {}),
+        }));
+        setSelectedEntity({ kind: 'point', id: newPoint.id });
+        setPendingPlaceItem(null);
+        notify(`Placed ${newPoint.name} (${newPoint.x}m, ${newPoint.y}m, Z=${newPoint.z}m)`);
+        return;
+      }
+    }
+
     const cat = CATALOG_MAP[itemType];
-    const targetRoom = floorProject.rooms.find((r) => r.id === roomId) ?? floorProject.rooms[0];
     const existingCount = project.points.filter((p) => p.itemType === itemType).length + 1;
     const newPoint: ElectricalPoint = {
       id: `pt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       floor: activeFloor,
       code: `${cat.shortCode}-${String(existingCount).padStart(2, '0')}`,
-      name: `${cat.label.replace(/s$/, '')} — ${targetRoom?.name ?? 'Site'}`,
+      name: `${cat.label.replace(/s$/, '')} — Site`,
       itemType,
       category: cat.category,
-      roomId: targetRoom?.id ?? '',
+      roomId: '',
       x,
       y,
       z: cat.defaultMountHeight,
@@ -2939,30 +3306,87 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     expand_more
                   </span>
                 </summary>
-                <div className="absolute left-0 top-full mt-1 w-64 z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-xs grid grid-cols-2 gap-1">
-                  {DRAWING_TOOLS.map((tool) => {
-                    const isActive = activeTool === tool.id && !pendingPlaceItem;
-                    return (
+                <div className="absolute left-0 top-full mt-1 w-72 z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-xs flex flex-col gap-2">
+                  <div className="grid grid-cols-2 gap-1">
+                    {DRAWING_TOOLS.map((tool) => {
+                      const isActive = activeTool === tool.id && !pendingPlaceItem;
+                      return (
+                        <button
+                          key={tool.id}
+                          type="button"
+                          onClick={() => {
+                            handleSelectTool(tool.id);
+                            setOpenDrawer(null);
+                          }}
+                          className={`flex items-center gap-1.5 px-2 py-1.5 rounded-sm border text-left transition-colors cursor-pointer ${
+                            isActive
+                              ? 'bg-primary-container border-primary text-primary'
+                              : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:border-outline hover:text-on-surface'
+                          }`}
+                        >
+                          <span className="material-symbols-outlined text-[15px] shrink-0" aria-hidden="true">
+                            {tool.icon}
+                          </span>
+                          <span className="font-label text-label-sm truncate">{tool.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="border-t border-outline-variant pt-1.5 flex flex-col gap-1">
+                    <div className="flex items-center justify-between px-0.5">
+                      <span className="font-mono text-[10px] uppercase text-primary">
+                        Cross-Section / Wall Cutaway
+                      </span>
+                      {hiddenWallCount > 0 && (
+                        <span className="font-mono text-[10px] text-secondary">
+                          {hiddenWallCount} hidden
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-1">
                       <button
-                        key={tool.id}
                         type="button"
                         onClick={() => {
-                          handleSelectTool(tool.id);
+                          handleApplyWallCutawayPreset('front');
                           setOpenDrawer(null);
                         }}
-                        className={`flex items-center gap-1.5 px-2 py-1.5 rounded-sm border text-left transition-colors cursor-pointer ${
-                          isActive
-                            ? 'bg-primary-container border-primary text-primary'
-                            : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:border-outline hover:text-on-surface'
-                        }`}
+                        className="px-2 py-1 rounded-sm bg-surface-container-low border border-outline-variant hover:border-primary font-label text-[11px] text-on-surface cursor-pointer"
                       >
-                        <span className="material-symbols-outlined text-[15px] shrink-0" aria-hidden="true">
-                          {tool.icon}
-                        </span>
-                        <span className="font-label text-label-sm truncate">{tool.label}</span>
+                        Front Cutaway
                       </button>
-                    );
-                  })}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleApplyWallCutawayPreset('south-east');
+                          setOpenDrawer(null);
+                        }}
+                        className="px-2 py-1 rounded-sm bg-surface-container-low border border-outline-variant hover:border-primary font-label text-[11px] text-on-surface cursor-pointer"
+                      >
+                        S + E Corner Cut
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleApplyWallCutawayPreset('exterior');
+                          setOpenDrawer(null);
+                        }}
+                        className="px-2 py-1 rounded-sm bg-surface-container-low border border-outline-variant hover:border-primary font-label text-[11px] text-on-surface cursor-pointer"
+                      >
+                        Hide Exterior Walls
+                      </button>
+                      <button
+                        type="button"
+                        disabled={hiddenWallCount === 0}
+                        onClick={() => {
+                          handleRestoreAllHiddenWalls();
+                          setOpenDrawer(null);
+                        }}
+                        className="px-2 py-1 rounded-sm bg-primary-container/30 border border-primary/60 text-primary hover:bg-primary-container/50 disabled:opacity-40 font-label text-[11px] cursor-pointer"
+                      >
+                        Restore All ({hiddenWallCount})
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </details>
 
@@ -3240,7 +3664,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   </span>
                 </summary>
                 <div className="absolute left-0 top-full mt-1 w-72 max-h-96 overflow-y-auto z-40 bg-surface-container border border-outline rounded-md shadow-2xl p-gutter-xs flex flex-col gap-1">
-                  {/* Multi-Brand Product Catalogue Launcher */}
+                  {/* Central Multi-Brand Electrical Catalogue Launcher */}
                   <button
                     type="button"
                     onClick={() => {
@@ -3254,11 +3678,67 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                         inventory_2
                       </span>
                       <span className="font-label text-label-sm truncate">
-                        Multi-Brand Product Catalogue
+                        Central Product Catalogue
                       </span>
                     </div>
-                    <span className="font-mono text-[10px] shrink-0">13 Brands</span>
+                    <span className="font-mono text-[10px] shrink-0">
+                      {catalogueProducts.length > 0
+                        ? `${catalogueProducts.length} SKUs · ${catalogueManufacturers.length} Brands`
+                        : `${catalogueManufacturers.length} Brands`}
+                    </span>
                   </button>
+
+                  {catalogueProducts.length > 0 && (
+                    <div className="p-1.5 rounded-sm bg-surface-container-low border border-outline-variant flex flex-col gap-1">
+                      <input
+                        type="text"
+                        value={libraryCatalogueSearch}
+                        onChange={(e) => setLibraryCatalogueSearch(e.target.value)}
+                        placeholder="Quick-search central catalogue SKUs..."
+                        className="w-full px-2 py-1 text-[11px] bg-surface border border-outline rounded-sm text-on-surface"
+                      />
+                      {libraryCatalogueSearch.trim() && (
+                        <div className="max-h-36 overflow-y-auto flex flex-col gap-1">
+                          {quickLibraryProducts.length === 0 ? (
+                            <span className="text-[10px] font-mono text-on-surface-variant px-1">
+                              No matching products
+                            </span>
+                          ) : (
+                            quickLibraryProducts.map((prod) => (
+                              <button
+                                key={prod.id}
+                                type="button"
+                                onClick={() => {
+                                  setOpenDrawer(null);
+                                  if (prod.category === 'Cables & Wires') {
+                                    handleAssignCableToCircuit(
+                                      prod,
+                                      (selectedPoint?.circuit ?? selectedWire?.circuit) || CIRCUITS[0]
+                                    );
+                                  } else {
+                                    handleAddCatalogueProductToProject(prod);
+                                  }
+                                }}
+                                className="w-full flex items-center justify-between gap-1.5 px-1.5 py-1 rounded-sm bg-surface border border-outline-variant hover:border-primary text-left cursor-pointer"
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-[11px] text-on-surface truncate">
+                                    {prod.productName}
+                                  </div>
+                                  <div className="font-mono text-[9px] text-on-surface-variant truncate">
+                                    {prod.manufacturer} · {prod.category}
+                                  </div>
+                                </div>
+                                <span className="font-mono text-[10px] text-primary shrink-0">
+                                  {prod.unitPrice !== null ? `₹${prod.unitPrice}` : 'Spec'}
+                                </span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {(!hasDbPoint || !hasEarthingPoint) && (
                     <button
@@ -3287,11 +3767,17 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     <button
                       key={item.itemType}
                       type="button"
+                      draggable={true}
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData('application/x-bluespace-electrical', item.itemType);
+                        e.dataTransfer.effectAllowed = 'copy';
+                      }}
+                      title="Click to place or drag & drop directly onto 2D / 3D canvas"
                       onClick={() => {
                         setOpenDrawer(null);
                         handlePlaceElectrical(item.itemType);
                       }}
-                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-surface-container-low border border-outline-variant hover:border-secondary text-left transition-colors cursor-pointer"
+                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-surface-container-low border border-outline-variant hover:border-secondary text-left transition-colors cursor-grab active:cursor-grabbing"
                     >
                       <div className="flex items-center gap-2 min-w-0">
                         <span className="material-symbols-outlined text-secondary text-[15px] shrink-0" aria-hidden="true">
@@ -3490,7 +3976,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                               className="w-28 bg-surface border border-outline rounded-sm px-1.5 py-1 font-mono text-[11px] text-on-surface"
                             >
                               <option value="">Not set</option>
-                              {[1.0, 1.5, 2.5, 4.0, 6.0, 10.0].map((sz) => (
+                              {[...SELECTABLE_WIRE_SIZES_SQ_MM, 6.0, 10.0].map((sz) => (
                                 <option key={sz} value={sz}>
                                   {sz} sq.mm
                                 </option>
@@ -4040,6 +4526,17 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </div>
 
             <div className="flex items-center gap-gutter-xs">
+              {hiddenWallCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleRestoreAllHiddenWalls}
+                  title="Restore all hidden cutaway walls on this floor"
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-sm bg-secondary-container/35 border border-secondary text-secondary hover:bg-secondary-container/55 font-label text-label-sm cursor-pointer whitespace-nowrap"
+                >
+                  <span className="material-symbols-outlined text-[14px]" aria-hidden="true">visibility</span>
+                  <span>Restore Hidden Walls ({hiddenWallCount})</span>
+                </button>
+              )}
               {floorBelowConfig && !(viewMode === '3d' && (floorView3D === 'all' || floorView3D === 'exploded')) && (
                 <button
                   type="button"
@@ -4131,150 +4628,423 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 }
                 onClose={() => setCanvasContextMenu(null)}
                 items={(
-                  [
-                    {
-                      id: 'find',
-                      label: 'Find Component',
-                      icon: 'search',
-                      shortcut: 'Ctrl+F',
-                      onSelect: () => {
-                        setOpenDrawer(null);
-                        setFindOpen(true);
-                      },
-                    },
-                    ...(viewMode === '3d'
-                      ? [
-                          {
-                            id: 'toggle-walk',
-                            label: cameraMode === 'fps' ? 'Exit 3D Walk' : 'Enter 3D Walk',
-                            icon: cameraMode === 'fps' ? '3d_rotation' : 'directions_walk',
-                            shortcut: 'E',
-                            onSelect: () => {
-                              if (cameraMode === 'fps') {
-                                setCameraMode('orbit');
-                              } else {
-                                setCameraMode('fps');
-                                requestFpsPointerLockRef.current?.();
-                              }
-                            },
+                  viewMode === '2d'
+                    ? ([
+                        {
+                          id: 'select',
+                          label: 'Select',
+                          icon: 'arrow_selector_tool',
+                          onSelect: () => handleSelectTool('select'),
+                        },
+                        {
+                          id: 'route-cable',
+                          label: 'Route Cable',
+                          icon: 'cable',
+                          onSelect: () => handleSelectTool('add-wire'),
+                        },
+                        {
+                          id: 'find',
+                          label: 'Find Component',
+                          icon: 'search',
+                          shortcut: 'Ctrl+F',
+                          onSelect: () => {
+                            setOpenDrawer(null);
+                            setFindOpen(true);
                           },
-                          {
-                            id: 'sky-cycle',
-                            label: `Sky: ${
-                              lightingMode === 'sunrise'
-                                ? 'Sunrise → Sun'
-                                : lightingMode === 'daylight'
-                                  ? 'Sun → Sunset'
-                                  : lightingMode === 'sunset'
-                                    ? 'Sunset → Night'
-                                    : 'Night → Sunrise'
-                            }`,
-                            icon: 'wb_twilight',
-                            onSelect: () => {
-                              const order: LightingMode[] = ['sunrise', 'daylight', 'sunset', 'evening'];
-                              setLightingMode((prev) => order[(order.indexOf(prev) + 1) % order.length]);
-                            },
+                        },
+                        {
+                          id: 'fit-screen',
+                          label: 'Fit to Screen',
+                          icon: 'fit_screen',
+                          onSelect: handleFitToScreen,
+                        },
+                        {
+                          id: 'switch-3d',
+                          label: 'Switch to 3D Preview',
+                          icon: 'view_in_ar',
+                          onSelect: () => requestSwitchTo3D(),
+                        },
+                        {
+                          id: 'rotate',
+                          label: 'Rotate 90°',
+                          icon: 'rotate_right',
+                          disabled: selectedEntities.length === 0 && !allSelected,
+                          onSelect: handleRotateSelection,
+                        },
+                      ] satisfies CanvasContextMenuItem[])
+                    : ([
+                        {
+                          id: 'find',
+                          label: 'Find Component',
+                          icon: 'search',
+                          shortcut: 'Ctrl+F',
+                          onSelect: () => {
+                            setOpenDrawer(null);
+                            setFindOpen(true);
                           },
-                          {
-                            id: 'switch-2d',
-                            label: 'Switch to 2D View',
-                            icon: 'grid_on',
-                            onSelect: () => setViewMode('2d'),
+                        },
+                        {
+                          id: 'toggle-walk',
+                          label: cameraMode === 'fps' ? 'Exit 3D Walk' : 'Enter 3D Walk',
+                          icon: cameraMode === 'fps' ? '3d_rotation' : 'directions_walk',
+                          shortcut: 'E',
+                          onSelect: () => {
+                            if (cameraMode === 'fps') {
+                              setCameraMode('orbit');
+                            } else {
+                              setCameraMode('fps');
+                              requestFpsPointerLockRef.current?.();
+                            }
                           },
-                        ]
-                      : [
-                          {
-                            id: 'fit-screen',
-                            label: 'Fit to Screen',
-                            icon: 'fit_screen',
-                            onSelect: handleFitToScreen,
+                        },
+                        {
+                          id: 'sky-cycle',
+                          label: `Sky: ${
+                            lightingMode === 'sunrise'
+                              ? 'Sunrise → Sun'
+                              : lightingMode === 'daylight'
+                                ? 'Sun → Sunset'
+                                : lightingMode === 'sunset'
+                                  ? 'Sunset → Night'
+                                  : 'Night → Sunrise'
+                          }`,
+                          icon: 'wb_twilight',
+                          onSelect: () => {
+                            const order: LightingMode[] = ['sunrise', 'daylight', 'sunset', 'evening'];
+                            setLightingMode((prev) => order[(order.indexOf(prev) + 1) % order.length]);
                           },
-                          {
-                            id: 'switch-3d',
-                            label: 'Switch to 3D Preview',
-                            icon: 'view_in_ar',
-                            onSelect: () => requestSwitchTo3D(),
+                        },
+                        {
+                          id: 'switch-2d',
+                          label: 'Switch to 2D View',
+                          icon: 'grid_on',
+                          onSelect: () => setViewMode('2d'),
+                        },
+                        {
+                          id: 'copy',
+                          label: 'Copy Selected',
+                          icon: 'content_copy',
+                          shortcut: 'Ctrl+C',
+                          disabled: selectedEntities.length === 0 && !allSelected,
+                          dividerBefore: true,
+                          onSelect: handleCopySelection,
+                        },
+                        {
+                          id: 'paste',
+                          label: 'Paste',
+                          icon: 'content_paste',
+                          shortcut: 'Ctrl+V',
+                          disabled: !clipboard,
+                          onSelect: handlePasteClipboard,
+                        },
+                        {
+                          id: 'duplicate',
+                          label: 'Duplicate Selected',
+                          icon: 'control_point_duplicate',
+                          shortcut: 'Ctrl+D',
+                          disabled: selectedEntities.length === 0 && !allSelected,
+                          onSelect: handleDuplicateSelection,
+                        },
+                        {
+                          id: 'rotate',
+                          label: 'Rotate 90°',
+                          icon: 'rotate_right',
+                          disabled: selectedEntities.length === 0 && !allSelected,
+                          onSelect: handleRotateSelection,
+                        },
+                        {
+                          id: 'select-all',
+                          label: 'Select All on Floor',
+                          icon: 'select_all',
+                          shortcut: 'Ctrl+A',
+                          onSelect: handleSelectAll,
+                        },
+                        {
+                          id: 'undo',
+                          label: 'Undo',
+                          icon: 'undo',
+                          shortcut: 'Ctrl+Z',
+                          disabled: !canUndo,
+                          dividerBefore: true,
+                          onSelect: onUndo,
+                        },
+                        {
+                          id: 'redo',
+                          label: 'Redo',
+                          icon: 'redo',
+                          shortcut: 'Ctrl+Y',
+                          disabled: !canRedo,
+                          onSelect: onRedo,
+                        },
+                        {
+                          id: 'save',
+                          label: 'Save Project',
+                          icon: 'save',
+                          shortcut: 'Ctrl+S',
+                          onSelect: () => {
+                            onSaveProject();
+                            notify(`Saved "${project.name}" to workspace`);
                           },
-                        ]),
-                    {
-                      id: 'copy',
-                      label: 'Copy Selected',
-                      icon: 'content_copy',
-                      shortcut: 'Ctrl+C',
-                      disabled: selectedEntities.length === 0 && !allSelected,
-                      dividerBefore: true,
-                      onSelect: handleCopySelection,
-                    },
-                    {
-                      id: 'paste',
-                      label: 'Paste',
-                      icon: 'content_paste',
-                      shortcut: 'Ctrl+V',
-                      disabled: !clipboard,
-                      onSelect: handlePasteClipboard,
-                    },
-                    {
-                      id: 'duplicate',
-                      label: 'Duplicate Selected',
-                      icon: 'control_point_duplicate',
-                      shortcut: 'Ctrl+D',
-                      disabled: selectedEntities.length === 0 && !allSelected,
-                      onSelect: handleDuplicateSelection,
-                    },
-                    {
-                      id: 'rotate',
-                      label: 'Rotate 90°',
-                      icon: 'rotate_right',
-                      disabled: selectedEntities.length === 0 && !allSelected,
-                      onSelect: handleRotateSelection,
-                    },
-                    {
-                      id: 'select-all',
-                      label: 'Select All on Floor',
-                      icon: 'select_all',
-                      shortcut: 'Ctrl+A',
-                      onSelect: handleSelectAll,
-                    },
-                    {
-                      id: 'undo',
-                      label: 'Undo',
-                      icon: 'undo',
-                      shortcut: 'Ctrl+Z',
-                      disabled: !canUndo,
-                      dividerBefore: true,
-                      onSelect: onUndo,
-                    },
-                    {
-                      id: 'redo',
-                      label: 'Redo',
-                      icon: 'redo',
-                      shortcut: 'Ctrl+Y',
-                      disabled: !canRedo,
-                      onSelect: onRedo,
-                    },
-                    {
-                      id: 'save',
-                      label: 'Save Project',
-                      icon: 'save',
-                      shortcut: 'Ctrl+S',
-                      onSelect: () => {
-                        onSaveProject();
-                        notify(`Saved "${project.name}" to workspace`);
-                      },
-                    },
-                    {
-                      id: 'delete',
-                      label: 'Delete Selected',
-                      icon: 'delete',
-                      shortcut: 'Del',
-                      danger: true,
-                      disabled: selectedEntities.length === 0 && !allSelected,
-                      dividerBefore: true,
-                      onSelect: handleDeleteSelection,
-                    },
-                  ] satisfies CanvasContextMenuItem[]
+                        },
+                        {
+                          id: 'delete',
+                          label: 'Delete Selected',
+                          icon: 'delete',
+                          shortcut: 'Del',
+                          danger: true,
+                          disabled: selectedEntities.length === 0 && !allSelected,
+                          dividerBefore: true,
+                          onSelect: handleDeleteSelection,
+                        },
+                      ] satisfies CanvasContextMenuItem[])
                 )}
               />
+            )}
+
+            {/* ISOLATED ROOM-LEVEL ELECTRICAL DESIGN BANNER & QUICK DRAG-AND-DROP TRAY */}
+            {isolatedRoom && (
+              <div
+                onPointerDown={(e) => e.stopPropagation()}
+                className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-surface-container border-b border-primary/60 z-30"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold text-primary uppercase">
+                    <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                      crop_free
+                    </span>
+                    <span>Room Top View: {isolatedRoom.name}</span>
+                  </span>
+                  <span className="font-mono text-[10px] text-on-surface-variant">
+                    {formatLength(isolatedRoom.width, units)} × {formatLength(isolatedRoom.height, units)}
+                  </span>
+                  <select
+                    aria-label="Switch isolated room"
+                    value={isolatedRoom.id}
+                    onChange={(e) => handleEnterRoomView(e.target.value)}
+                    className="bg-surface border border-outline rounded-sm px-2 py-0.5 font-body text-xs text-on-surface focus:border-primary focus:outline-none"
+                  >
+                    {project.rooms.map((rm) => (
+                      <option key={rm.id} value={rm.id} className="bg-surface-container">
+                        {rm.name} ({formatFloorLabel(getItemFloor(rm))})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Quick Draggable Electrical Products Tray for Room Design */}
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="font-mono text-[10px] text-on-surface-variant mr-0.5 hidden xl:inline">
+                    Drag or click:
+                  </span>
+                  {(
+                    [
+                      'switch',
+                      'switchboard',
+                      'ceiling_fan',
+                      'led_light',
+                      'split_ac',
+                      'refrigerator',
+                      'socket_5a',
+                      'socket_16a',
+                      'geyser',
+                    ] as ElectricalItemType[]
+                  ).map((itemType) => {
+                    const meta = CATALOG_MAP[itemType];
+                    if (!meta) return null;
+                    return (
+                      <button
+                        key={itemType}
+                        type="button"
+                        draggable={true}
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData('application/x-bluespace-electrical', itemType);
+                          e.dataTransfer.effectAllowed = 'copy';
+                        }}
+                        onClick={() => handlePlaceElectrical(itemType)}
+                        title={`Drag into ${isolatedRoom.name} or click to place ${meta.label}`}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm bg-surface-container-low border border-outline-variant hover:border-secondary text-on-surface font-label text-[11px] cursor-grab active:cursor-grabbing"
+                      >
+                        <span className="material-symbols-outlined text-[13px] text-secondary" aria-hidden="true">
+                          {meta.icon}
+                        </span>
+                        <span>{meta.shortCode}</span>
+                      </button>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsolatedRoomId(null);
+                      notify('Exited Room Top View — restored complete building view');
+                    }}
+                    className="ml-1 inline-flex items-center gap-1 px-2.5 py-1 rounded-sm bg-primary text-on-primary font-label text-[11px] font-semibold cursor-pointer hover:brightness-110"
+                  >
+                    <span className="material-symbols-outlined text-[14px]" aria-hidden="true">
+                      close_fullscreen
+                    </span>
+                    <span>Exit Room View (ESC)</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* CABLE SELECTION & FREE-STYLE ROUTING PANEL (Shown when Route Cable tool is active) */}
+            {activeTool === 'add-wire' && (
+              <div
+                onPointerDown={(e) => e.stopPropagation()}
+                className="flex flex-wrap items-center gap-2 px-3 py-1.5 bg-surface-container border-b border-secondary/60 z-30"
+              >
+                <button
+                  type="button"
+                  onClick={() => setWireConfigModalOpen(true)}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-sm border font-label text-[11px] font-semibold cursor-pointer ${
+                    wireConfigConfirmed
+                      ? 'bg-primary-container/30 border-primary text-primary hover:bg-primary-container/50'
+                      : 'bg-primary text-on-primary border-primary hover:brightness-110'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[14px]" aria-hidden="true">
+                    tune
+                  </span>
+                  <span>{wireConfigConfirmed ? 'Configure Cable...' : 'Select Cable (Click Canvas)'}</span>
+                </button>
+
+                {/* Conductor Phase / Neutral / Earth Color Selector */}
+                <div className="flex items-center gap-1">
+                  <span className="font-mono text-[10px] uppercase text-secondary mr-0.5">
+                    Conductor:
+                  </span>
+                  {(
+                    [
+                      { id: 'phase', label: 'Phase (L)', color: '#EF4444' },
+                      { id: 'neutral', label: 'Neutral (N)', color: '#3B82F6' },
+                      { id: 'earth', label: 'Earth (E)', color: '#22C55E' },
+                      { id: 'control', label: 'Control', color: '#F59E0B' },
+                      { id: 'communication', label: 'Data', color: '#A855F7' },
+                    ] as { id: WireCategory; label: string; color: string }[]
+                  ).map((c) => {
+                    const active = activeWireCategory === c.id;
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => setActiveWireCategory(c.id)}
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm border font-label text-[11px] cursor-pointer ${
+                          active
+                            ? 'bg-surface-container-high border-primary text-on-surface font-semibold'
+                            : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:border-outline'
+                        }`}
+                      >
+                        <span
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: c.color }}
+                        />
+                        <span>{c.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Wire Size Quick Selector (1, 1.5, 2, 2.5, 3, 4 sq.mm) */}
+                <select
+                  aria-label="Cable size sq.mm"
+                  value={activeCableSpec.cableSizeSqMm ?? ''}
+                  onChange={(e) =>
+                    setActiveCableSpec((prev) => ({
+                      ...prev,
+                      cableSizeSqMm: e.target.value === '' ? null : Number(e.target.value),
+                    }))
+                  }
+                  className="bg-surface border border-outline rounded-sm px-1.5 py-0.5 font-mono text-[11px] text-on-surface"
+                >
+                  <option value="">Size...</option>
+                  {(activeCableSpec.cableSizeSqMm != null &&
+                  !(SELECTABLE_WIRE_SIZES_SQ_MM as readonly number[]).includes(
+                    activeCableSpec.cableSizeSqMm
+                  )
+                    ? [...SELECTABLE_WIRE_SIZES_SQ_MM, activeCableSpec.cableSizeSqMm].sort(
+                        (a, b) => a - b
+                      )
+                    : [...SELECTABLE_WIRE_SIZES_SQ_MM]
+                  ).map((sz) => (
+                    <option key={sz} value={sz}>
+                      {sz} sq.mm
+                    </option>
+                  ))}
+                </select>
+
+                {/* Active Spec Summary Pill */}
+                {(activeCableSpec.brand || activeCableSpec.wireType) && (
+                  <span className="font-mono text-[10px] text-on-surface-variant truncate max-w-[200px]">
+                    {[activeCableSpec.brand, activeCableSpec.wireType, activeCableSpec.specification]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </span>
+                )}
+
+                {/* Routing Style: Free-Style (Default) / Curved / Orthogonal */}
+                <div className="flex items-center gap-0.5 border border-outline rounded-sm overflow-hidden">
+                  {(
+                    [
+                      { id: 'freeform', label: 'Free-Style' },
+                      { id: 'curved', label: 'Curved' },
+                      { id: 'orthogonal', label: 'Orthogonal' },
+                    ] as { id: WireRoutingMode; label: string }[]
+                  ).map((mode) => (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      onClick={() => setActiveWireRoutingMode(mode.id)}
+                      className={`px-1.5 py-0.5 font-label text-[11px] cursor-pointer ${
+                        activeWireRoutingMode === mode.id
+                          ? 'bg-primary text-on-primary font-semibold'
+                          : 'bg-surface text-on-surface-variant hover:text-on-surface'
+                      }`}
+                    >
+                      {mode.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Optional Grid Snapping Toggle (OFF by default for smooth free-style paths) */}
+                <label className="inline-flex items-center gap-1 font-label text-[11px] text-on-surface-variant cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={wireGridSnap}
+                    onChange={(e) => setWireGridSnap(e.target.checked)}
+                    className="accent-primary cursor-pointer"
+                  />
+                  <span>Grid Snap</span>
+                </label>
+
+                {/* Optional Default Route Height Z (m) */}
+                <label className="inline-flex items-center gap-1 font-mono text-[10px] text-on-surface-variant">
+                  <span>Z(m):</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min={0.05}
+                    placeholder="Auto"
+                    value={activeCableSpec.routeHeightZ}
+                    onChange={(e) =>
+                      setActiveCableSpec((prev) => ({ ...prev, routeHeightZ: e.target.value }))
+                    }
+                    className="w-14 bg-surface border border-outline rounded-sm px-1 py-0.5 font-mono text-[11px] text-on-surface"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTool('select');
+                    setPendingStartWirePointId(null);
+                    setPendingStartWireCoord(null);
+                  }}
+                  className="ml-auto px-2 py-0.5 rounded-sm bg-surface-container-high border border-outline text-on-surface-variant hover:text-on-surface font-label text-[11px] cursor-pointer"
+                >
+                  Done
+                </button>
+              </div>
             )}
 
             {viewMode === '2d' ? (
@@ -4319,7 +5089,32 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 onDuplicateWall={handleDuplicateWall}
                 onPlacePointAt={handlePlacePointAt}
                 activeWireCategory={activeWireCategory}
+                activeWireRoutingMode={activeWireRoutingMode}
+                wireConfigReady={wireConfigConfirmed}
+                wireGridSnap={wireGridSnap}
+                pendingStartWirePointId={pendingStartWirePointId}
+                pendingStartWireCoord={pendingStartWireCoord}
+                onRequestCableConfig={(startPtId, startCoord) => {
+                  setPendingStartWirePointId(startPtId ?? null);
+                  setPendingStartWireCoord(startCoord ?? null);
+                  setWireConfigModalOpen(true);
+                }}
+                onConsumePendingStartWirePoint={() => {
+                  setPendingStartWirePointId(null);
+                  setPendingStartWireCoord(null);
+                }}
+                activeWireDefaultZ={
+                  activeCableSpec.routeHeightZ.trim() !== '' &&
+                  Number.isFinite(Number(activeCableSpec.routeHeightZ))
+                    ? Number(activeCableSpec.routeHeightZ)
+                    : undefined
+                }
                 allowInterFloorWiring={allowInterFloorWiring}
+                isolatedRoomId={isolatedRoomId}
+                onEnterRoomView={handleEnterRoomView}
+                onToggleHideWall={handleToggleHideWall}
+                onUpdateWallEndpoints={handleUpdateWallEndpoints}
+                onMaterializeAndSelectWall={handleMaterializeAndSelectWall}
                 onAddStaircase={handleAddStaircase}
                 onMoveStaircase={handleMoveStaircase}
                 onCreateWire={handleCreateWire}
@@ -4349,6 +5144,11 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 lightingMode={lightingMode}
                 zoom={zoom}
                 pendingPlaceItem={pendingPlaceItem}
+                isolatedRoomId={isolatedRoomId}
+                activeTool={activeTool}
+                onEnterRoomView={handleEnterRoomView}
+                onToggleHideWall={handleToggleHideWall}
+                onUpdateWireWaypoint={handleUpdateWireWaypoint}
                 onSelectEntity={(ent, additive) => {
                   setSelectedEntity(ent, additive);
                   if (ent) setAllSelected(false);
@@ -4728,6 +5528,28 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
 
               <button
                 type="button"
+                onClick={() => {
+                  if (isolatedRoomId === selectedRoom.id) {
+                    setIsolatedRoomId(null);
+                    notify('Exited Room Top View — restored complete building view');
+                  } else {
+                    handleEnterRoomView(selectedRoom.id);
+                  }
+                }}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-sm bg-primary text-on-primary hover:brightness-110 font-label text-label-sm font-semibold cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[15px]">
+                  {isolatedRoomId === selectedRoom.id ? 'close_fullscreen' : 'crop_free'}
+                </span>
+                <span>
+                  {isolatedRoomId === selectedRoom.id
+                    ? 'Exit Room Top View (ESC)'
+                    : 'Enter Room Top View (Electrical Design)'}
+                </span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => handleDismantleRoom(selectedRoom.id)}
                 className="w-full inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-sm bg-primary-container/30 border border-primary text-primary hover:bg-primary-container/50 font-label text-label-sm cursor-pointer"
               >
@@ -4746,9 +5568,35 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             </div>
           )}
 
-          {/* 2. CUSTOM WALL INSPECTOR (PHASE 6) */}
+          {/* 2. INDIVIDUAL WALL INSPECTOR (Perimeter, Room Partition & Custom Walls) */}
           {selectedWall && (
             <div className="flex flex-col gap-gutter-sm">
+              <div className="px-gutter-sm py-1.5 rounded-sm bg-surface-container-low border border-outline-variant flex items-center justify-between font-mono text-[11px]">
+                <span className="text-on-surface-variant uppercase">
+                  {selectedWall.source} Wall
+                </span>
+                <span className={selectedWall.isHidden ? 'text-secondary' : 'text-primary'}>
+                  {selectedWall.isHidden ? 'HIDDEN (CUTAWAY)' : 'VISIBLE'}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handleToggleHideWall(selectedWall.floor, selectedWall.id)}
+                className={`w-full inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-sm border font-label text-label-sm cursor-pointer ${
+                  selectedWall.isHidden
+                    ? 'bg-primary text-on-primary border-primary'
+                    : 'bg-secondary-container/30 border-secondary text-secondary hover:bg-secondary-container/50'
+                }`}
+              >
+                <span className="material-symbols-outlined text-[15px]">
+                  {selectedWall.isHidden ? 'visibility' : 'visibility_off'}
+                </span>
+                <span>
+                  {selectedWall.isHidden ? 'Restore Wall' : 'Hide Wall (Cross-Section Cutaway)'}
+                </span>
+              </button>
+
               <label className="flex flex-col gap-1">
                 <span className="font-label text-label-sm text-on-surface-variant">Wall Classification</span>
                 <select
@@ -4812,13 +5660,64 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 />
               </label>
 
-              <div className="p-gutter-sm rounded-sm bg-surface-container-low border border-outline-variant font-mono text-mono-sm text-on-surface-variant flex flex-col gap-1">
-                <span>
-                  Start: ({formatLength(selectedWall.x1, units)}, {formatLength(selectedWall.y1, units)})
-                </span>
-                <span>
-                  End: ({formatLength(selectedWall.x2, units)}, {formatLength(selectedWall.y2, units)})
-                </span>
+              {/* Editable Start / End Coordinates */}
+              <div className="grid grid-cols-2 gap-1.5">
+                <label className="flex flex-col gap-0.5">
+                  <span className="font-label text-[10px] text-on-surface-variant">Start X ({unitShort})</span>
+                  <input
+                    type="number"
+                    step="0.25"
+                    value={Number(fromMeters(selectedWall.x1, units).toFixed(2))}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (!Number.isFinite(v)) return;
+                      handleUpdateWall(selectedWall.id, { x1: Number(toMeters(v, units).toFixed(3)) });
+                    }}
+                    className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  <span className="font-label text-[10px] text-on-surface-variant">Start Y ({unitShort})</span>
+                  <input
+                    type="number"
+                    step="0.25"
+                    value={Number(fromMeters(selectedWall.y1, units).toFixed(2))}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (!Number.isFinite(v)) return;
+                      handleUpdateWall(selectedWall.id, { y1: Number(toMeters(v, units).toFixed(3)) });
+                    }}
+                    className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  <span className="font-label text-[10px] text-on-surface-variant">End X ({unitShort})</span>
+                  <input
+                    type="number"
+                    step="0.25"
+                    value={Number(fromMeters(selectedWall.x2, units).toFixed(2))}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (!Number.isFinite(v)) return;
+                      handleUpdateWall(selectedWall.id, { x2: Number(toMeters(v, units).toFixed(3)) });
+                    }}
+                    className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  <span className="font-label text-[10px] text-on-surface-variant">End Y ({unitShort})</span>
+                  <input
+                    type="number"
+                    step="0.25"
+                    value={Number(fromMeters(selectedWall.y2, units).toFixed(2))}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (!Number.isFinite(v)) return;
+                      handleUpdateWall(selectedWall.id, { y2: Number(toMeters(v, units).toFixed(3)) });
+                    }}
+                    className="w-full bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
+                  />
+                </label>
               </div>
 
               <button
@@ -4827,7 +5726,11 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 className="w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-sm bg-surface-container-low border border-error text-error hover:bg-error/15 font-label text-label-sm cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[15px]">delete</span>
-                <span>Delete Wall</span>
+                <span>
+                  {selectedWall.source === 'custom'
+                    ? 'Delete Custom Wall'
+                    : 'Remove Wall (Keep Rooms & Wiring)'}
+                </span>
               </button>
             </div>
           )}
@@ -5026,20 +5929,174 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 </label>
               </div>
 
-              {/* Brand / Catalogue Metadata & Unit Price Override */}
-              {(selectedPoint.manufacturer || selectedPoint.modelNumber) && (
-                <div className="p-2 rounded-sm bg-surface-container-low border border-outline-variant flex flex-col gap-0.5 font-mono text-[10px]">
-                  <span className="text-primary">
-                    {selectedPoint.brand || selectedPoint.manufacturer}
-                  </span>
-                  {selectedPoint.modelNumber && (
-                    <span className="text-on-surface-variant">Model: {selectedPoint.modelNumber}</span>
-                  )}
-                  {selectedPoint.specification && (
-                    <span className="text-on-surface-variant">{selectedPoint.specification}</span>
-                  )}
-                </div>
-              )}
+              {/* Central Catalogue Product & Variant Linker (2D / 3D Component Selection -> Auto BOQ Snapshot) */}
+              {catalogueProducts.length > 0 && (() => {
+                const linkedProd = selectedPoint.productId
+                  ? catalogueProducts.find((p) => p.id === selectedPoint.productId)
+                  : undefined;
+                const q = inspectorCatalogueSearch.trim().toLowerCase();
+                const matchingProds = catalogueProducts
+                  .filter((p) => {
+                    if (q) {
+                      return (
+                        p.productName.toLowerCase().includes(q) ||
+                        p.manufacturer.toLowerCase().includes(q) ||
+                        p.brand.toLowerCase().includes(q) ||
+                        p.modelNumber.toLowerCase().includes(q) ||
+                        (p.subcategory || '').toLowerCase().includes(q)
+                      );
+                    }
+                    return p.mappedItemType === selectedPoint.itemType;
+                  })
+                  .slice(0, 40);
+                const applyCatalogueSelection = (resolved: ProductCatalogueItem, variantLabel?: string) => {
+                  handleUpdateSelectedPoint(
+                    {
+                      name: `${resolved.brand || resolved.manufacturer} ${resolved.productName}`.trim(),
+                      productId: resolved.id,
+                      manufacturer: resolved.manufacturer,
+                      brand: resolved.brand || resolved.manufacturer,
+                      modelNumber: resolved.modelNumber,
+                      specification: resolved.specification,
+                      wattage: resolved.wattageW ?? selectedPoint.wattage,
+                      unit: resolved.unit || 'Nos',
+                      unitCost: resolved.unitPrice ?? selectedPoint.unitCost,
+                      mrp: resolved.mrp ?? null,
+                      discountPercent: resolved.discountPercent ?? null,
+                      gstPercent: resolved.gstPercent ?? undefined,
+                      variantSku: resolved.sku || undefined,
+                      variantLabel,
+                      priceCapturedAt: new Date().toISOString(),
+                    },
+                    true
+                  );
+                };
+                const thumb = linkedProd
+                  ? sanitizeSafeCatalogueImageUrl(linkedProd.imageUrl)
+                  : undefined;
+
+                return (
+                  <div className="p-2 rounded-sm bg-surface-container-low border border-outline-variant flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="font-mono text-[10px] uppercase text-primary">
+                        Central Catalogue Product
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setCatalogueOpen(true)}
+                        className="font-mono text-[10px] text-secondary hover:underline cursor-pointer"
+                      >
+                        Browse All
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={inspectorCatalogueSearch}
+                      onChange={(e) => setInspectorCatalogueSearch(e.target.value)}
+                      placeholder="Filter catalogue SKUs by brand/model..."
+                      className="w-full bg-surface border border-outline rounded-sm px-2 py-1 font-body text-[11px] text-on-surface"
+                    />
+                    <select
+                      aria-label="Link central catalogue product"
+                      value={selectedPoint.productId ?? ''}
+                      onChange={(e) => {
+                        const chosen = catalogueProducts.find((p) => p.id === e.target.value);
+                        if (!chosen) return;
+                        const resolved = resolveProductWithVariant(chosen);
+                        applyCatalogueSelection(resolved, chosen.variants?.[0]?.label);
+                      }}
+                      className="w-full bg-surface border border-outline rounded-sm px-1.5 py-1 font-body text-[11px] text-on-surface"
+                    >
+                      <option value="">
+                        {matchingProds.length > 0
+                          ? `Select product (${matchingProds.length} shown)...`
+                          : 'Type above to search 1,600+ SKUs...'}
+                      </option>
+                      {linkedProd && !matchingProds.some((p) => p.id === linkedProd.id) && (
+                        <option value={linkedProd.id}>
+                          {linkedProd.manufacturer} — {linkedProd.productName}
+                        </option>
+                      )}
+                      {matchingProds.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.manufacturer} — {p.productName}
+                          {p.unitPrice !== null ? ` (₹${p.unitPrice})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {linkedProd && linkedProd.variants && linkedProd.variants.length > 1 && (
+                      <select
+                        aria-label="Select product variant"
+                        value={selectedPoint.variantSku ?? linkedProd.variants[0]?.sku ?? ''}
+                        onChange={(e) => {
+                          const v = linkedProd.variants?.find((x) => x.sku === e.target.value);
+                          const resolved = resolveProductWithVariant(linkedProd, e.target.value);
+                          applyCatalogueSelection(resolved, v?.label);
+                        }}
+                        className="w-full bg-surface border border-outline rounded-sm px-1.5 py-1 font-mono text-[10px] text-on-surface"
+                      >
+                        {linkedProd.variants.map((v) => (
+                          <option key={v.sku} value={v.sku}>
+                            {v.label}
+                            {v.unitPrice !== null ? ` — ₹${v.unitPrice}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {(selectedPoint.manufacturer || selectedPoint.modelNumber) && (
+                      <div className="flex items-start gap-2 pt-1 border-t border-outline-variant/60 font-mono text-[10px]">
+                        {thumb && (
+                          <img
+                            src={thumb}
+                            alt={selectedPoint.name}
+                            className="w-9 h-9 object-contain bg-white border border-outline p-0.5 shrink-0"
+                          />
+                        )}
+                        <div className="flex flex-col gap-0.5 min-w-0">
+                          <span className="text-primary truncate">
+                            {selectedPoint.brand || selectedPoint.manufacturer}
+                          </span>
+                          {selectedPoint.modelNumber && (
+                            <span className="text-on-surface-variant truncate">
+                              Model: {selectedPoint.modelNumber}
+                            </span>
+                          )}
+                          <span className="text-on-surface-variant">
+                            {selectedPoint.unit || 'Nos'}
+                            {selectedPoint.discountPercent
+                              ? ` · ${selectedPoint.discountPercent}% off`
+                              : ''}
+                            {selectedPoint.gstPercent !== undefined
+                              ? ` · GST ${selectedPoint.gstPercent}%`
+                              : ''}
+                          </span>
+                          {selectedPoint.specification && (
+                            <span className="text-on-surface-variant line-clamp-2">
+                              {selectedPoint.specification}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Fallback metadata card when catalogue has 0 products */}
+              {catalogueProducts.length === 0 &&
+                (selectedPoint.manufacturer || selectedPoint.modelNumber) && (
+                  <div className="p-2 rounded-sm bg-surface-container-low border border-outline-variant flex flex-col gap-0.5 font-mono text-[10px]">
+                    <span className="text-primary">
+                      {selectedPoint.brand || selectedPoint.manufacturer}
+                    </span>
+                    {selectedPoint.modelNumber && (
+                      <span className="text-on-surface-variant">Model: {selectedPoint.modelNumber}</span>
+                    )}
+                    {selectedPoint.specification && (
+                      <span className="text-on-surface-variant">{selectedPoint.specification}</span>
+                    )}
+                  </div>
+                )}
 
               <label className="flex flex-col gap-1">
                 <span className="font-label text-[11px] text-on-surface-variant">
@@ -5450,19 +6507,180 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           {selectedWire && (() => {
             const fromPt = project.points.find((p) => p.id === selectedWire.fromPointId);
             const toPt = project.points.find((p) => p.id === selectedWire.toPointId);
-            const routedLen = computeWireLengthMeters(selectedWire, project);
-            const cableValidation = validateCableSizeForCircuit(
-              selectedWire.circuit,
-              selectedWire.cableSizeSqMm
-            );
+            const breakdown = computeWireLengthBreakdown(selectedWire, project);
+            const routedLen = breakdown.totalM;
+            const currentRoutingMode: WireRoutingMode = selectedWire.routingMode ?? 'freeform';
+            const connectedLoadW = Math.max(fromPt?.wattage ?? 0, toPt?.wattage ?? 0);
+            const engineeringAssessment = evaluateCableSizingEngineering({
+              cableSizeSqMm: selectedWire.cableSizeSqMm,
+              cableMaterial: selectedWire.cableMaterial,
+              category: selectedWire.category,
+              circuit: selectedWire.circuit,
+              loadWatts: connectedLoadW > 0 ? connectedLoadW : undefined,
+              routeLengthM: breakdown.baseRouteM,
+              installationCondition: 'concealed-conduit',
+            });
+            const inspectorSizeOptions: number[] =
+              selectedWire.cableSizeSqMm != null &&
+              !(SELECTABLE_WIRE_SIZES_SQ_MM as readonly number[]).includes(
+                selectedWire.cableSizeSqMm
+              )
+                ? [...SELECTABLE_WIRE_SIZES_SQ_MM, selectedWire.cableSizeSqMm].sort(
+                    (a, b) => a - b
+                  )
+                : [...SELECTABLE_WIRE_SIZES_SQ_MM];
             return (
               <div className="flex flex-col gap-gutter-sm">
-                <div className="px-gutter-sm py-1.5 rounded-sm bg-surface-container-low border border-outline-variant flex items-center justify-between font-mono text-[11px]">
-                  <span className="text-on-surface-variant">
-                    {selectedWire.code} ({fromPt?.code ?? '?'} → {toPt?.code ?? '?'})
+                <div className="px-gutter-sm py-1.5 rounded-sm bg-surface-container-low border border-outline-variant flex flex-col gap-0.5 font-mono text-[11px]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-on-surface-variant">
+                      {selectedWire.code} ({fromPt?.code ?? '?'} → {toPt?.code ?? '?'})
+                    </span>
+                    <span className="text-secondary font-semibold">{routedLen.toFixed(2)} m</span>
+                  </div>
+                  <span className="text-[10px] text-on-surface-variant">
+                    Base 3D: {breakdown.baseRouteM.toFixed(2)}m (H {breakdown.horizontalM.toFixed(2)}m + V/Z {breakdown.verticalDropsM.toFixed(2)}m)
                   </span>
-                  <span className="text-secondary">{routedLen.toFixed(2)} m</span>
+                  {(selectedWire.brand || selectedWire.wireType || selectedWire.cableSizeSqMm) && (
+                    <span className="text-[10px] text-primary truncate">
+                      {[
+                        selectedWire.cableSizeSqMm ? `${selectedWire.cableSizeSqMm} sq.mm` : null,
+                        selectedWire.cableMaterial,
+                        selectedWire.brand || selectedWire.manufacturer,
+                        selectedWire.wireType,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </span>
+                  )}
                 </div>
+
+                {/* Routing Style Selector */}
+                <div className="flex flex-col gap-1">
+                  <span className="font-label text-[10px] text-on-surface-variant uppercase">
+                    Routing Style
+                  </span>
+                  <div className="grid grid-cols-3 gap-1">
+                    {(
+                      [
+                        { id: 'freeform', label: 'Free-Style' },
+                        { id: 'curved', label: 'Curved' },
+                        { id: 'orthogonal', label: 'Orthogonal' },
+                      ] as { id: WireRoutingMode; label: string }[]
+                    ).map((mode) => (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={() =>
+                          onUpdateProject(
+                            (prev) => updateWireRoutingModeInProject(prev, selectedWire.id, mode.id),
+                            true
+                          )
+                        }
+                        className={`px-1.5 py-1 rounded-sm border font-label text-[11px] cursor-pointer ${
+                          currentRoutingMode === mode.id
+                            ? 'bg-primary text-on-primary border-primary font-semibold'
+                            : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:border-primary'
+                        }`}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Catalogue Cable Product Preset (Edit Specs Without Redrawing) */}
+                {cableCatalogueProducts.length > 0 && (
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[10px] text-on-surface-variant">
+                      Catalogue Cable Product
+                    </span>
+                    <select
+                      aria-label="Assign catalogue cable product to wire"
+                      value={selectedWire.productId ?? ''}
+                      onChange={(e) => {
+                        const prod = cableCatalogueProducts.find((p) => p.id === e.target.value);
+                        if (!prod) {
+                          handleUpdateWire(selectedWire.id, { productId: undefined });
+                          return;
+                        }
+                        handleUpdateWire(selectedWire.id, {
+                          productId: prod.id,
+                          wireType: prod.productName,
+                          brand: prod.brand || prod.manufacturer,
+                          manufacturer: prod.manufacturer,
+                          productName: prod.productName,
+                          modelNumber: prod.modelNumber ?? undefined,
+                          specification: prod.specification ?? selectedWire.specification,
+                          cableSizeSqMm: prod.cableSizeSqMm ?? selectedWire.cableSizeSqMm,
+                          cableMaterial: prod.specification?.toLowerCase().includes('alumin')
+                            ? 'Aluminium'
+                            : selectedWire.cableMaterial,
+                          unit: prod.unit || 'm',
+                          unitPricePerM: prod.unitPrice ?? selectedWire.unitPricePerM,
+                          mrpPerM: prod.mrp ?? null,
+                          discountPercent: prod.discountPercent ?? null,
+                          gstPercent: prod.gstPercent ?? selectedWire.gstPercent,
+                          variantSku: prod.sku || undefined,
+                          priceCapturedAt: new Date().toISOString(),
+                        });
+                      }}
+                      className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-body text-[11px] text-on-surface"
+                    >
+                      <option value="">Custom / Manual Spec</option>
+                      {cableCatalogueProducts.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.brand || p.manufacturer} — {p.productName}
+                          {p.cableSizeSqMm ? ` (${p.cableSizeSqMm} sq.mm)` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                {/* Cable Type, Brand & Specification */}
+                <div className="grid grid-cols-2 gap-gutter-xs">
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[10px] text-on-surface-variant">Brand</span>
+                    <input
+                      type="text"
+                      value={selectedWire.brand ?? selectedWire.manufacturer ?? ''}
+                      placeholder="Polycab / Finolex..."
+                      onChange={(e) =>
+                        handleUpdateWire(selectedWire.id, {
+                          brand: e.target.value,
+                          manufacturer: e.target.value,
+                        })
+                      }
+                      className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-body text-xs text-on-surface"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="font-label text-[10px] text-on-surface-variant">Cable Type</span>
+                    <input
+                      type="text"
+                      value={selectedWire.wireType ?? ''}
+                      placeholder="FR PVC Copper"
+                      onChange={(e) =>
+                        handleUpdateWire(selectedWire.id, { wireType: e.target.value })
+                      }
+                      className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-body text-xs text-on-surface"
+                    />
+                  </label>
+                </div>
+
+                <label className="flex flex-col gap-0.5">
+                  <span className="font-label text-[10px] text-on-surface-variant">Specification</span>
+                  <input
+                    type="text"
+                    value={selectedWire.specification ?? ''}
+                    placeholder="IS 694 1100V Multi-strand"
+                    onChange={(e) =>
+                      handleUpdateWire(selectedWire.id, { specification: e.target.value })
+                    }
+                    className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-[11px] text-on-surface"
+                  />
+                </label>
 
                 <div className="grid grid-cols-2 gap-gutter-xs">
                   <label className="flex flex-col gap-0.5">
@@ -5521,7 +6739,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                       className="bg-surface-container-low border border-outline rounded-sm px-1.5 py-1 font-mono text-xs text-on-surface"
                     >
                       <option value="">Not configured</option>
-                      {[1.0, 1.5, 2.5, 4.0, 6.0, 10.0].map((sz) => (
+                      {inspectorSizeOptions.map((sz) => (
                         <option key={sz} value={sz}>
                           {sz} sq.mm
                         </option>
@@ -5541,16 +6759,78 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                     >
                       <option value="Copper">Copper</option>
                       <option value="Aluminium">Aluminium</option>
-                      <option value="Data/Fiber">Data / Fiber</option>
+                      <option value="Unspecified">Other / Unspecified</option>
                     </select>
                   </label>
                 </div>
 
-                {cableValidation.warning && (
-                  <div className="p-2 rounded-sm bg-secondary-container/25 border border-secondary/70 font-body text-[11px] text-on-surface">
-                    ⚠ {cableValidation.warning}
+                {/* Live Engineering Cable-Sizing Advisory */}
+                <div className="p-2 rounded-sm bg-surface-container-low border border-outline-variant flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-label text-[10px] uppercase text-secondary font-semibold">
+                      Engineering Sizing Advisory
+                    </span>
+                    {engineeringAssessment.recommendedMaxBreakerA != null && (
+                      <span className="font-mono text-[10px] text-primary">
+                        Max MCB ≤ {engineeringAssessment.recommendedMaxBreakerA}A
+                      </span>
+                    )}
                   </div>
-                )}
+                  <div className="grid grid-cols-3 gap-1 font-mono text-[10px] bg-surface p-1 rounded-sm border border-outline-variant/60">
+                    <div>
+                      <span className="block text-[9px] text-on-surface-variant">Est. Load</span>
+                      <span>
+                        {engineeringAssessment.estimatedCurrentA != null
+                          ? `${engineeringAssessment.estimatedCurrentA.toFixed(1)}A`
+                          : '—'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[9px] text-on-surface-variant">Derated Iz</span>
+                      <span>
+                        {engineeringAssessment.deratedAmpacityA != null
+                          ? `${engineeringAssessment.deratedAmpacityA.toFixed(1)}A`
+                          : '—'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[9px] text-on-surface-variant">Est. V-Drop</span>
+                      <span
+                        className={
+                          engineeringAssessment.voltageDropPct != null &&
+                          engineeringAssessment.voltageDropPct >
+                            engineeringAssessment.maxAllowedDropPct
+                            ? 'text-error font-semibold'
+                            : ''
+                        }
+                      >
+                        {engineeringAssessment.voltageDropPct != null
+                          ? `${engineeringAssessment.voltageDropPct.toFixed(2)}%`
+                          : '—'}
+                      </span>
+                    </div>
+                  </div>
+                  {engineeringAssessment.warnings.map((w, idx) => (
+                    <div
+                      key={`${w.code}-${idx}`}
+                      className={`px-1.5 py-1 rounded-sm border font-body text-[10px] leading-snug ${
+                        w.severity === 'error'
+                          ? 'bg-error/15 border-error/70 text-on-surface'
+                          : w.severity === 'warning'
+                            ? 'bg-secondary-container/25 border-secondary/70 text-on-surface'
+                            : 'bg-surface border-outline-variant text-on-surface-variant'
+                      }`}
+                    >
+                      <span>
+                        {w.severity === 'error' ? '⛔ ' : w.severity === 'warning' ? '⚠ ' : 'ℹ '}
+                        {w.message}
+                      </span>
+                    </div>
+                  ))}
+                  <p className="font-body text-[9.5px] leading-snug text-on-surface-variant italic">
+                    {engineeringAssessment.disclaimer}
+                  </p>
+                </div>
 
                 <div className="grid grid-cols-3 gap-gutter-xs">
                   <label className="flex flex-col gap-0.5">
@@ -5609,7 +6889,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 {/* Route Shaping Actions */}
                 <div className="flex flex-col gap-1">
                   <span className="font-label text-[10px] text-on-surface-variant uppercase">
-                    Route Editing ({selectedWire.waypoints.length} bends — drag handles or + in 2D)
+                    Route Presets (Drag control handles in 2D or 3D; Shift+drag in 3D for Z)
                   </span>
                   <div className="grid grid-cols-3 gap-1">
                     <button
@@ -5653,6 +6933,92 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                       Direct
                     </button>
                   </div>
+                </div>
+
+                {/* Interactive 3D Waypoints Editor (X, Y, Z) */}
+                <div className="flex flex-col gap-1 border-t border-outline-variant pt-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-label text-[10px] text-on-surface-variant uppercase">
+                      Waypoints ({selectedWire.waypoints.length}) · X / Y / Z (m)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleAddWireWaypoint(selectedWire.id)}
+                      className="px-1.5 py-0.5 rounded-sm bg-primary-container/30 border border-primary/60 text-primary font-label text-[10px] cursor-pointer hover:bg-primary-container/50"
+                    >
+                      + Add Point
+                    </button>
+                  </div>
+                  {selectedWire.waypoints.length > 0 && (
+                    <div className="flex flex-col gap-1 max-h-36 overflow-y-auto pr-0.5">
+                      {selectedWire.waypoints.map((wp, idx) => (
+                        <div
+                          key={idx}
+                          className="grid grid-cols-[20px_1fr_1fr_1fr_22px] items-center gap-1"
+                        >
+                          <span className="font-mono text-[10px] text-on-surface-variant">
+                            #{idx + 1}
+                          </span>
+                          <input
+                            type="number"
+                            step="0.1"
+                            aria-label={`Waypoint ${idx + 1} X`}
+                            value={wp.x}
+                            onChange={(e) => {
+                              const v = Number(e.target.value);
+                              if (!Number.isFinite(v)) return;
+                              handleUpdateWireWaypoint(selectedWire.id, idx, { x: v }, true);
+                            }}
+                            className="w-full bg-surface-container-low border border-outline rounded-sm px-1 py-0.5 font-mono text-[10px] text-on-surface"
+                          />
+                          <input
+                            type="number"
+                            step="0.1"
+                            aria-label={`Waypoint ${idx + 1} Y`}
+                            value={wp.y}
+                            onChange={(e) => {
+                              const v = Number(e.target.value);
+                              if (!Number.isFinite(v)) return;
+                              handleUpdateWireWaypoint(selectedWire.id, idx, { y: v }, true);
+                            }}
+                            className="w-full bg-surface-container-low border border-outline rounded-sm px-1 py-0.5 font-mono text-[10px] text-on-surface"
+                          />
+                          <input
+                            type="number"
+                            step="0.1"
+                            min={0.05}
+                            placeholder="Z"
+                            aria-label={`Waypoint ${idx + 1} Z`}
+                            value={typeof wp.z === 'number' ? wp.z : ''}
+                            onChange={(e) => {
+                              const raw = e.target.value.trim();
+                              if (!raw) {
+                                handleUpdateWireWaypoint(
+                                  selectedWire.id,
+                                  idx,
+                                  { z: undefined },
+                                  true
+                                );
+                                return;
+                              }
+                              const v = Number(raw);
+                              if (!Number.isFinite(v) || v <= 0) return;
+                              handleUpdateWireWaypoint(selectedWire.id, idx, { z: v }, true);
+                            }}
+                            className="w-full bg-surface-container-low border border-outline rounded-sm px-1 py-0.5 font-mono text-[10px] text-on-surface"
+                          />
+                          <button
+                            type="button"
+                            title="Delete waypoint"
+                            onClick={() => handleDeleteWireWaypoint(selectedWire.id, idx)}
+                            className="h-5 flex items-center justify-center rounded-sm bg-surface-container-low border border-outline-variant hover:border-error text-error font-mono text-[11px] cursor-pointer"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <button
@@ -5985,6 +7351,48 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           notify(`Exported ${count}-page Architectural & Electrical PDF Drawing Package`)
         }
       />
+
+      {/* CABLE CONFIGURATION POPUP (Opens on first canvas click with Route Cable tool) */}
+      {(() => {
+        const pendingStartPt = pendingStartWirePointId
+          ? project.points.find((p) => p.id === pendingStartWirePointId)
+          : undefined;
+        return (
+          <CableConfigModal
+            open={wireConfigModalOpen}
+            category={activeWireCategory}
+            routingMode={activeWireRoutingMode}
+            gridSnap={wireGridSnap}
+            cableSpec={activeCableSpec}
+            cableCatalogueProducts={cableCatalogueProducts}
+            startPointLabel={pendingStartPt ? `${pendingStartPt.code} (${pendingStartPt.name})` : null}
+            startPointCircuit={pendingStartPt?.circuit ?? ''}
+            startPointLoadW={pendingStartPt?.wattage}
+            onConfirm={({ category, routingMode, gridSnap, cableSpec }) => {
+              setActiveWireCategory(category);
+              setActiveWireRoutingMode(routingMode);
+              setWireGridSnap(gridSnap);
+              setActiveCableSpec(cableSpec);
+              setWireConfigConfirmed(true);
+              setWireConfigModalOpen(false);
+              notify(
+                `Cable configured (${cableSpec.cableSizeSqMm ?? 'Custom'} sq.mm ${WIRE_CATEGORY_LABELS[category]} · ${
+                  routingMode === 'freeform'
+                    ? 'Polyline Free-Style'
+                    : routingMode === 'curved'
+                      ? 'Curved'
+                      : 'Orthogonal'
+                }). Click intermediate points freely, press Enter or double-click to finish, Esc to cancel.`
+              );
+            }}
+            onCancel={() => {
+              setWireConfigModalOpen(false);
+              setPendingStartWirePointId(null);
+              setPendingStartWireCoord(null);
+            }}
+          />
+        );
+      })()}
 
       {/* SAFE PROJECT IMPORT PREVIEW MODAL (.bluespace / .json) */}
       <ImportProjectPreviewModal

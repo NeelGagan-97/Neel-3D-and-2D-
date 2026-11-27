@@ -33,6 +33,7 @@ export type FloorView3DMode = 'all' | 'exploded' | 'up-to-active' | 'active-only
 export type CanvasTool =
   | 'select'
   | 'draw-wall'
+  | 'hide-wall'
   | 'add-room'
   | 'add-door'
   | 'add-window'
@@ -97,9 +98,13 @@ export interface StaircaseItem {
   landingDepth: number;
 }
 
+export type WireRoutingMode = 'orthogonal' | 'freeform' | 'curved';
+
 export interface WireWaypoint {
   x: number;
   y: number;
+  /** Optional floor-relative elevation in meters for 3D height-axis routing */
+  z?: number;
 }
 
 export interface ElectricalWire {
@@ -112,8 +117,10 @@ export interface ElectricalWire {
   fromFloor: number;
   toFloor: number;
   isInterFloor?: boolean;
-  /** Intermediate routing points in floor-plan meters */
+  /** Intermediate routing points in floor-plan meters (with optional floor-relative Z height) */
   waypoints: WireWaypoint[];
+  /** Cable path geometry style: orthogonal (90°), freeform (diagonal/arbitrary), or curved (smooth spline) */
+  routingMode?: WireRoutingMode;
   /** Circuit assignment (empty string allowed to surface validation warnings) */
   circuit: CircuitId | '';
   category: WireCategory;
@@ -137,8 +144,13 @@ export interface ElectricalWire {
   modelNumber?: string;
   specification?: string;
   unit?: string;
+  mrpPerM?: number | null;
   unitPricePerM?: number | null;
+  discountPercent?: number | null;
   gstPercent?: number | null;
+  variantSku?: string;
+  variantLabel?: string;
+  priceCapturedAt?: string;
   datasheetUrl?: string;
 }
 
@@ -154,8 +166,13 @@ export interface CircuitCableConfig {
   modelNumber?: string;
   specification?: string;
   unit?: string;
+  mrpPerM?: number | null;
   unitPricePerM?: number | null;
+  discountPercent?: number | null;
   gstPercent?: number | null;
+  variantSku?: string;
+  variantLabel?: string;
+  priceCapturedAt?: string;
   datasheetUrl?: string;
   note?: string;
 }
@@ -212,6 +229,7 @@ export type ElectricalItemType =
   | 'usb_outlet'
   | 'split_ac'
   | 'geyser'
+  | 'refrigerator'
   | 'appliance'
   | 'distribution_board'
   | 'earthing_point';
@@ -268,6 +286,8 @@ export interface CustomWall {
   /** True when this segment is part of a tessellated curved wall reconstructed from a CAD/PDF arc or Bézier */
   isCurvedSegment?: boolean;
   curveGroupId?: string;
+  /** Temporarily hidden for cutaway / cross-section views without deleting rooms or electrical data */
+  hidden?: boolean;
 }
 
 export interface ArchitecturalOpening {
@@ -340,7 +360,13 @@ export interface ElectricalPoint {
   brand?: string;
   modelNumber?: string;
   specification?: string;
+  unit?: string;
+  mrp?: number | null;
+  discountPercent?: number | null;
   gstPercent?: number | null;
+  variantSku?: string;
+  variantLabel?: string;
+  priceCapturedAt?: string;
   manualPriceOverride?: number | null;
   /** Optional distribution board / earthing metadata */
   dbConfig?: DistributionBoardConfig;
@@ -391,6 +417,8 @@ export interface ProjectData {
   floorConfigs?: FloorLevelConfig[];
   rooms: RoomZone[];
   customWalls: CustomWall[];
+  /** Floor-scoped hidden wall keys (e.g. "f1:ext-s", "f1:rm-h-0", "f1:cw-1") for cutaway / cross-section views */
+  hiddenWallIds?: string[];
   openings: ArchitecturalOpening[];
   dimensions?: DimensionAnnotation[];
   furniture: FurnitureItem[];
@@ -463,6 +491,18 @@ export interface RoomBreakdownRow {
 export interface BoqRow {
   id?: string;
   itemType: ElectricalItemType | 'custom';
+  productId?: string;
+  manufacturer?: string;
+  brand?: string;
+  modelNumber?: string;
+  specification?: string;
+  unit?: string;
+  mrp?: number | null;
+  discountPercent?: number | null;
+  gstPercent?: number | null;
+  variantSku?: string;
+  variantLabel?: string;
+  priceCapturedAt?: string;
   productName: string;
   category: string;
   quantity: number;

@@ -210,6 +210,19 @@ export const ELECTRICAL_CATALOG: ElectricalCatalogItem[] = [
     icon: 'water_heater',
   },
   {
+    itemType: 'refrigerator',
+    label: 'Refrigerator',
+    shortCode: 'REF',
+    productName: 'Double-Door Frost-Free Refrigerator',
+    category: 'Appliances',
+    boqCategory: 'Appliances',
+    defaultWattage: 250,
+    defaultMountHeight: 0.9,
+    defaultCircuit: 'CKT-P1 (Kitchen)',
+    unitCost: 28500,
+    icon: 'kitchen',
+  },
+  {
     itemType: 'appliance',
     label: 'Appliances',
     shortCode: 'APP',
@@ -220,7 +233,7 @@ export const ELECTRICAL_CATALOG: ElectricalCatalogItem[] = [
     defaultMountHeight: 1.5,
     defaultCircuit: 'CKT-P1 (Kitchen)',
     unitCost: 3500,
-    icon: 'kitchen',
+    icon: 'microwave',
   },
   {
     itemType: 'distribution_board',
@@ -753,7 +766,7 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
     });
   });
 
-  const boqMap = new Map<ElectricalItemType, BoqRow>();
+  const boqMap = new Map<string, BoqRow>();
 
   project.points.forEach((pt) => {
     const effectivePtCost =
@@ -806,7 +819,11 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
     rRow.loadWatts += pt.wattage;
 
     const cat = CATALOG_MAP[pt.itemType];
-    const existingBoq = boqMap.get(pt.itemType);
+    const unitPrice = Number(effectivePtCost.toFixed(2));
+    const boqKey = pt.productId
+      ? `${pt.itemType}::${pt.productId}::${pt.variantSku || ''}::${unitPrice}`
+      : pt.itemType;
+    const existingBoq = boqMap.get(boqKey);
     if (existingBoq) {
       existingBoq.quantity += 1;
       existingBoq.totalWattage += pt.wattage;
@@ -816,16 +833,39 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
           ? Number((existingBoq.estimatedCost / existingBoq.quantity).toFixed(2))
           : 0;
     } else {
-      const unitPrice = Number(effectivePtCost.toFixed(2));
-      boqMap.set(pt.itemType, {
-        id: pt.itemType,
+      const mrp =
+        typeof pt.mrp === 'number' && Number.isFinite(pt.mrp) && pt.mrp > 0
+          ? Number(pt.mrp.toFixed(2))
+          : null;
+      const discountPercent =
+        typeof pt.discountPercent === 'number' &&
+        Number.isFinite(pt.discountPercent) &&
+        pt.discountPercent >= 0
+          ? Number(pt.discountPercent.toFixed(2))
+          : mrp !== null && unitPrice > 0 && mrp > unitPrice
+            ? Number((((mrp - unitPrice) / mrp) * 100).toFixed(2))
+            : null;
+      boqMap.set(boqKey, {
+        id: boqKey,
         itemType: pt.itemType,
-        productName: cat ? cat.productName : pt.name,
+        productName: pt.productId ? pt.name : cat ? cat.productName : pt.name,
         category: cat ? cat.boqCategory : pt.category,
         quantity: 1,
+        unit: pt.unit || 'Nos',
         unitPrice,
+        mrp,
+        discountPercent,
+        gstPercent: pt.gstPercent ?? null,
         totalWattage: pt.wattage,
         estimatedCost: unitPrice,
+        ...(pt.productId ? { productId: pt.productId } : {}),
+        ...(pt.manufacturer ? { manufacturer: pt.manufacturer } : {}),
+        ...(pt.brand ? { brand: pt.brand } : {}),
+        ...(pt.modelNumber ? { modelNumber: pt.modelNumber } : {}),
+        ...(pt.specification ? { specification: pt.specification } : {}),
+        ...(pt.variantSku ? { variantSku: pt.variantSku } : {}),
+        ...(pt.variantLabel ? { variantLabel: pt.variantLabel } : {}),
+        ...(pt.priceCapturedAt ? { priceCapturedAt: pt.priceCapturedAt } : {}),
       });
     }
   });

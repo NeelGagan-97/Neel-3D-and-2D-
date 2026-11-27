@@ -7,8 +7,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { GoogleGenAI, ThinkingLevel, Type, type Part } from '@google/genai';
+import { createClient } from '@supabase/supabase-js';
 import { generateValidatedProjectDxf } from './src/utils/dxfExporter';
 import type { ProjectData } from './src/types/design';
+import type { CatalogueCategory, ProductCatalogueItem } from './src/types/catalogue';
+import {
+  deleteCentralManufacturer,
+  deleteCentralProduct,
+  getCauveryImportStatus,
+  getCentralCatalogueData,
+  isServerSupabaseConfigured,
+  requestPauseCauveryImport,
+  resolveLocalCatalogueImagePath,
+  runCauveryCatalogueImport,
+  saveUploadedProductImage,
+  upsertCentralManufacturer,
+  upsertCentralProduct,
+} from './src/server/cauveryCatalogueImporter';
 
 const execFileAsync = promisify(execFile);
 
@@ -990,6 +1005,293 @@ export function createApp() {
         await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
       }
     }
+  });
+
+  // --------------------------------------------------------------------------
+  // CENTRAL ELECTRICAL PRODUCT CATALOGUE & RESUMABLE IMPORTER API
+  // --------------------------------------------------------------------------
+  async function verifyAdminRequest(req: Request): Promise<{ ok: boolean; status: number; error?: string }> {
+    const sbUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+    const sbServiceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+    const sbAnonKey = (
+      process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+      ''
+    ).trim();
+
+    if (sbUrl && (sbServiceKey || sbAnonKey)) {
+      const authHeader = String(req.headers.authorization || '').trim();
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+      if (!token) {
+        return { ok: false, status: 401, error: 'Authentication bearer token is required.' };
+      }
+      const sb = createClient(sbUrl, sbServiceKey || sbAnonKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+      const { data: userData, error: userErr } = await sb.auth.getUser(token);
+      if (userErr || !userData?.user?.id) {
+        return { ok: false, status: 401, error: 'Invalid or expired authentication session.' };
+      }
+      const { data: profile, error: profErr } = await sb
+        .from('employee_profiles')
+        .select('role, account_status')
+        .eq('auth_user_id', userData.user.id)
+        .maybeSingle();
+
+      if (profErr || !profile || profile.role !== 'ADMIN' || profile.account_status !== 'APPROVED') {
+        return {
+          ok: false,
+          status: 403,
+          error: 'Forbidden: Approved administrator privileges are required.',
+        };
+      }
+      return { ok: true, status: 200 };
+    }
+
+    // Preview / non-Supabase local mode: require explicit admin intent header
+    const roleHeader = String(req.headers['x-bluespace-role'] || '').trim().toUpperCase();
+    if (roleHeader !== 'ADMIN') {
+      return { ok: false, status: 403, error: 'Administrator privileges are required.' };
+    }
+    return { ok: true, status: 200 };
+  }
+
+  app.get('/api/catalogue/central', async (_req: Request, res: Response) => {
+    try {
+      const data = await getCentralCatalogueData();
+      res.json({ ok: true, ...data });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to load central product catalogue.',
+      });
+    }
+  });
+
+  app.get('/api/catalogue/images/:filename', async (req: Request, res: Response) => {
+    const filename = String(req.params.filename || '').trim();
+    const resolvedPath = resolveLocalCatalogueImagePath(filename);
+    if (!resolvedPath) {
+      res.status(400).json({ ok: false, error: 'Invalid image identifier.' });
+      return;
+    }
+    try {
+      const buf = await fs.readFile(resolvedPath);
+      const ext = path.extname(filename).toLowerCase();
+      const mime =
+        ext === '.png'
+          ? 'image/png'
+          : ext === '.webp'
+            ? 'image/webp'
+            : ext === '.gif'
+              ? 'image/gif'
+              : 'image/jpeg';
+      res.setHeader('Content-Type', mime);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      res.status(200).send(buf);
+    } catch {
+      res.status(404).json({ ok: false, error: 'Catalogue image not found.' });
+    }
+  });
+
+  app.post('/api/catalogue/images/upload', async (req: Request, res: Response) => {
+    const auth = await verifyAdminRequest(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    const rawDataUrl = typeof req.body?.dataUrl === 'string' ? req.body.dataUrl.trim() : '';
+    const match = rawDataUrl.match(/^data:image\/(jpeg|jpg|png|webp|gif);base64,([A-Za-z0-9+/=\s]+)$/i);
+    if (!match) {
+      res.status(400).json({ ok: false, error: 'Expected a valid base64 JPEG, PNG, WebP, or GIF image.' });
+      return;
+    }
+    try {
+      const buf = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
+      const uploaded = await saveUploadedProductImage(buf);
+      res.status(200).json({ ok: true, ...uploaded });
+    } catch (err) {
+      res.status(400).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to store product image.',
+      });
+    }
+  });
+
+  app.post('/api/catalogue/products', async (req: Request, res: Response) => {
+    const auth = await verifyAdminRequest(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    const body = req.body as Partial<ProductCatalogueItem>;
+    const productName = typeof body?.productName === 'string' ? body.productName.trim() : '';
+    if (!productName || !body?.category) {
+      res.status(400).json({ ok: false, error: 'productName and category are required.' });
+      return;
+    }
+    try {
+      const saved = await upsertCentralProduct({
+        id: typeof body.id === 'string' ? body.id : undefined,
+        sourceKey: typeof body.sourceKey === 'string' ? body.sourceKey : undefined,
+        sourceUrl: typeof body.sourceUrl === 'string' ? body.sourceUrl : null,
+        sourceCategory: typeof body.sourceCategory === 'string' ? body.sourceCategory : null,
+        category: body.category as CatalogueCategory,
+        subcategory: typeof body.subcategory === 'string' ? body.subcategory.trim() || null : null,
+        manufacturer: String(body.manufacturer || 'Unspecified').trim(),
+        brand: String(body.brand || body.manufacturer || 'Unspecified').trim(),
+        productName,
+        modelNumber: String(body.modelNumber || 'Not specified').trim(),
+        sku: typeof body.sku === 'string' ? body.sku.trim() || null : null,
+        specification: String(body.specification || '').trim(),
+        technicalSpecs:
+          body.technicalSpecs && typeof body.technicalSpecs === 'object' ? body.technicalSpecs : undefined,
+        variants: Array.isArray(body.variants) ? body.variants : undefined,
+        rating: String(body.rating || '').trim(),
+        wattageW: typeof body.wattageW === 'number' && Number.isFinite(body.wattageW) ? body.wattageW : null,
+        cableSizeSqMm:
+          typeof body.cableSizeSqMm === 'number' && Number.isFinite(body.cableSizeSqMm)
+            ? body.cableSizeSqMm
+            : null,
+        dimensions: String(body.dimensions || '').trim(),
+        unit: String(body.unit || 'Nos').trim(),
+        mrp: typeof body.mrp === 'number' && Number.isFinite(body.mrp) ? body.mrp : null,
+        unitPrice:
+          typeof body.unitPrice === 'number' && Number.isFinite(body.unitPrice) ? body.unitPrice : null,
+        discountPercent:
+          typeof body.discountPercent === 'number' && Number.isFinite(body.discountPercent)
+            ? body.discountPercent
+            : null,
+        gstPercent:
+          typeof body.gstPercent === 'number' && Number.isFinite(body.gstPercent) ? body.gstPercent : null,
+        gstDetails: body.gstDetails ?? null,
+        imageStoragePath: typeof body.imageStoragePath === 'string' ? body.imageStoragePath : null,
+        imageUrl: typeof body.imageUrl === 'string' ? body.imageUrl : null,
+        galleryImages: Array.isArray(body.galleryImages) ? body.galleryImages : undefined,
+        datasheetUrl: typeof body.datasheetUrl === 'string' ? body.datasheetUrl : null,
+        manufacturerUrl: typeof body.manufacturerUrl === 'string' ? body.manufacturerUrl : null,
+        mappedItemType: body.mappedItemType,
+        source: body.source === 'csv-import' || body.source === 'cauvery-import' ? body.source : 'admin-entry',
+        isActive: true,
+      });
+      res.status(200).json({ ok: true, product: saved });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to save catalogue product.',
+      });
+    }
+  });
+
+  app.delete('/api/catalogue/products/:id', async (req: Request, res: Response) => {
+    const auth = await verifyAdminRequest(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    try {
+      await deleteCentralProduct(String(req.params.id || '').trim());
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to delete catalogue product.',
+      });
+    }
+  });
+
+  app.post('/api/catalogue/manufacturers', async (req: Request, res: Response) => {
+    const auth = await verifyAdminRequest(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    if (!name) {
+      res.status(400).json({ ok: false, error: 'Manufacturer name is required.' });
+      return;
+    }
+    try {
+      const saved = await upsertCentralManufacturer({
+        id: typeof req.body?.id === 'string' ? req.body.id : undefined,
+        slug: typeof req.body?.slug === 'string' ? req.body.slug : undefined,
+        name,
+        websiteUrl: typeof req.body?.websiteUrl === 'string' ? req.body.websiteUrl.trim() : '',
+        logoUrl: typeof req.body?.logoUrl === 'string' ? req.body.logoUrl.trim() || null : null,
+        logoStoragePath:
+          typeof req.body?.logoStoragePath === 'string' ? req.body.logoStoragePath : null,
+        primaryCategories: Array.isArray(req.body?.primaryCategories)
+          ? req.body.primaryCategories
+          : [],
+        notes: typeof req.body?.notes === 'string' ? req.body.notes.trim() : '',
+        source: req.body?.source || 'admin-entry',
+      });
+      res.status(200).json({ ok: true, manufacturer: saved });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to save manufacturer.',
+      });
+    }
+  });
+
+  app.delete('/api/catalogue/manufacturers/:slug', async (req: Request, res: Response) => {
+    const auth = await verifyAdminRequest(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    try {
+      await deleteCentralManufacturer(String(req.params.slug || '').trim());
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to delete manufacturer.',
+      });
+    }
+  });
+
+  app.get('/api/catalogue/import/cauvery/status', async (_req: Request, res: Response) => {
+    try {
+      const status = await getCauveryImportStatus();
+      res.json({
+        ok: true,
+        status,
+        supabaseServerConfigured: isServerSupabaseConfigured(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to read import status.',
+      });
+    }
+  });
+
+  app.post('/api/catalogue/import/cauvery/start', async (req: Request, res: Response) => {
+    const auth = await verifyAdminRequest(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    const resume = Boolean(req.body?.resume);
+    void runCauveryCatalogueImport({ resume, pageSize: 50, downloadImages: true }).catch((err) => {
+      console.error('[Cauvery Import] Background import failed:', err);
+    });
+    const status = await getCauveryImportStatus();
+    res.status(202).json({ ok: true, status });
+  });
+
+  app.post('/api/catalogue/import/cauvery/pause', async (req: Request, res: Response) => {
+    const auth = await verifyAdminRequest(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    requestPauseCauveryImport();
+    const status = await getCauveryImportStatus();
+    res.status(200).json({ ok: true, status });
   });
 
   app.use((err: unknown, _req: Request, res: Response, next: (err?: unknown) => void) => {

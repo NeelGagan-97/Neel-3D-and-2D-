@@ -56,6 +56,7 @@ export const ELECTRICAL_ITEM_OPTIONS_BY_DOMAIN: Record<
   appliance: [
     { itemType: 'split_ac', label: 'Split AC Point', category: 'Appliances' },
     { itemType: 'geyser', label: 'Geyser / Water Heater', category: 'Appliances' },
+    { itemType: 'refrigerator', label: 'Refrigerator', category: 'Appliances' },
     { itemType: 'appliance', label: 'General Appliance Point', category: 'Appliances' },
   ],
   distribution: [

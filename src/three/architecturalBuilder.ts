@@ -567,6 +567,26 @@ function buildElectricalFixture(
     dial.rotation.x = Math.PI / 2;
     dial.position.set(0, -0.12, 0.18);
     group.add(tank, capTop, capBot, dial);
+  } else if (pt.itemType === 'refrigerator') {
+    const steelMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0xcbd5e1,
+        roughness: 0.24,
+        metalness: 0.72,
+      })
+    );
+    const body = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.72, 1.65, 0.68)), steelMat);
+    body.position.y = 0;
+    const seam = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.73, 0.02, 0.69)), darkMetal);
+    seam.position.y = 0.24;
+    const handleGeo = trackGeo(new THREE.BoxGeometry(0.025, 0.34, 0.04));
+    const upperHandle = new THREE.Mesh(handleGeo, darkMetal);
+    upperHandle.position.set(-0.28, 0.52, 0.36);
+    const lowerHandle = new THREE.Mesh(handleGeo, darkMetal);
+    lowerHandle.position.set(-0.28, -0.05, 0.36);
+    const displayPanel = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.14, 0.18, 0.02)), electricBlueMat);
+    displayPanel.position.set(0.14, 0.48, 0.345);
+    group.add(body, seam, upperHandle, lowerHandle, displayPanel);
   } else if (pt.itemType === 'switchboard' || pt.itemType === 'switch') {
     const plate = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.24, 0.14, 0.03)), darkMetal);
     const trim = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.22, 0.12, 0.035)), electricBlueMat);
@@ -655,6 +675,7 @@ export interface SceneVisualOverlays {
   selectedIds?: Set<string>;
   highlightedIds?: Set<string>;
   activeHighlightId?: string | null;
+  isolatedRoomId?: string | null;
 }
 
 /**
@@ -944,6 +965,10 @@ export function buildArchitecturalScene(
     const selectedIds = visualOverlays?.selectedIds;
     const highlightedIds = visualOverlays?.highlightedIds;
     const activeHighlightId = visualOverlays?.activeHighlightId ?? null;
+    const isolatedRoom = visualOverlays?.isolatedRoomId
+      ? project.rooms.find((r) => r.id === visualOverlays.isolatedRoomId) ?? null
+      : null;
+    const isolatedRoomFloor = isolatedRoom ? getItemFloor(isolatedRoom) : null;
 
     const { lengthM, widthM, ceilingM, wallThickM } = siteToMeters(project.site);
     const halfL = lengthM / 2;
@@ -951,11 +976,13 @@ export function buildArchitecturalScene(
     const allFloors: FloorLevelConfig[] = getProjectFloors(project);
     const totalFloors = allFloors.length;
     const activeFloorCfg =
-      allFloors.find((f) => f.floor === activeFloor) ?? allFloors[0];
+      allFloors.find((f) => f.floor === (isolatedRoomFloor ?? activeFloor)) ?? allFloors[0];
     const activeFloorIdx = Math.max(0, allFloors.findIndex((f) => f.floor === activeFloorCfg.floor));
 
     let visibleFloorConfigs: FloorLevelConfig[];
-    if (floorViewMode === 'active-only') {
+    if (isolatedRoom) {
+      visibleFloorConfigs = [activeFloorCfg];
+    } else if (floorViewMode === 'active-only') {
       visibleFloorConfigs = [activeFloorCfg];
     } else if (floorViewMode === 'up-to-active') {
       visibleFloorConfigs = allFloors.filter(
@@ -972,7 +999,7 @@ export function buildArchitecturalScene(
     }
 
     const visibleFloorSet = new Set(visibleFloorConfigs.map((f) => f.floor));
-    const isExploded = floorViewMode === 'exploded';
+    const isExploded = !isolatedRoom && floorViewMode === 'exploded';
 
     const renderedFloorY = new Map<number, number>();
     visibleFloorConfigs.forEach((fc, idx) => {
@@ -1107,15 +1134,21 @@ export function buildArchitecturalScene(
               : clearH;
       const frontWallH = fc.kind === 'terrace' ? clearH : cutawayWalls ? 0.85 : wallH;
 
-      // 1. Structural Concrete Slab
+      // 1. Structural Concrete Slab (scoped tightly to isolated room when in Room-Level View)
       const flBounds = getFloorBoundaryMeters(project, floorNum);
       const flL = flBounds.lengthM;
       const flW = flBounds.widthM;
-      const slabCenterX = toWorldX(flL / 2);
-      const slabCenterZ = toWorldZ(flW / 2);
+      const slabCenterX = isolatedRoom
+        ? toWorldX(isolatedRoom.x + isolatedRoom.width / 2)
+        : toWorldX(flL / 2);
+      const slabCenterZ = isolatedRoom
+        ? toWorldZ(isolatedRoom.y + isolatedRoom.height / 2)
+        : toWorldZ(flW / 2);
+      const slabSpanL = isolatedRoom ? isolatedRoom.width + 0.36 : flL + 0.5;
+      const slabSpanW = isolatedRoom ? isolatedRoom.height + 0.36 : flW + 0.5;
       const slabH = Math.max(0.12, fc.slabThicknessM || STORY_SLAB_THICKNESS);
       const slab = new THREE.Mesh(
-        trackGeo(new THREE.BoxGeometry(flL + 0.5, slabH, flW + 0.5)),
+        trackGeo(new THREE.BoxGeometry(slabSpanL, slabH, slabSpanW)),
         fc.kind === 'basement' ? basementSlabMat : floorNum === 1 ? slabMat : upperSlabMat
       );
       slab.position.set(slabCenterX, -slabH / 2, slabCenterZ);
@@ -1124,16 +1157,17 @@ export function buildArchitecturalScene(
       floorGroup.add(slab);
 
       // Architectural perimeter fascia trim (immediately dispose temporary BoxGeometry source!)
-      const trimColor =
-        totalFloors > 1 && isActiveFloor
+      const trimColor = isolatedRoom
+        ? 0x00a8ff
+        : totalFloors > 1 && isActiveFloor
           ? 0x00a8ff
           : fc.kind === 'terrace'
             ? 0xf59e0b
             : fc.kind === 'basement'
               ? 0x64748b
               : 0x38bdf8;
-      const trimOpacity = totalFloors > 1 && isActiveFloor ? 0.94 : 0.56;
-      const trimSourceBox = new THREE.BoxGeometry(flL + 0.52, slabH, flW + 0.52);
+      const trimOpacity = isolatedRoom ? 0.96 : totalFloors > 1 && isActiveFloor ? 0.94 : 0.56;
+      const trimSourceBox = new THREE.BoxGeometry(slabSpanL + 0.02, slabH, slabSpanW + 0.02);
       const trimGeo = trackGeo(new THREE.EdgesGeometry(trimSourceBox));
       trimSourceBox.dispose();
       const trimLines = new THREE.LineSegments(
@@ -1145,8 +1179,8 @@ export function buildArchitecturalScene(
       trimLines.position.set(slabCenterX, -slabH / 2, slabCenterZ);
       floorGroup.add(trimLines);
 
-      // Structural perimeter columns
-      if (totalFloors > 1 && fc.kind !== 'terrace' && (hasFloorAbove || floorNum !== 1)) {
+      // Structural perimeter columns (hidden in isolated room view for clean top-down editing)
+      if (!isolatedRoom && totalFloors > 1 && fc.kind !== 'terrace' && (hasFloorAbove || floorNum !== 1)) {
         const colH = hasFloorAbove ? clearH : wallH;
         const colSize = Math.max(0.24, wallThickM + 0.08);
         const minX = toWorldX(0);
@@ -1176,8 +1210,11 @@ export function buildArchitecturalScene(
       }
 
       // 2. Room Floor Finishes (exact polygon ExtrudeGeometry for irregular/angled CAD rooms; BoxGeometry for rectangular rooms)
-      if (floorSlice.rooms.length > 0) {
-        floorSlice.rooms.forEach((room) => {
+      const roomsToRender = isolatedRoom
+        ? floorSlice.rooms.filter((r) => r.id === isolatedRoom.id)
+        : floorSlice.rooms;
+      if (roomsToRender.length > 0) {
+        roomsToRender.forEach((room) => {
           const mat = floorMaterials[room.floorFinish] ?? floorMaterials.wood;
           const poly = room.polygon;
           if (Array.isArray(poly) && poly.length >= 3) {
@@ -1205,7 +1242,9 @@ export function buildArchitecturalScene(
             const floorMesh = new THREE.Mesh(trackGeo(extrudeGeo), mat);
             floorMesh.position.y = 0.002;
             floorMesh.receiveShadow = true;
+            floorMesh.userData.roomId = room.id;
             floorGroup.add(floorMesh);
+            clickables.push(floorMesh);
           } else {
             const floorMesh = new THREE.Mesh(
               trackGeo(
@@ -1223,10 +1262,29 @@ export function buildArchitecturalScene(
               toWorldZ(room.y + room.height / 2)
             );
             floorMesh.receiveShadow = true;
+            floorMesh.userData.roomId = room.id;
             floorGroup.add(floorMesh);
+            clickables.push(floorMesh);
+          }
+
+          // Luminous boundary highlight frame when this room is isolated for Room-Level Electrical Design
+          if (isolatedRoom && isolatedRoom.id === room.id) {
+            const borderBox = new THREE.BoxGeometry(room.width, 0.06, room.height);
+            const borderEdges = trackGeo(new THREE.EdgesGeometry(borderBox));
+            borderBox.dispose();
+            const borderLines = new THREE.LineSegments(
+              borderEdges,
+              trackMat(new THREE.LineBasicMaterial({ color: 0x00a8ff, transparent: true, opacity: 0.95 }))
+            );
+            borderLines.position.set(
+              toWorldX(room.x + room.width / 2),
+              0.05,
+              toWorldZ(room.y + room.height / 2)
+            );
+            floorGroup.add(borderLines);
           }
         });
-      } else if (floorNum !== 1 || fc.kind === 'terrace') {
+      } else if (!isolatedRoom && (floorNum !== 1 || fc.kind === 'terrace')) {
         const deckMesh = new THREE.Mesh(
           trackGeo(
             new THREE.BoxGeometry(
@@ -1273,73 +1331,145 @@ export function buildArchitecturalScene(
 
       // 3. Structural Exterior Walls & Interior Partition Walls
       const primaryExtMat = fc.kind === 'basement' ? basementWallMat : extWallMat;
+      const selectedWallMat = trackMat(
+        new THREE.MeshStandardMaterial({
+          color: 0x38bdf8,
+          emissive: new THREE.Color(0x0284c7),
+          emissiveIntensity: 0.35,
+          roughness: 0.55,
+          metalness: 0.1,
+        })
+      );
       const addWallSegment = (
         cx: number,
         cz: number,
         len: number,
         thick: number,
         rotY: number,
-        isExterior: boolean
+        isExterior: boolean,
+        segId: string,
+        segSource: 'perimeter' | 'room' | 'custom',
+        overrideH?: number
       ) => {
-        const h = isExterior ? wallH : hasFloorAbove ? wallH * 0.96 : wallH * 0.92;
+        const isSelWall = !!selectedIds?.has(segId) || activeHighlightId === segId;
+        const h =
+          overrideH ??
+          (isolatedRoom
+            ? 0.92
+            : isExterior
+              ? wallH
+              : hasFloorAbove
+                ? wallH * 0.96
+                : wallH * 0.92);
+        const sideMat = isSelWall
+          ? selectedWallMat
+          : isExterior
+            ? primaryExtMat
+            : intWallMat;
+        const capMat = isSelWall ? selectedWallMat : wallTopCapMat;
         const wall = new THREE.Mesh(
           trackGeo(new THREE.BoxGeometry(len, h, thick)),
           [
-            primaryExtMat,
-            primaryExtMat,
-            wallTopCapMat,
-            primaryExtMat,
-            isExterior ? primaryExtMat : intWallMat,
-            isExterior ? primaryExtMat : intWallMat,
+            isSelWall ? selectedWallMat : primaryExtMat,
+            isSelWall ? selectedWallMat : primaryExtMat,
+            capMat,
+            isSelWall ? selectedWallMat : primaryExtMat,
+            sideMat,
+            sideMat,
           ]
         );
         wall.position.set(cx, h / 2, cz);
         wall.rotation.y = rotY;
         wall.castShadow = true;
         wall.receiveShadow = true;
+        wall.userData.wallId = segId;
+        wall.userData.wallFloor = floorNum;
+        wall.userData.wallSource = segSource;
         floorGroup.add(wall);
+        clickables.push(wall);
       };
 
-      const mergedWalls = extractMergedWalls(floorSlice);
+      const mergedWalls = extractMergedWalls(floorSlice, { floor: floorNum });
 
       mergedWalls.forEach((seg) => {
+        if (isolatedRoom) {
+          // Keep only walls touching or inside the isolated room bounds (+0.22m margin)
+          const minX = isolatedRoom.x - 0.22;
+          const maxX = isolatedRoom.x + isolatedRoom.width + 0.22;
+          const minY = isolatedRoom.y - 0.22;
+          const maxY = isolatedRoom.y + isolatedRoom.height + 0.22;
+          const segMinX = Math.min(seg.x1, seg.x2);
+          const segMaxX = Math.max(seg.x1, seg.x2);
+          const segMinY = Math.min(seg.y1, seg.y2);
+          const segMaxY = Math.max(seg.y1, seg.y2);
+          if (segMaxX < minX || segMinX > maxX || segMaxY < minY || segMinY > maxY) {
+            return;
+          }
+        }
+
         const dx = seg.x2 - seg.x1;
         const dy = seg.y2 - seg.y1;
         const len = Math.hypot(dx, dy);
         // Preserve short curved-wall chords & chamfer segments down to 4 cm
         if (len < 0.04) return;
 
-        const cx = toWorldX((seg.x1 + seg.x2) / 2);
-        const cz = toWorldZ((seg.y1 + seg.y2) / 2);
-        const angle = -Math.atan2(dy, dx);
+        // Clip long walls to isolated room boundaries so cutaway stays crisp
+        let x1 = seg.x1;
+        let y1 = seg.y1;
+        let x2 = seg.x2;
+        let y2 = seg.y2;
+        if (isolatedRoom) {
+          const isHoriz = Math.abs(dy) < 0.02;
+          const isVert = Math.abs(dx) < 0.02;
+          if (isHoriz) {
+            x1 = Math.max(isolatedRoom.x, Math.min(isolatedRoom.x + isolatedRoom.width, x1));
+            x2 = Math.max(isolatedRoom.x, Math.min(isolatedRoom.x + isolatedRoom.width, x2));
+          } else if (isVert) {
+            y1 = Math.max(isolatedRoom.y, Math.min(isolatedRoom.y + isolatedRoom.height, y1));
+            y2 = Math.max(isolatedRoom.y, Math.min(isolatedRoom.y + isolatedRoom.height, y2));
+          }
+        }
 
-        if (seg.id === 'ext-s') {
-          const frontWall = new THREE.Mesh(
-            trackGeo(new THREE.BoxGeometry(len + seg.thickness, frontWallH, seg.thickness)),
-            [primaryExtMat, primaryExtMat, wallTopCapMat, primaryExtMat, primaryExtMat, primaryExtMat]
-          );
-          frontWall.position.set(cx, frontWallH / 2, cz);
-          frontWall.castShadow = true;
-          frontWall.receiveShadow = true;
-          floorGroup.add(frontWall);
+        const cdx = x2 - x1;
+        const cdy = y2 - y1;
+        const cLen = Math.hypot(cdx, cdy);
+        if (cLen < 0.04) return;
+
+        const cx = toWorldX((x1 + x2) / 2);
+        const cz = toWorldZ((y1 + y2) / 2);
+        const angle = -Math.atan2(cdy, cdx);
+
+        if (seg.id === 'ext-s' && !isolatedRoom) {
+          addWallSegment(cx, cz, cLen + seg.thickness, seg.thickness, angle, true, seg.id, seg.source, frontWallH);
           return;
         }
 
-        const isAngledOrCurved = Math.abs(dx) > 0.01 && Math.abs(dy) > 0.01;
+        const isAngledOrCurved = Math.abs(cdx) > 0.01 && Math.abs(cdy) > 0.01;
         const extraLen =
-          seg.id === 'ext-n'
+          seg.id === 'ext-n' && !isolatedRoom
             ? seg.thickness
             : isAngledOrCurved
               ? seg.thickness * 0.24
               : seg.thickness * 0.08;
-        addWallSegment(cx, cz, len + extraLen, seg.thickness, angle, seg.isExterior);
+        addWallSegment(cx, cz, cLen + extraLen, seg.thickness, angle, seg.isExterior, seg.id, seg.source);
       });
 
       // 4. Doors & Windows on this floor
       floorSlice.openings.forEach((op) => {
+        if (isolatedRoom) {
+          if (
+            op.x < isolatedRoom.x - 0.3 ||
+            op.x > isolatedRoom.x + isolatedRoom.width + 0.3 ||
+            op.y < isolatedRoom.y - 0.3 ||
+            op.y > isolatedRoom.y + isolatedRoom.height + 0.3
+          ) {
+            return;
+          }
+        }
         const g = new THREE.Group();
+        const effWallH = isolatedRoom ? 0.92 : wallH;
         if (op.kind === 'window') {
-          const winH = Math.min(1.25, wallH * 0.65);
+          const winH = Math.min(1.25, effWallH * 0.65);
           const frame = new THREE.Mesh(
             trackGeo(new THREE.BoxGeometry(op.width, winH, wallThickM + 0.06)),
             frameMat
@@ -1349,9 +1479,9 @@ export function buildArchitecturalScene(
             glassMat
           );
           g.add(frame, pane);
-          g.position.set(toWorldX(op.x), Math.min(1.45, wallH * 0.62), toWorldZ(op.y));
+          g.position.set(toWorldX(op.x), Math.min(1.45, effWallH * 0.62), toWorldZ(op.y));
         } else {
-          const doorH = Math.min(2.1, wallH - 0.08);
+          const doorH = Math.min(2.1, effWallH - 0.08);
           const leaf = new THREE.Mesh(
             trackGeo(new THREE.BoxGeometry(op.width, doorH, wallThickM + 0.04)),
             doorWoodMat
@@ -1368,23 +1498,33 @@ export function buildArchitecturalScene(
         floorGroup.add(g);
       });
 
-      // 5. Composite 3D Staircases starting from this floor
-      (project.staircases ?? [])
-        .filter((st) => st.fromFloor === floorNum)
-        .forEach((st) => {
-          const fromElev = getFloorElevationM(project, st.fromFloor);
-          const toElev = getFloorElevationM(project, st.toFloor);
-          const actualRise = Math.max(1.8, Math.abs(toElev - fromElev) || clearH + slabH);
-          const isSelStair = !!selectedIds?.has(st.id) || activeHighlightId === st.id;
-          const stGrp = buildStaircaseGroup(st, actualRise, isSelStair, tracker);
-          stGrp.position.set(toWorldX(st.x), 0.02, toWorldZ(st.y));
-          stGrp.rotation.y = -(st.rotation * Math.PI) / 180;
-          floorGroup.add(stGrp);
-          clickables.push(stGrp);
-        });
+      // 5. Composite 3D Staircases starting from this floor (omitted in isolated room view)
+      if (!isolatedRoom) {
+        (project.staircases ?? [])
+          .filter((st) => st.fromFloor === floorNum)
+          .forEach((st) => {
+            const fromElev = getFloorElevationM(project, st.fromFloor);
+            const toElev = getFloorElevationM(project, st.toFloor);
+            const actualRise = Math.max(1.8, Math.abs(toElev - fromElev) || clearH + slabH);
+            const isSelStair = !!selectedIds?.has(st.id) || activeHighlightId === st.id;
+            const stGrp = buildStaircaseGroup(st, actualRise, isSelStair, tracker);
+            stGrp.position.set(toWorldX(st.x), 0.02, toWorldZ(st.y));
+            stGrp.rotation.y = -(st.rotation * Math.PI) / 180;
+            floorGroup.add(stGrp);
+            clickables.push(stGrp);
+          });
+      }
 
       // 6. Composite 3D Furniture on this floor
       floorSlice.furniture.forEach((f) => {
+        if (isolatedRoom && f.roomId !== isolatedRoom.id) {
+          const inside =
+            f.x >= isolatedRoom.x &&
+            f.x <= isolatedRoom.x + isolatedRoom.width &&
+            f.y >= isolatedRoom.y &&
+            f.y <= isolatedRoom.y + isolatedRoom.height;
+          if (!inside) return;
+        }
         const fg = buildFurnitureGroup(f, tracker);
         fg.position.set(toWorldX(f.x), 0.03, toWorldZ(f.y));
         fg.rotation.y = -(f.rotation * Math.PI) / 180;
@@ -1420,6 +1560,14 @@ export function buildArchitecturalScene(
 
       // 7. Composite 3D Electrical Fixtures on this floor
       floorSlice.points.forEach((pt) => {
+        if (isolatedRoom && pt.roomId !== isolatedRoom.id) {
+          const inside =
+            pt.x >= isolatedRoom.x - 0.1 &&
+            pt.x <= isolatedRoom.x + isolatedRoom.width + 0.1 &&
+            pt.y >= isolatedRoom.y - 0.1 &&
+            pt.y <= isolatedRoom.y + isolatedRoom.height + 0.1;
+          if (!inside) return;
+        }
         const isSelected = pt.id === selectedPointId || !!selectedIds?.has(pt.id);
         const isActiveFind = activeHighlightId === pt.id;
         const isFindMatch = !!highlightedIds?.has(pt.id);
@@ -1492,15 +1640,32 @@ export function buildArchitecturalScene(
       });
     });
 
-    // 8. 3D Electrical Wire Conduits (same-floor routing + inter-floor vertical risers)
+    // 8. 3D Electrical Wire Conduits (same-floor X/Y/Z routing, curved/freeform/orthogonal + inter-floor risers)
     const wiringCfg = getWiringConfig(project);
     if (wiringCfg.showWires && wiringCfg.show3DWires && (project.wires ?? []).length > 0) {
       const pointById = new Map(project.points.map((p) => [p.id, p]));
+      const handleGeo = trackGeo(new THREE.SphereGeometry(0.09, 14, 14));
       (project.wires ?? []).forEach((wire) => {
         if (!wiringCfg.visibleCategories[wire.category]) return;
         const fromPt = pointById.get(wire.fromPointId);
         const toPt = pointById.get(wire.toPointId);
         if (!fromPt || !toPt) return;
+
+        if (isolatedRoom) {
+          const fromIn =
+            fromPt.roomId === isolatedRoom.id ||
+            (fromPt.x >= isolatedRoom.x &&
+              fromPt.x <= isolatedRoom.x + isolatedRoom.width &&
+              fromPt.y >= isolatedRoom.y &&
+              fromPt.y <= isolatedRoom.y + isolatedRoom.height);
+          const toIn =
+            toPt.roomId === isolatedRoom.id ||
+            (toPt.x >= isolatedRoom.x &&
+              toPt.x <= isolatedRoom.x + isolatedRoom.width &&
+              toPt.y >= isolatedRoom.y &&
+              toPt.y <= isolatedRoom.y + isolatedRoom.height);
+          if (!fromIn && !toIn) return;
+        }
 
         const fromFl = getItemFloor(fromPt);
         const toFl = getItemFloor(toPt);
@@ -1515,7 +1680,7 @@ export function buildArchitecturalScene(
           fromBaseY + Math.max(0.35, Math.min(fromPt.z, (fromCfg?.floorHeightM ?? ceilingM) - 0.12));
         const toY =
           toBaseY + Math.max(0.35, Math.min(toPt.z, (toCfg?.floorHeightM ?? ceilingM) - 0.12));
-        const routePlaneY =
+        const defaultRoutePlaneY =
           fromFl === toFl
             ? Math.max(
                 fromY,
@@ -1524,33 +1689,51 @@ export function buildArchitecturalScene(
               )
             : fromY;
 
-        const pathPts: THREE.Vector3[] = [];
+        const wps = wire.waypoints ?? [];
+        const resolveWpY = (wp: { z?: number }, fallbackY: number) =>
+          typeof wp.z === 'number' && Number.isFinite(wp.z)
+            ? fromBaseY + Math.max(0.1, wp.z)
+            : fallbackY;
+
         const sx = toWorldX(fromPt.x);
         const sz = toWorldZ(fromPt.y);
         const ex = toWorldX(toPt.x);
         const ez = toWorldZ(toPt.y);
 
-        pathPts.push(new THREE.Vector3(sx, fromY, sz));
+        const routePts: THREE.Vector3[] = [];
+        const wpWorldCoords: Array<{ pos: THREE.Vector3; index: number }> = [];
+
         if (fromFl === toFl) {
-          if (Math.abs(routePlaneY - fromY) > 0.08) {
-            pathPts.push(new THREE.Vector3(sx, routePlaneY, sz));
-          }
-          (wire.waypoints ?? []).forEach((wp) => {
-            pathPts.push(new THREE.Vector3(toWorldX(wp.x), routePlaneY, toWorldZ(wp.y)));
+          const firstY = wps.length > 0 ? resolveWpY(wps[0], defaultRoutePlaneY) : defaultRoutePlaneY;
+          const lastY =
+            wps.length > 0 ? resolveWpY(wps[wps.length - 1], defaultRoutePlaneY) : defaultRoutePlaneY;
+          routePts.push(new THREE.Vector3(sx, firstY, sz));
+          wps.forEach((wp, wpIdx) => {
+            const pos = new THREE.Vector3(
+              toWorldX(wp.x),
+              resolveWpY(wp, defaultRoutePlaneY),
+              toWorldZ(wp.y)
+            );
+            routePts.push(pos);
+            wpWorldCoords.push({ pos, index: wpIdx });
           });
-          if (Math.abs(routePlaneY - toY) > 0.08) {
-            pathPts.push(new THREE.Vector3(ex, routePlaneY, ez));
-          }
-          pathPts.push(new THREE.Vector3(ex, toY, ez));
+          routePts.push(new THREE.Vector3(ex, lastY, ez));
         } else {
-          const riserX = wire.waypoints?.[0] ? toWorldX(wire.waypoints[0].x) : sx;
-          const riserZ = wire.waypoints?.[0] ? toWorldZ(wire.waypoints[0].y) : sz;
-          pathPts.push(new THREE.Vector3(riserX, fromY, riserZ));
-          pathPts.push(new THREE.Vector3(riserX, toY, riserZ));
-          (wire.waypoints ?? []).slice(1).forEach((wp) => {
-            pathPts.push(new THREE.Vector3(toWorldX(wp.x), toY, toWorldZ(wp.y)));
+          const riserX = wps[0] ? toWorldX(wps[0].x) : sx;
+          const riserZ = wps[0] ? toWorldZ(wps[0].y) : sz;
+          const riserY0 = wps[0] ? resolveWpY(wps[0], fromY) : fromY;
+          routePts.push(new THREE.Vector3(sx, fromY, sz));
+          routePts.push(new THREE.Vector3(riserX, riserY0, riserZ));
+          if (wps[0]) {
+            wpWorldCoords.push({ pos: new THREE.Vector3(riserX, riserY0, riserZ), index: 0 });
+          }
+          routePts.push(new THREE.Vector3(riserX, toY, riserZ));
+          wps.slice(1).forEach((wp, i) => {
+            const pos = new THREE.Vector3(toWorldX(wp.x), resolveWpY(wp, toY), toWorldZ(wp.y));
+            routePts.push(pos);
+            wpWorldCoords.push({ pos, index: i + 1 });
           });
-          pathPts.push(new THREE.Vector3(ex, toY, ez));
+          routePts.push(new THREE.Vector3(ex, toY, ez));
         }
 
         const isSelWire = !!selectedIds?.has(wire.id) || activeHighlightId === wire.id;
@@ -1567,19 +1750,97 @@ export function buildArchitecturalScene(
 
         const wireGroup = new THREE.Group();
         const radius = isSelWire ? 0.036 : Math.max(0.018, wire.lineThickness * 0.01);
-        for (let i = 0; i < pathPts.length - 1; i++) {
-          const a = pathPts[i];
-          const b = pathPts[i + 1];
-          const segLen = a.distanceTo(b);
-          if (segLen < 0.02) continue;
-          const curve = new THREE.LineCurve3(a, b);
-          const tube = new THREE.Mesh(
-            trackGeo(new THREE.TubeGeometry(curve, 2, radius, 6, false)),
-            conduitMat
-          );
-          tube.userData.wireId = wire.id;
-          wireGroup.add(tube);
+
+        // Endpoint vertical risers (always keep cable attached to fromPt & toPt)
+        if (fromFl === toFl) {
+          const firstRoutePt = routePts[0];
+          const lastRoutePt = routePts[routePts.length - 1];
+          if (Math.abs(firstRoutePt.y - fromY) > 0.04) {
+            const startDrop = new THREE.LineCurve3(new THREE.Vector3(sx, fromY, sz), firstRoutePt);
+            const dropMesh = new THREE.Mesh(
+              trackGeo(new THREE.TubeGeometry(startDrop, 2, radius, 6, false)),
+              conduitMat
+            );
+            dropMesh.userData.wireId = wire.id;
+            wireGroup.add(dropMesh);
+          }
+          if (Math.abs(lastRoutePt.y - toY) > 0.04) {
+            const endDrop = new THREE.LineCurve3(lastRoutePt, new THREE.Vector3(ex, toY, ez));
+            const dropMesh = new THREE.Mesh(
+              trackGeo(new THREE.TubeGeometry(endDrop, 2, radius, 6, false)),
+              conduitMat
+            );
+            dropMesh.userData.wireId = wire.id;
+            wireGroup.add(dropMesh);
+          }
         }
+
+        // Main cable run: smooth CatmullRomCurve3 for 'curved' mode, crisp segments for orthogonal/freeform
+        if (wire.routingMode === 'curved' && routePts.length >= 3) {
+          const deduped: THREE.Vector3[] = [];
+          routePts.forEach((p) => {
+            if (deduped.length === 0 || deduped[deduped.length - 1].distanceTo(p) > 0.02) {
+              deduped.push(p);
+            }
+          });
+          if (deduped.length >= 3) {
+            const spline = new THREE.CatmullRomCurve3(deduped, false, 'centripetal', 0.5);
+            const segments = Math.max(20, deduped.length * 14);
+            const tube = new THREE.Mesh(
+              trackGeo(new THREE.TubeGeometry(spline, segments, radius, 8, false)),
+              conduitMat
+            );
+            tube.userData.wireId = wire.id;
+            wireGroup.add(tube);
+          } else if (deduped.length === 2) {
+            const line = new THREE.LineCurve3(deduped[0], deduped[1]);
+            const tube = new THREE.Mesh(
+              trackGeo(new THREE.TubeGeometry(line, 2, radius, 6, false)),
+              conduitMat
+            );
+            tube.userData.wireId = wire.id;
+            wireGroup.add(tube);
+          }
+        } else {
+          for (let i = 0; i < routePts.length - 1; i++) {
+            const a = routePts[i];
+            const b = routePts[i + 1];
+            if (a.distanceTo(b) < 0.02) continue;
+            const curve = new THREE.LineCurve3(a, b);
+            const tube = new THREE.Mesh(
+              trackGeo(new THREE.TubeGeometry(curve, 2, radius, 6, false)),
+              conduitMat
+            );
+            tube.userData.wireId = wire.id;
+            wireGroup.add(tube);
+          }
+        }
+
+        // Interactive 3D Waypoint Control Handles when selected (drag in X/Y, Shift+drag for Z height)
+        if (isSelWire && wpWorldCoords.length > 0) {
+          const wpHandleMat = trackMat(
+            new THREE.MeshStandardMaterial({
+              color: 0x00a8ff,
+              emissive: new THREE.Color(0x00a8ff),
+              emissiveIntensity: 0.75,
+              roughness: 0.2,
+              metalness: 0.3,
+            })
+          );
+          wpWorldCoords.forEach(({ pos, index }) => {
+            const handle = new THREE.Mesh(handleGeo, wpHandleMat);
+            handle.position.copy(pos);
+            handle.userData.wireWaypoint = {
+              wireId: wire.id,
+              index,
+              floor: fromFl,
+              baseY: fromBaseY,
+            };
+            handle.userData.wireId = wire.id;
+            wireGroup.add(handle);
+          });
+        }
+
         wireGroup.userData.wireId = wire.id;
         electricalAnnotations.wiring.add(wireGroup);
         clickables.push(wireGroup);

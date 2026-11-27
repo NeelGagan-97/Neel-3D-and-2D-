@@ -15,18 +15,25 @@ import {
   StudioEntityRef,
   StudioFocusTarget,
   WireCategory,
+  WireRoutingMode,
   WireWaypoint,
 } from '../types/design';
 import {
+  appendPolylineVertex,
+  buildSmoothSvgPath,
   checkTerminalCompatibility,
   computeDetailedWireQuantityReport,
+  computePolylineSegmentMetrics,
   computeStaircaseFootprint,
   computeWireLengthBreakdown,
   CONDUCTOR_COLOR_LEGEND,
   DEFAULT_INSTALLATION_ALLOWANCE_PCT,
+  finalizePolylineWaypoints,
   getFloorBoundaryMeters,
   getFloorLabel,
   getWiringConfig,
+  resolvePolylineStartPoint,
+  sampleCurvedPath3D,
   WIRE_STANDARD_COLORS,
 } from '../utils/buildingWiring';
 import {
@@ -44,6 +51,7 @@ import {
   formatLength,
   getItemFloor,
   isPointInsideRoom,
+  MergedWallSegment,
   sliceProjectForFloor,
   snapCoordinate,
   snapCoordinateFree,
@@ -109,6 +117,23 @@ interface FloorPlan2DProps {
   onValidationWarning?: (message: string) => void;
   onApprove2DFor3D?: () => void;
   onExportDxf?: () => void;
+  isolatedRoomId?: string | null;
+  activeWireRoutingMode?: WireRoutingMode;
+  activeWireDefaultZ?: number;
+  wireConfigReady?: boolean;
+  wireGridSnap?: boolean;
+  pendingStartWirePointId?: string | null;
+  pendingStartWireCoord?: { x: number; y: number } | null;
+  onRequestCableConfig?: (startPointId?: string, startCoord?: { x: number; y: number }) => void;
+  onConsumePendingStartWirePoint?: () => void;
+  onEnterRoomView?: (roomId: string) => void;
+  onToggleHideWall?: (floor: number, wallId: string) => void;
+  onUpdateWallEndpoints?: (
+    wallId: string,
+    patch: { x1?: number; y1?: number; x2?: number; y2?: number },
+    recordHistory?: boolean
+  ) => void;
+  onMaterializeAndSelectWall?: (wallSeg: MergedWallSegment) => string | null;
 }
 
 const CIRCUIT_COLORS: Record<CircuitId, string> = {
@@ -205,6 +230,19 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   onValidationWarning,
   onApprove2DFor3D,
   onExportDxf,
+  isolatedRoomId = null,
+  activeWireRoutingMode = 'freeform',
+  activeWireDefaultZ,
+  wireConfigReady = true,
+  wireGridSnap = false,
+  pendingStartWirePointId = null,
+  pendingStartWireCoord = null,
+  onRequestCableConfig,
+  onConsumePendingStartWirePoint,
+  onEnterRoomView,
+  onToggleHideWall,
+  onUpdateWallEndpoints,
+  onMaterializeAndSelectWall,
 }) => {
   const project = useMemo(
     () => sliceProjectForFloor(fullProject, activeFloor),
@@ -352,6 +390,10 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     waypoints: WireWaypoint[];
     preview: { x: number; y: number } | null;
   } | null>(null);
+  const [selectedVertexRef, setSelectedVertexRef] = useState<{
+    wireId: string;
+    index: number;
+  } | null>(null);
   const [draggingWaypoint, setDraggingWaypoint] = useState<{
     wireId: string;
     index: number;
@@ -363,6 +405,11 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     startY: number;
     origWaypoints: WireWaypoint[];
     moved: boolean;
+    snapshotRecorded: boolean;
+  } | null>(null);
+  const [draggingWallEndpoint, setDraggingWallEndpoint] = useState<{
+    wallId: string;
+    endpoint: 'start' | 'end';
     snapshotRecorded: boolean;
   } | null>(null);
   const [roomDrag, setRoomDrag] = useState<RoomDragState | null>(null);
@@ -383,34 +430,234 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     pointerId: number;
   } | null>(null);
 
-  // Clear active wire draft when switching away from add-wire or pressing Escape
+  // Clear active wire draft when switching away from add-wire
   useEffect(() => {
     if (activeTool !== 'add-wire' && wireDraft) {
       setWireDraft(null);
     }
   }, [activeTool, wireDraft]);
 
+  // Clear selected vertex grip if its wire is no longer selected
+  useEffect(() => {
+    if (!selectedVertexRef) return;
+    const stillSelected =
+      selectedEntity?.kind === 'wire' && selectedEntity.id === selectedVertexRef.wireId;
+    if (!stillSelected) {
+      setSelectedVertexRef(null);
+    }
+  }, [selectedEntity, selectedVertexRef]);
+
+  // Helper to finish an active AutoCAD LINE/POLYLINE cable route (used by Enter key & Double-click)
+  const finishWireDraft = (finishCoord?: { x: number; y: number } | null, isDoubleClick = false) => {
+    if (!wireDraft) return;
+    const fromPt = pointLookup.get(wireDraft.fromPointId);
+    if (!fromPt) {
+      setWireDraft(null);
+      return;
+    }
+    const lastAnchor =
+      finishCoord ??
+      wireDraft.preview ??
+      (wireDraft.waypoints.length > 0
+        ? wireDraft.waypoints[wireDraft.waypoints.length - 1]
+        : { x: fromPt.x, y: fromPt.y });
+
+    const candidates = allowInterFloorWiring ? fullProject.points : project.points;
+    let targetPt: ElectricalPoint | null = null;
+    let bestDist = Infinity;
+    candidates.forEach((pt) => {
+      if (pt.id === fromPt.id) return;
+      const compat = checkTerminalCompatibility(
+        fromPt,
+        pt,
+        activeWireCategory,
+        allowInterFloorWiring
+      );
+      if (!compat.compatible) return;
+      const d = Math.hypot(pt.x - lastAnchor.x, pt.y - lastAnchor.y);
+      if (d < bestDist) {
+        bestDist = d;
+        targetPt = pt;
+      }
+    });
+
+    if (!targetPt) {
+      onValidationWarning?.(
+        'Place at least two compatible electrical components to complete this cable route (press Esc to cancel).'
+      );
+      return;
+    }
+
+    const chosen = targetPt as ElectricalPoint;
+    const compat = checkTerminalCompatibility(
+      fromPt,
+      chosen,
+      activeWireCategory,
+      allowInterFloorWiring
+    );
+    if (!compat.compatible) {
+      onValidationWarning?.(compat.reason || 'Selected electrical terminals are incompatible.');
+      return;
+    }
+
+    const finalWaypoints = finalizePolylineWaypoints(wireDraft.waypoints, chosen, isDoubleClick);
+    if (compat.warning) {
+      onValidationWarning?.(compat.warning);
+    }
+    onCreateWire?.(fromPt.id, chosen.id, finalWaypoints);
+    setWireDraft(null);
+  };
+
+  // If user clicked the canvas or an electrical component to open the Cable Selection Popup and confirmed it,
+  // start AutoCAD LINE/POLYLINE drafting immediately from that exact starting point.
+  useEffect(() => {
+    if (
+      activeTool === 'add-wire' &&
+      wireConfigReady &&
+      (pendingStartWirePointId || pendingStartWireCoord) &&
+      !wireDraft
+    ) {
+      if (pendingStartWirePointId) {
+        const pt = pointLookup.get(pendingStartWirePointId);
+        if (pt) {
+          setWireDraft({
+            fromPointId: pt.id,
+            waypoints: [],
+            preview: { x: pt.x, y: pt.y },
+          });
+        }
+      } else if (pendingStartWireCoord) {
+        const candidates = allowInterFloorWiring ? fullProject.points : project.points;
+        const resolved = resolvePolylineStartPoint(pendingStartWireCoord, candidates, {
+          snapRadiusM: 0.55,
+          defaultZ: activeWireDefaultZ,
+        });
+        if (resolved) {
+          setWireDraft({
+            fromPointId: resolved.fromPoint.id,
+            waypoints: resolved.initialWaypoints,
+            preview:
+              resolved.initialWaypoints[0] ?? {
+                x: resolved.fromPoint.x,
+                y: resolved.fromPoint.y,
+              },
+          });
+        } else {
+          onValidationWarning?.(
+            'Place electrical components on this floor first before routing a cable.'
+          );
+        }
+      }
+      onConsumePendingStartWirePoint?.();
+    }
+  }, [
+    activeTool,
+    wireConfigReady,
+    pendingStartWirePointId,
+    pendingStartWireCoord,
+    wireDraft,
+    pointLookup,
+    allowInterFloorWiring,
+    fullProject.points,
+    project.points,
+    activeWireDefaultZ,
+    onConsumePendingStartWirePoint,
+    onValidationWarning,
+  ]);
+
+  // AutoCAD LINE/POLYLINE keyboard controls: Enter = finish, Esc = cancel, Backspace = undo last vertex
   useEffect(() => {
     if (!wireDraft) return;
     const onKey = (ev: KeyboardEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
       if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
         setWireDraft(null);
-      } else if (ev.key === 'Backspace' && wireDraft.waypoints.length > 0) {
-        setWireDraft((prev) =>
-          prev ? { ...prev, waypoints: prev.waypoints.slice(0, -1) } : null
-        );
+      } else if (ev.key === 'Enter') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        finishWireDraft(wireDraft.preview, false);
+      } else if (ev.key === 'Backspace') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (wireDraft.waypoints.length > 0) {
+          setWireDraft((prev) =>
+            prev ? { ...prev, waypoints: prev.waypoints.slice(0, -1) } : null
+          );
+        } else {
+          setWireDraft(null);
+        }
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [wireDraft]);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  });
+
+  // Delete / Backspace removes the focused vertex grip on a selected cable without deleting the cable itself
+  useEffect(() => {
+    if (!selectedVertexRef || !onUpdateWireWaypoints) return;
+    const onVertexKey = (ev: KeyboardEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (ev.key === 'Delete' || ev.key === 'Backspace') {
+        const wire = (fullProject.wires ?? []).find((w) => w.id === selectedVertexRef.wireId);
+        if (!wire || selectedVertexRef.index < 0 || selectedVertexRef.index >= wire.waypoints.length) {
+          setSelectedVertexRef(null);
+          return;
+        }
+        ev.preventDefault();
+        ev.stopPropagation();
+        onRecordHistorySnapshot?.();
+        onUpdateWireWaypoints(
+          wire.id,
+          wire.waypoints.filter((_, i) => i !== selectedVertexRef.index),
+          false
+        );
+        setSelectedVertexRef(null);
+      } else if (ev.key === 'Escape') {
+        setSelectedVertexRef(null);
+      }
+    };
+    window.addEventListener('keydown', onVertexKey, true);
+    return () => window.removeEventListener('keydown', onVertexKey, true);
+  }, [selectedVertexRef, fullProject.wires, onRecordHistorySnapshot, onUpdateWireWaypoints]);
 
   const { lengthM, widthM, ceilingM } = useMemo(() => siteToMeters(project.site), [project.site]);
   const floorBounds = useMemo(
     () => getFloorBoundaryMeters(fullProject, activeFloor),
     [fullProject, activeFloor]
   );
-  const mergedWalls = useMemo(() => extractMergedWalls(project), [project]);
+  const allMergedWalls = useMemo(
+    () => extractMergedWalls(project, { includeHidden: true, floor: activeFloor }),
+    [project, activeFloor]
+  );
+  const mergedWalls = useMemo(
+    () => allMergedWalls.filter((w) => !w.isHidden),
+    [allMergedWalls]
+  );
+  const isolatedRoom = useMemo(
+    () => (isolatedRoomId ? project.rooms.find((r) => r.id === isolatedRoomId) ?? null : null),
+    [project.rooms, isolatedRoomId]
+  );
+  const prevIsolatedRoomIdRef = useRef<string | null>(null);
   const units = project.site.units;
 
   // Calibrated 1:4 (width:height) CAD sheet with viewport-matched isotropic scaling (scaleX === scaleY)
@@ -471,6 +718,31 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     onPanChange({ x: nextPanX, y: nextPanY });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusTarget?.nonce]);
+
+  // Auto-frame isolated room top-down view in 2D and restore full building view when exiting (ESC)
+  useEffect(() => {
+    if (previewOnly || !onPanChange || !onZoomChange) return;
+    if (isolatedRoom) {
+      const roomWpx = Math.max(40, isolatedRoom.width * SCALE);
+      const roomHpx = Math.max(40, isolatedRoom.height * SCALE);
+      const fitZoom = Math.round(
+        Math.max(115, Math.min(280, Math.min((vbW * 0.72) / roomWpx, (vbH * 0.72) / roomHpx) * 100))
+      );
+      const zoomFactor = fitZoom / 100;
+      const roomCenterSheetX = originX + (isolatedRoom.x + isolatedRoom.width / 2) * SCALE;
+      const roomCenterSheetY = originY + (isolatedRoom.y + isolatedRoom.height / 2) * SCALE;
+      onZoomChange(fitZoom);
+      onPanChange({
+        x: Math.round((planCenterX - roomCenterSheetX) * zoomFactor),
+        y: Math.round((planCenterY - roomCenterSheetY) * zoomFactor),
+      });
+    } else if (prevIsolatedRoomIdRef.current !== null) {
+      onZoomChange(100);
+      onPanChange({ x: 0, y: 0 });
+    }
+    prevIsolatedRoomIdRef.current = isolatedRoom?.id ?? null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isolatedRoom?.id]);
 
   // Architectural grid step in SVG units (1 ft or 0.5 m minor; 5 ft or 2 m major)
   const minorGridM = units === 'ft' ? FT_TO_M : 0.5;
@@ -591,6 +863,24 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     // Placing an electrical component
     if (pendingPlaceItem && onPlacePointAt) {
       if (!raw.inside) return;
+      if (isolatedRoom) {
+        const pad = 0.12;
+        const cx = Math.max(
+          isolatedRoom.x + pad,
+          Math.min(isolatedRoom.x + Math.max(pad * 2, isolatedRoom.width - pad), snapped.x)
+        );
+        const cy = Math.max(
+          isolatedRoom.y + pad,
+          Math.min(isolatedRoom.y + Math.max(pad * 2, isolatedRoom.height - pad), snapped.y)
+        );
+        onPlacePointAt(
+          pendingPlaceItem,
+          Number(cx.toFixed(2)),
+          Number(cy.toFixed(2)),
+          isolatedRoom.id
+        );
+        return;
+      }
       const targetRoom = findRoomAtPoint(project.rooms, snapped.x, snapped.y) ?? project.rooms[0];
       onPlacePointAt(pendingPlaceItem, snapped.x, snapped.y, targetRoom?.id ?? '');
       return;
@@ -625,42 +915,147 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
-    // Add Wire tool: clicking open canvas while a draft is active appends an orthogonal/angled routing waypoint
+    // Add Wire tool (AutoCAD LINE/POLYLINE workflow):
+    // 1. If cable config not confirmed yet, open Cable Selection Popup & remember clicked start point
+    // 2. If no active draft, start polyline from clicked canvas coordinate (snapping to nearby component if within 0.55m)
+    // 3. While drafting, each left-click places a connected intermediate vertex freely in any direction/angle
     if (activeTool === 'add-wire') {
-      if (wireDraft && raw.inside) {
-        const fromPt = pointLookup.get(wireDraft.fromPointId);
-        const anchor =
-          wireDraft.waypoints.length > 0
-            ? wireDraft.waypoints[wireDraft.waypoints.length - 1]
-            : fromPt ?? snapped;
-        let wx = snapped.x;
-        let wy = snapped.y;
-        if (!e.shiftKey) {
-          if (Math.abs(wx - anchor.x) >= Math.abs(wy - anchor.y)) {
-            wy = anchor.y;
-          } else {
-            wx = anchor.x;
-          }
-        }
-        setWireDraft((prev) =>
-          prev
-            ? {
-                ...prev,
-                waypoints: [...prev.waypoints, { x: Number(wx.toFixed(2)), y: Number(wy.toFixed(2)) }],
-                preview: { x: Number(wx.toFixed(2)), y: Number(wy.toFixed(2)) },
-              }
-            : null
+      const useGridSnap = wireGridSnap && snapEnabled;
+      const baseCoord = useGridSnap
+        ? snapCoordinate(raw.x, raw.y, project, true)
+        : {
+            x: Number(raw.x.toFixed(2)),
+            y: Number(raw.y.toFixed(2)),
+          };
+      const candidates = allowInterFloorWiring ? fullProject.points : project.points;
+
+      if (!wireConfigReady) {
+        const resolved = resolvePolylineStartPoint(baseCoord, candidates, {
+          snapRadiusM: 0.55,
+          defaultZ: activeWireDefaultZ,
+        });
+        onRequestCableConfig?.(
+          resolved?.snappedToComponent ? resolved.fromPoint.id : undefined,
+          baseCoord
         );
-      } else if (!wireDraft) {
-        onValidationWarning?.(
-          'Click a source electrical component first, then optional routing waypoints, then a destination component.'
-        );
+        return;
       }
+
+      if (!wireDraft) {
+        const resolved = resolvePolylineStartPoint(baseCoord, candidates, {
+          snapRadiusM: 0.55,
+          defaultZ: activeWireDefaultZ,
+        });
+        if (!resolved) {
+          onValidationWarning?.(
+            'Place electrical components on this floor first before routing a cable.'
+          );
+          return;
+        }
+        setWireDraft({
+          fromPointId: resolved.fromPoint.id,
+          waypoints: resolved.initialWaypoints,
+          preview:
+            resolved.initialWaypoints[0] ?? {
+              x: resolved.fromPoint.x,
+              y: resolved.fromPoint.y,
+            },
+        });
+        return;
+      }
+
+      // Second click ends the cable route immediately (one click to start, one click to end)
+      const fromPt = pointLookup.get(wireDraft.fromPointId);
+      if (!fromPt) {
+        setWireDraft(null);
+        return;
+      }
+
+      const anchor =
+        wireDraft.waypoints.length > 0
+          ? wireDraft.waypoints[wireDraft.waypoints.length - 1]
+          : fromPt;
+      let ex = baseCoord.x;
+      let ey = baseCoord.y;
+      const enforceOrthogonal =
+        activeWireRoutingMode === 'orthogonal' ? !e.shiftKey : e.shiftKey;
+      if (enforceOrthogonal) {
+        if (Math.abs(ex - anchor.x) >= Math.abs(ey - anchor.y)) {
+          ey = anchor.y;
+        } else {
+          ex = anchor.x;
+        }
+      }
+      const endCoord = { x: Number(ex.toFixed(2)), y: Number(ey.toFixed(2)) };
+
+      // Find nearest compatible destination electrical component to the clicked end point
+      let targetPt: ElectricalPoint | null = null;
+      let bestDist = Infinity;
+      candidates.forEach((pt) => {
+        if (pt.id === fromPt.id) return;
+        const compat = checkTerminalCompatibility(
+          fromPt,
+          pt,
+          activeWireCategory,
+          allowInterFloorWiring
+        );
+        if (!compat.compatible) return;
+        const d = Math.hypot(pt.x - endCoord.x, pt.y - endCoord.y);
+        if (d < bestDist) {
+          bestDist = d;
+          targetPt = pt;
+        }
+      });
+
+      if (!targetPt) {
+        onValidationWarning?.(
+          'Place at least two compatible electrical components to complete this cable route (press Esc to cancel).'
+        );
+        setWireDraft(null);
+        return;
+      }
+
+      const chosen = targetPt as ElectricalPoint;
+      const compat = checkTerminalCompatibility(
+        fromPt,
+        chosen,
+        activeWireCategory,
+        allowInterFloorWiring
+      );
+      if (!compat.compatible) {
+        onValidationWarning?.(compat.reason || 'Selected electrical terminals are incompatible.');
+        setWireDraft(null);
+        return;
+      }
+
+      // If user clicked directly on/near the destination component (<= 0.55m), connect straight to it;
+      // otherwise include the exact clicked end coordinate in the route before anchoring to the component.
+      const nextWps =
+        bestDist <= 0.55
+          ? wireDraft.waypoints
+          : appendPolylineVertex(wireDraft.waypoints, fromPt, endCoord, {
+              defaultZ: activeWireDefaultZ,
+            });
+      const finalWps = finalizePolylineWaypoints(nextWps, chosen, false);
+      if (compat.warning) onValidationWarning?.(compat.warning);
+      onCreateWire?.(fromPt.id, chosen.id, finalWps);
+      setWireDraft(null);
       return;
     }
 
-    // Click on empty area inside site boundary -> Phase 4 Click-to-Create Room Modal!
-    if ((activeTool === 'select' || activeTool === 'add-room') && raw.inside) {
+    // Default Select tool: clicking empty space on the canvas simply clears selection
+    if (activeTool === 'select') {
+      onSelectEntity?.(null);
+      onClearAllSelection?.();
+      return;
+    }
+
+    // Add Room tool: click on empty area inside site boundary -> Create Room Modal
+    if (activeTool === 'add-room' && raw.inside) {
+      if (isolatedRoom) {
+        onSelectEntity?.(null);
+        return;
+      }
       const clickedExistingRoom = project.rooms.some((r) => isPointInsideRoom(r, raw.x, raw.y));
       if (!clickedExistingRoom) {
         onSelectEntity?.(null);
@@ -728,7 +1123,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       setHoverOpening(null);
     }
 
-    // Dragging an electrical point freely (record single pre-drag snapshot for Ctrl+Z!)
+    // Dragging an electrical point freely (clamped inside isolatedRoom if room view is active)
     if (draggingPoint && onMovePoint) {
       const dist = Math.hypot(raw.x - draggingPoint.startX, raw.y - draggingPoint.startY);
       if (!draggingPoint.moved && dist < 0.06) return;
@@ -739,8 +1134,36 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
         setDraggingPoint((prev) => (prev ? { ...prev, moved: true, snapshotRecorded: true } : null));
       }
       const snapped = snapCoordinateFree(raw.x, raw.y, project, snapEnabled);
+      if (isolatedRoom) {
+        const pad = 0.1;
+        const cx = Math.max(
+          isolatedRoom.x + pad,
+          Math.min(isolatedRoom.x + Math.max(pad * 2, isolatedRoom.width - pad), snapped.x)
+        );
+        const cy = Math.max(
+          isolatedRoom.y + pad,
+          Math.min(isolatedRoom.y + Math.max(pad * 2, isolatedRoom.height - pad), snapped.y)
+        );
+        onMovePoint(draggingPoint.id, Number(cx.toFixed(2)), Number(cy.toFixed(2)), isolatedRoom.id);
+        return;
+      }
       const room = findRoomAtPoint(project.rooms, snapped.x, snapped.y) ?? project.rooms[0];
       onMovePoint(draggingPoint.id, snapped.x, snapped.y, room?.id ?? '');
+      return;
+    }
+
+    // Dragging an editable wall endpoint handle
+    if (draggingWallEndpoint && onUpdateWallEndpoints) {
+      if (!draggingWallEndpoint.snapshotRecorded) {
+        onRecordHistorySnapshot?.();
+        setDraggingWallEndpoint((prev) => (prev ? { ...prev, snapshotRecorded: true } : null));
+      }
+      const snapped = snapCoordinate(raw.x, raw.y, project, snapEnabled);
+      const patch =
+        draggingWallEndpoint.endpoint === 'start'
+          ? { x1: Number(snapped.x.toFixed(2)), y1: Number(snapped.y.toFixed(2)) }
+          : { x2: Number(snapped.x.toFixed(2)), y2: Number(snapped.y.toFixed(2)) };
+      onUpdateWallEndpoints(draggingWallEndpoint.wallId, patch, false);
       return;
     }
 
@@ -896,7 +1319,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
-    // Dragging a single wire waypoint handle
+    // Dragging a single wire waypoint handle freely (optional grid snap, preserving wp.z height!)
     if (draggingWaypoint && onUpdateWireWaypoints) {
       const wire = (fullProject.wires ?? []).find((w) => w.id === draggingWaypoint.wireId);
       if (!wire) return;
@@ -904,21 +1327,24 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
         onRecordHistorySnapshot?.();
         setDraggingWaypoint((prev) => (prev ? { ...prev, snapshotRecorded: true } : null));
       }
-      const snapped = snapCoordinate(raw.x, raw.y, project, snapEnabled);
+      const useGridSnap = wireGridSnap && snapEnabled;
+      const targetPt = useGridSnap
+        ? snapCoordinate(raw.x, raw.y, project, true)
+        : { x: Number(raw.x.toFixed(2)), y: Number(raw.y.toFixed(2)) };
       const nextWps = wire.waypoints.map((wp, idx) =>
         idx === draggingWaypoint.index
-          ? { x: Number(snapped.x.toFixed(2)), y: Number(snapped.y.toFixed(2)) }
+          ? { ...wp, x: Number(targetPt.x.toFixed(2)), y: Number(targetPt.y.toFixed(2)) }
           : wp
       );
       onUpdateWireWaypoints(wire.id, nextWps, false);
       return;
     }
 
-    // Dragging a wire segment to shift the intermediate route while keeping endpoints anchored
+    // Dragging a wire segment to shift the intermediate route freely while keeping endpoints anchored (preserving wp.z!)
     if (draggingWireRoute && onUpdateWireWaypoints) {
       const rawDx = raw.x - draggingWireRoute.startX;
       const rawDy = raw.y - draggingWireRoute.startY;
-      if (!draggingWireRoute.moved && Math.hypot(rawDx, rawDy) < 0.06) return;
+      if (!draggingWireRoute.moved && Math.hypot(rawDx, rawDy) < 0.05) return;
       if (!draggingWireRoute.snapshotRecorded) {
         onRecordHistorySnapshot?.();
       }
@@ -927,30 +1353,37 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
           prev ? { ...prev, moved: true, snapshotRecorded: true } : null
         );
       }
-      const step = snapEnabled ? (units === 'ft' ? 0.5 * FT_TO_M : 0.1) : 0.01;
+      const useGridSnap = wireGridSnap && snapEnabled;
+      const step = useGridSnap ? (units === 'ft' ? 0.5 * FT_TO_M : 0.1) : 0.01;
       const dx = Math.round(rawDx / step) * step;
       const dy = Math.round(rawDy / step) * step;
       const maxBoundX = Math.max(lengthM, floorBounds.lengthM);
       const maxBoundY = Math.max(widthM, floorBounds.widthM);
       const shifted = draggingWireRoute.origWaypoints.map((wp) => ({
-        x: Number(Math.max(0.05, Math.min(maxBoundX - 0.05, wp.x + dx)).toFixed(2)),
-        y: Number(Math.max(0.05, Math.min(maxBoundY - 0.05, wp.y + dy)).toFixed(2)),
+        ...wp,
+        x: Number(Math.max(0.02, Math.min(maxBoundX - 0.02, wp.x + dx)).toFixed(2)),
+        y: Number(Math.max(0.02, Math.min(maxBoundY - 0.02, wp.y + dy)).toFixed(2)),
       }));
       onUpdateWireWaypoints(draggingWireRoute.wireId, shifted, false);
       return;
     }
 
-    // Live interactive cable routing preview
+    // Live AutoCAD LINE/POLYLINE rubber-band cable preview (free cursor movement in any direction/angle by default)
     if (activeTool === 'add-wire' && wireDraft) {
-      const snapped = snapCoordinate(raw.x, raw.y, project, snapEnabled);
+      const useGridSnap = wireGridSnap && snapEnabled;
+      const baseCoord = useGridSnap
+        ? snapCoordinate(raw.x, raw.y, project, true)
+        : { x: Number(raw.x.toFixed(2)), y: Number(raw.y.toFixed(2)) };
       const fromPt = pointLookup.get(wireDraft.fromPointId);
       const anchor =
         wireDraft.waypoints.length > 0
           ? wireDraft.waypoints[wireDraft.waypoints.length - 1]
-          : fromPt ?? snapped;
-      let px = snapped.x;
-      let py = snapped.y;
-      if (!e.shiftKey) {
+          : fromPt ?? baseCoord;
+      let px = baseCoord.x;
+      let py = baseCoord.y;
+      const enforceOrthogonal =
+        activeWireRoutingMode === 'orthogonal' ? !e.shiftKey : e.shiftKey;
+      if (enforceOrthogonal) {
         if (Math.abs(px - anchor.x) >= Math.abs(py - anchor.y)) {
           py = anchor.y;
         } else {
@@ -958,7 +1391,9 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
         }
       }
       setWireDraft((prev) =>
-        prev ? { ...prev, preview: { x: Number(px.toFixed(2)), y: Number(py.toFixed(2)) } } : null
+        prev
+          ? { ...prev, preview: { x: Number(px.toFixed(2)), y: Number(py.toFixed(2)) } }
+          : null
       );
       return;
     }
@@ -1038,6 +1473,11 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       return;
     }
 
+    if (draggingWallEndpoint) {
+      setDraggingWallEndpoint(null);
+      return;
+    }
+
     if (roomDrag) {
       if (roomDrag.moved) {
         // Allow freely dismantling & placing room sections anywhere on the canvas
@@ -1070,6 +1510,14 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     }
   };
 
+  // Double-click to finish an active AutoCAD LINE/POLYLINE cable route cleanly
+  const handleSvgDoubleClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (previewOnly || activeTool !== 'add-wire' || !wireDraft) return;
+    e.preventDefault();
+    const raw = clientToRawMeters(e.clientX, e.clientY);
+    finishWireDraft(raw, true);
+  };
+
   const startRoomInteraction = (
     e: React.PointerEvent,
     room: RoomZone,
@@ -1084,6 +1532,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
       activeTool === 'pan' ||
       pendingPlaceItem ||
       activeTool === 'draw-wall' ||
+      activeTool === 'hide-wall' ||
       activeTool === 'dimension' ||
       activeTool === 'add-door' ||
       activeTool === 'add-window' ||
@@ -1179,6 +1628,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     ? ''
     : pendingPlaceItem ||
         activeTool === 'draw-wall' ||
+        activeTool === 'hide-wall' ||
         activeTool === 'add-room' ||
         activeTool === 'add-door' ||
         activeTool === 'add-window' ||
@@ -1200,9 +1650,45 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   const siteWidLabel = formatLength(widthM, units, 1);
   const customDims = project.dimensions ?? [];
 
+  const handle2DDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (previewOnly) return;
+    if (e.dataTransfer.types.includes('application/x-bluespace-electrical')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  };
+
+  const handle2DDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (previewOnly || !onPlacePointAt) return;
+    const itemType = e.dataTransfer.getData('application/x-bluespace-electrical') as
+      | ElectricalItemType
+      | '';
+    if (!itemType) return;
+    e.preventDefault();
+    const raw = clientToRawMeters(e.clientX, e.clientY);
+    const snapped = snapCoordinate(raw.x, raw.y, project, snapEnabled);
+    if (isolatedRoom) {
+      const pad = 0.12;
+      const cx = Math.max(
+        isolatedRoom.x + pad,
+        Math.min(isolatedRoom.x + Math.max(pad * 2, isolatedRoom.width - pad), snapped.x)
+      );
+      const cy = Math.max(
+        isolatedRoom.y + pad,
+        Math.min(isolatedRoom.y + Math.max(pad * 2, isolatedRoom.height - pad), snapped.y)
+      );
+      onPlacePointAt(itemType, Number(cx.toFixed(2)), Number(cy.toFixed(2)), isolatedRoom.id);
+      return;
+    }
+    const targetRoom = findRoomAtPoint(project.rooms, snapped.x, snapped.y) ?? project.rooms[0];
+    onPlacePointAt(itemType, snapped.x, snapped.y, targetRoom?.id ?? '');
+  };
+
   return (
     <div
       ref={containerRef}
+      onDragOver={handle2DDragOver}
+      onDrop={handle2DDrop}
       data-canvas-aspect={previewOnly ? 'compact' : CANVAS_ASPECT_LABEL}
       className={`relative w-full h-full flex-1 min-h-0 flex items-center justify-center bg-surface select-none overflow-hidden ${
         previewOnly ? 'p-1.5' : 'p-gutter-sm'
@@ -1219,6 +1705,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
         onPointerMove={handleSvgPointerMove}
         onPointerUp={handleSvgPointerUp}
         onPointerCancel={handleSvgPointerUp}
+        onDoubleClick={handleSvgDoubleClick}
         onPointerLeave={(e) => {
           if (!panStart && !roomDrag && !groupDrag) handleSvgPointerUp(e);
         }}
@@ -1394,8 +1881,8 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                 fontWeight="600"
               >
                 {activeFloor > 1
-                  ? `${formatFloorLabel(activeFloor)} is ready — click inside to add rooms or click Copy Below`
-                  : 'Click anywhere inside the site boundary to create a room'}
+                  ? `${formatFloorLabel(activeFloor)} is ready — choose Add Room or click Copy Below`
+                  : 'Select mode active — choose Add Room or Draw Wall in Drawing Tools to begin'}
               </text>
               <text
                 x={PAD + planW / 2}
@@ -1510,24 +1997,51 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             const areaText = formatArea(dispW * dispH, units);
             const showExtraLines = !previewOnly && rw > 62 && rh > 42;
 
+            const isIsolatedFocus = !!isolatedRoom && room.id === isolatedRoom.id;
+            const isDimmedByIsolation = !!isolatedRoom && room.id !== isolatedRoom.id;
+
             return (
               <g
                 key={room.id}
-                onPointerDown={(e) => startRoomInteraction(e, room, 'move')}
+                opacity={isDimmedByIsolation ? 0.16 : 1}
+                onPointerDown={(e) => {
+                  if (isDimmedByIsolation) return;
+                  startRoomInteraction(e, room, 'move');
+                }}
+                onDoubleClick={(e) => {
+                  if (previewOnly || !onEnterRoomView) return;
+                  e.stopPropagation();
+                  onEnterRoomView(room.id);
+                }}
                 className={
                   previewOnly
                     ? ''
-                    : activeTool === 'pan'
-                      ? ''
-                      : activeTool === 'select' || activeTool === 'move'
-                        ? 'cursor-move'
-                        : activeTool === 'erase'
-                          ? 'cursor-not-allowed'
-                          : activeTool === 'rotate'
-                            ? 'cursor-pointer'
-                            : ''
+                    : isDimmedByIsolation
+                      ? 'cursor-pointer'
+                      : activeTool === 'pan'
+                        ? ''
+                        : activeTool === 'select' || activeTool === 'move'
+                          ? 'cursor-move'
+                          : activeTool === 'erase'
+                            ? 'cursor-not-allowed'
+                            : activeTool === 'rotate'
+                              ? 'cursor-pointer'
+                              : ''
                 }
               >
+                {isIsolatedFocus && (
+                  <rect
+                    x={rx - 3}
+                    y={ry - 3}
+                    width={rw + 6}
+                    height={rh + 6}
+                    fill="none"
+                    stroke="#00A8FF"
+                    strokeWidth="2.8"
+                    strokeDasharray="8,4"
+                    pointerEvents="none"
+                  />
+                )}
                 {Array.isArray(room.polygon) && room.polygon.length >= 3 ? (
                   <polygon
                     points={room.polygon
@@ -1793,8 +2307,8 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             );
           })}
 
-          {/* Canonical Merged Architectural Walls (Perimeter + Deduplicated Shared Room Walls + Custom Walls) */}
-          {cadLayers.walls && mergedWalls.map((seg) => {
+          {/* Canonical Merged Architectural Walls (Perimeter + Deduplicated Shared Room Walls + Custom Walls + Hidden Cutaway Indicators) */}
+          {cadLayers.walls && allMergedWalls.map((seg) => {
             const isInteriorSeg = seg.source !== 'perimeter';
             const gdx = isInteriorSeg && groupDrag ? groupDrag.dx : 0;
             const gdy = isInteriorSeg && groupDrag ? groupDrag.dy : 0;
@@ -1803,40 +2317,55 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             const x2 = PAD + (seg.x2 + gdx) * SCALE;
             const y2 = PAD + (seg.y2 + gdy) * SCALE;
             const isCustom = seg.source === 'custom' && !!seg.customWallId;
+            const wallTargetId = seg.customWallId ?? seg.id;
+            const isHiddenWall = !!seg.isHidden;
             const isSelectedWall =
+              isEntitySelected('wall', wallTargetId) ||
               (isCustom && isEntitySelected('wall', seg.customWallId!)) ||
               (allSelected && !previewOnly && seg.source === 'room');
-            const isActiveFindWall = isCustom && !previewOnly && activeHighlightId === seg.customWallId;
-            const isFindMatchWall = isCustom && !previewOnly && !!highlightedIds?.has(seg.customWallId!);
+            const isActiveFindWall =
+              !previewOnly && (activeHighlightId === wallTargetId || (isCustom && activeHighlightId === seg.customWallId));
+            const isFindMatchWall =
+              !previewOnly && (!!highlightedIds?.has(wallTargetId) || (isCustom && !!highlightedIds?.has(seg.customWallId!)));
             const strokeW = Math.max(
               previewOnly ? 2 : 3,
               Math.min(previewOnly ? 5.5 : 8.5, seg.thickness * SCALE)
             );
+            const wallDimmed =
+              !!isolatedRoom &&
+              (Math.max(seg.x1, seg.x2) < isolatedRoom.x - 0.25 ||
+                Math.min(seg.x1, seg.x2) > isolatedRoom.x + isolatedRoom.width + 0.25 ||
+                Math.max(seg.y1, seg.y2) < isolatedRoom.y - 0.25 ||
+                Math.min(seg.y1, seg.y2) > isolatedRoom.y + isolatedRoom.height + 0.25);
 
             return (
-              <g key={seg.id}>
+              <g key={seg.id} opacity={wallDimmed ? 0.16 : 1}>
                 <line
                   x1={x1}
                   y1={y1}
                   x2={x2}
                   y2={y2}
                   stroke={
-                    isActiveFindWall
+                    isHiddenWall
                       ? '#FF9D00'
-                      : isSelectedWall
-                        ? '#00A8FF'
-                        : isFindMatchWall
-                          ? '#FBBF24'
-                          : seg.isExterior
-                            ? '#F5F7FA'
-                            : '#CBD5E1'
+                      : isActiveFindWall
+                        ? '#FF9D00'
+                        : isSelectedWall
+                          ? '#00A8FF'
+                          : isFindMatchWall
+                            ? '#FBBF24'
+                            : seg.isExterior
+                              ? '#F5F7FA'
+                              : '#CBD5E1'
                   }
-                  strokeWidth={strokeW}
+                  strokeWidth={isHiddenWall ? Math.max(2, strokeW * 0.6) : strokeW}
+                  strokeOpacity={isHiddenWall ? 0.45 : 1}
+                  strokeDasharray={isHiddenWall ? '6,5' : undefined}
                   strokeLinecap="square"
                   pointerEvents="none"
                 />
-                {/* Interactive hit area for custom walls so user can select/edit/delete them */}
-                {isCustom && !previewOnly && (
+                {/* Interactive hit area for ALL walls (perimeter, room, custom, and hidden cutaway restore) */}
+                {!previewOnly && !wallDimmed && (
                   <line
                     x1={x1}
                     y1={y1}
@@ -1849,7 +2378,9 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                         ? ''
                         : activeTool === 'erase'
                           ? 'cursor-not-allowed'
-                          : 'cursor-pointer'
+                          : activeTool === 'hide-wall'
+                            ? 'cursor-crosshair'
+                            : 'cursor-pointer'
                     }
                     onPointerDown={(e) => {
                       if (
@@ -1864,23 +2395,91 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                         return;
                       }
                       e.stopPropagation();
+                      if (activeTool === 'hide-wall' && onToggleHideWall) {
+                        onToggleHideWall(activeFloor, seg.id);
+                        return;
+                      }
                       if (activeTool === 'erase') {
-                        onEraseEntity?.({ kind: 'wall', id: seg.customWallId! });
-                      } else if ((e.ctrlKey || e.metaKey) && e.button === 0 && onDuplicateWall) {
+                        onEraseEntity?.({ kind: 'wall', id: wallTargetId });
+                        return;
+                      }
+                      if (isHiddenWall && onToggleHideWall) {
+                        onToggleHideWall(activeFloor, seg.id);
+                        return;
+                      }
+                      if (isCustom && (e.ctrlKey || e.metaKey) && e.button === 0 && onDuplicateWall) {
                         e.preventDefault();
                         onClearAllSelection?.();
                         onDuplicateWall(seg.customWallId!);
-                      } else {
-                        onClearAllSelection?.();
-                        onSelectEntity?.({ kind: 'wall', id: seg.customWallId! }, e.shiftKey);
+                        return;
                       }
+                      onClearAllSelection?.();
+                      onSelectEntity?.({ kind: 'wall', id: wallTargetId }, e.shiftKey);
                     }}
-                  />
+                  >
+                    <title>
+                      {isHiddenWall
+                        ? 'Hidden cutaway wall — click to restore'
+                        : activeTool === 'hide-wall'
+                          ? 'Click to hide wall for cross-section cutaway'
+                          : `${seg.isExterior ? 'Exterior' : 'Internal'} wall — click to select or edit`}
+                    </title>
+                  </line>
                 )}
-                {(isSelectedWall || isActiveFindWall) && (
+                {(isSelectedWall || isActiveFindWall) && !isHiddenWall && !previewOnly && (
                   <>
-                    <circle cx={x1} cy={y1} r="4.5" fill={isActiveFindWall ? '#FF9D00' : '#00A8FF'} stroke="#080F20" strokeWidth="1.5" />
-                    <circle cx={x2} cy={y2} r="4.5" fill={isActiveFindWall ? '#FF9D00' : '#00A8FF'} stroke="#080F20" strokeWidth="1.5" />
+                    <circle
+                      cx={x1}
+                      cy={y1}
+                      r="5.5"
+                      fill={isActiveFindWall ? '#FF9D00' : '#00A8FF'}
+                      stroke="#080F20"
+                      strokeWidth="1.5"
+                      className="cursor-move"
+                      onPointerDown={(e) => {
+                        if (e.button !== 0 || !onUpdateWallEndpoints) return;
+                        e.stopPropagation();
+                        let editWallId = seg.customWallId ?? null;
+                        if (!editWallId && onMaterializeAndSelectWall) {
+                          editWallId = onMaterializeAndSelectWall(seg);
+                        }
+                        if (editWallId) {
+                          setDraggingWallEndpoint({
+                            wallId: editWallId,
+                            endpoint: 'start',
+                            snapshotRecorded: false,
+                          });
+                        }
+                      }}
+                    >
+                      <title>Drag wall start endpoint</title>
+                    </circle>
+                    <circle
+                      cx={x2}
+                      cy={y2}
+                      r="5.5"
+                      fill={isActiveFindWall ? '#FF9D00' : '#00A8FF'}
+                      stroke="#080F20"
+                      strokeWidth="1.5"
+                      className="cursor-move"
+                      onPointerDown={(e) => {
+                        if (e.button !== 0 || !onUpdateWallEndpoints) return;
+                        e.stopPropagation();
+                        let editWallId = seg.customWallId ?? null;
+                        if (!editWallId && onMaterializeAndSelectWall) {
+                          editWallId = onMaterializeAndSelectWall(seg);
+                        }
+                        if (editWallId) {
+                          setDraggingWallEndpoint({
+                            wallId: editWallId,
+                            endpoint: 'end',
+                            snapshotRecorded: false,
+                          });
+                        }
+                      }}
+                    >
+                      <title>Drag wall end endpoint</title>
+                    </circle>
                   </>
                 )}
               </g>
@@ -2284,9 +2883,12 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
               visualOffsetPx !== 0
                 ? offsetPolylinePerpendicular(rawSvgPts, visualOffsetPx)
                 : rawSvgPts;
-            const pathD = displayPts
-              .map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
-              .join(' ');
+            const pathD =
+              wire.routingMode === 'curved' && displayPts.length >= 3
+                ? buildSmoothSvgPath(displayPts)
+                : displayPts
+                    .map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+                    .join(' ');
             const wireBreakdown = computeWireLengthBreakdown(wire, fullProject, allowancePct);
             const conductorTag =
               wire.category === 'phase'
@@ -2368,22 +2970,36 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                       }
                       onClearAllSelection?.();
                       onSelectEntity?.({ kind: 'wire', id: wire.id }, e.shiftKey);
-                      // Allow dragging the wire path to shift intermediate waypoints cleanly
+                      // Allow dragging ANY wire path freely: shift existing waypoints,
+                      // or if it's currently a direct 2-point wire, insert & drag a live bend right under the cursor!
                       if (
                         !e.shiftKey &&
                         (activeTool === 'select' || activeTool === 'move') &&
-                        wire.waypoints.length > 0 &&
                         onUpdateWireWaypoints
                       ) {
                         const raw = clientToRawMeters(e.clientX, e.clientY);
-                        setDraggingWireRoute({
-                          wireId: wire.id,
-                          startX: raw.x,
-                          startY: raw.y,
-                          origWaypoints: wire.waypoints.map((wp) => ({ ...wp })),
-                          moved: false,
-                          snapshotRecorded: false,
-                        });
+                        if (wire.waypoints.length > 0) {
+                          setDraggingWireRoute({
+                            wireId: wire.id,
+                            startX: raw.x,
+                            startY: raw.y,
+                            origWaypoints: wire.waypoints.map((wp) => ({ ...wp })),
+                            moved: false,
+                            snapshotRecorded: false,
+                          });
+                        } else {
+                          onRecordHistorySnapshot?.();
+                          const newWp: WireWaypoint = {
+                            x: Number(raw.x.toFixed(2)),
+                            y: Number(raw.y.toFixed(2)),
+                          };
+                          onUpdateWireWaypoints(wire.id, [newWp], false);
+                          setDraggingWaypoint({
+                            wireId: wire.id,
+                            index: 0,
+                            snapshotRecorded: true,
+                          });
+                        }
                       }
                     }}
                   />
@@ -2443,14 +3059,14 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                   </g>
                 )}
 
-                {/* Waypoint Drag Handles & Midpoint Insert Handles when Wire is Selected */}
+                {/* Waypoint Vertex Grips & Midpoint Insert Grips when Cable Polyline is Selected */}
                 {!previewOnly && isSelWire && onUpdateWireWaypoints && (
                   <g>
-                    {/* Segment Midpoint '+' handles to insert new waypoint */}
+                    {/* Segment Midpoint '+' handles to insert new polyline vertex */}
                     {nodes.slice(0, -1).map((a, segIdx) => {
                       const b = nodes[segIdx + 1];
                       const segDist = Math.hypot(b.x - a.x, b.y - a.y);
-                      if (segDist < 0.35) return null;
+                      if (segDist < 0.2) return null;
                       const mx = PAD + ((a.x + b.x) / 2) * SCALE;
                       const my = PAD + ((a.y + b.y) / 2) * SCALE;
                       return (
@@ -2461,13 +3077,21 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                           onPointerDown={(e) => {
                             e.stopPropagation();
                             onRecordHistorySnapshot?.();
+                            const prevZ = segIdx > 0 ? wire.waypoints[segIdx - 1]?.z : undefined;
+                            const nextZ = segIdx < wire.waypoints.length ? wire.waypoints[segIdx]?.z : undefined;
+                            const midZ =
+                              prevZ !== undefined && nextZ !== undefined
+                                ? Number(((prevZ + nextZ) / 2).toFixed(2))
+                                : prevZ ?? nextZ;
                             const inserted: WireWaypoint = {
                               x: Number(((a.x + b.x) / 2).toFixed(2)),
                               y: Number(((a.y + b.y) / 2).toFixed(2)),
+                              ...(midZ !== undefined ? { z: midZ } : {}),
                             };
                             const nextWps = [...wire.waypoints];
                             nextWps.splice(segIdx, 0, inserted);
                             onUpdateWireWaypoints(wire.id, nextWps, false);
+                            setSelectedVertexRef({ wireId: wire.id, index: segIdx });
                             setDraggingWaypoint({
                               wireId: wire.id,
                               index: segIdx,
@@ -2486,118 +3110,262 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                           >
                             +
                           </text>
-                          <title>Click &amp; drag to add waypoint bend</title>
+                          <title>Click &amp; drag to insert new vertex</title>
                         </g>
                       );
                     })}
 
-                    {/* Existing Waypoint Handles (Drag to move · Double-click or Right-click to remove) */}
-                    {wire.waypoints.map((wp, wpIdx) => (
-                      <circle
-                        key={`wp-${wpIdx}`}
-                        cx={PAD + wp.x * SCALE}
-                        cy={PAD + wp.y * SCALE}
-                        r="5.5"
-                        fill="#00A8FF"
-                        stroke="#080F20"
-                        strokeWidth="1.6"
-                        className="cursor-move"
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                          if (e.button === 2) return;
-                          setDraggingWaypoint({
-                            wireId: wire.id,
-                            index: wpIdx,
-                            snapshotRecorded: false,
-                          });
-                        }}
-                        onDoubleClick={(e) => {
-                          e.stopPropagation();
-                          onRecordHistorySnapshot?.();
-                          onUpdateWireWaypoints(
-                            wire.id,
-                            wire.waypoints.filter((_, i) => i !== wpIdx),
-                            false
-                          );
-                        }}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          onRecordHistorySnapshot?.();
-                          onUpdateWireWaypoints(
-                            wire.id,
-                            wire.waypoints.filter((_, i) => i !== wpIdx),
-                            false
-                          );
-                        }}
-                      >
-                        <title>Drag to move waypoint · Double-click or Right-click to remove</title>
-                      </circle>
-                    ))}
+                    {/* AutoCAD Square Vertex Grips (Drag freely to move · Click + Delete or Dbl-click/Right-click to remove) */}
+                    {wire.waypoints.map((wp, wpIdx) => {
+                      const isVertexActive =
+                        selectedVertexRef?.wireId === wire.id &&
+                        selectedVertexRef?.index === wpIdx;
+                      const vx = PAD + wp.x * SCALE;
+                      const vy = PAD + wp.y * SCALE;
+                      const half = isVertexActive ? 6 : 5;
+                      return (
+                        <rect
+                          key={`wp-${wpIdx}`}
+                          x={vx - half}
+                          y={vy - half}
+                          width={half * 2}
+                          height={half * 2}
+                          rx="1.2"
+                          fill={isVertexActive ? '#FF9D00' : '#00A8FF'}
+                          stroke="#080F20"
+                          strokeWidth="1.6"
+                          className="cursor-move"
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            if (e.button === 2) return;
+                            setSelectedVertexRef({ wireId: wire.id, index: wpIdx });
+                            setDraggingWaypoint({
+                              wireId: wire.id,
+                              index: wpIdx,
+                              snapshotRecorded: false,
+                            });
+                          }}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            onRecordHistorySnapshot?.();
+                            onUpdateWireWaypoints(
+                              wire.id,
+                              wire.waypoints.filter((_, i) => i !== wpIdx),
+                              false
+                            );
+                            setSelectedVertexRef(null);
+                          }}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onRecordHistorySnapshot?.();
+                            onUpdateWireWaypoints(
+                              wire.id,
+                              wire.waypoints.filter((_, i) => i !== wpIdx),
+                              false
+                            );
+                            setSelectedVertexRef(null);
+                          }}
+                        >
+                          <title>Drag to move vertex · Press Delete, Double-click, or Right-click to remove vertex</title>
+                        </rect>
+                      );
+                    })}
                   </g>
                 )}
               </g>
             );
           })}
 
-          {/* Live Interactive Cable Routing Draft Preview */}
+          {/* Live AutoCAD LINE/POLYLINE Cable Routing Preview (Free cursor movement, segment & total length HUD, OSNAP ring) */}
           {!previewOnly && activeTool === 'add-wire' && wireDraft && (() => {
             const fromPt = pointLookup.get(wireDraft.fromPointId);
             if (!fromPt) return null;
-            const draftNodes = [
+            const committedNodes = [
               { x: fromPt.x, y: fromPt.y },
               ...wireDraft.waypoints,
+            ];
+            const draftNodes = [
+              ...committedNodes,
               ...(wireDraft.preview ? [wireDraft.preview] : []),
             ];
-            const draftD = draftNodes
-              .map(
-                (n, idx) =>
-                  `${idx === 0 ? 'M' : 'L'} ${(PAD + n.x * SCALE).toFixed(1)} ${(PAD + n.y * SCALE).toFixed(1)}`
-              )
-              .join(' ');
-            let draftLen = 0;
-            for (let i = 0; i < draftNodes.length - 1; i++) {
-              draftLen += Math.hypot(
-                draftNodes[i + 1].x - draftNodes[i].x,
-                draftNodes[i + 1].y - draftNodes[i].y
+            const committedSvgPts = committedNodes.map((n) => ({
+              x: PAD + n.x * SCALE,
+              y: PAD + n.y * SCALE,
+            }));
+            const draftSvgPts = draftNodes.map((n) => ({
+              x: PAD + n.x * SCALE,
+              y: PAD + n.y * SCALE,
+            }));
+            const committedD =
+              committedSvgPts.length >= 2
+                ? activeWireRoutingMode === 'curved' && committedSvgPts.length >= 3
+                  ? buildSmoothSvgPath(committedSvgPts)
+                  : committedSvgPts
+                      .map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+                      .join(' ')
+                : '';
+            const lastCommittedSvg = committedSvgPts[committedSvgPts.length - 1];
+            const cursorSvg = wireDraft.preview
+              ? { x: PAD + wireDraft.preview.x * SCALE, y: PAD + wireDraft.preview.y * SCALE }
+              : null;
+            const fullCurvedD =
+              activeWireRoutingMode === 'curved' && draftSvgPts.length >= 3
+                ? buildSmoothSvgPath(draftSvgPts)
+                : '';
+
+            const metrics = computePolylineSegmentMetrics(draftNodes);
+            let draftLen = metrics.totalLengthM;
+            if (activeWireRoutingMode === 'curved' && draftNodes.length >= 3) {
+              draftLen = 0;
+              const sampled = sampleCurvedPath3D(
+                draftNodes.map((n) => ({ x: n.x, y: n.y, z: 0 })),
+                8
               );
+              for (let i = 0; i < sampled.length - 1; i++) {
+                draftLen += Math.hypot(
+                  sampled[i + 1].x - sampled[i].x,
+                  sampled[i + 1].y - sampled[i].y
+                );
+              }
             }
+
+            // Detect OSNAP proximity to any compatible destination electrical component
+            let osnapTarget: ElectricalPoint | null = null;
+            if (wireDraft.preview) {
+              const candidates = allowInterFloorWiring ? fullProject.points : project.points;
+              let bestSnap = 0.55;
+              candidates.forEach((pt) => {
+                if (pt.id === fromPt.id) return;
+                const d = Math.hypot(pt.x - wireDraft.preview!.x, pt.y - wireDraft.preview!.y);
+                if (d <= bestSnap) {
+                  const compat = checkTerminalCompatibility(
+                    fromPt,
+                    pt,
+                    activeWireCategory,
+                    allowInterFloorWiring
+                  );
+                  if (compat.compatible) {
+                    bestSnap = d;
+                    osnapTarget = pt;
+                  }
+                }
+              });
+            }
+
             const lastNode = draftNodes[draftNodes.length - 1];
             const draftColor = WIRE_STANDARD_COLORS[wiringConfig.standard][activeWireCategory];
             return (
               <g pointerEvents="none">
-                <path
-                  d={draftD}
-                  fill="none"
-                  stroke={draftColor}
-                  strokeWidth="2.4"
-                  strokeDasharray="6,4"
-                  strokeLinecap="round"
-                />
+                {/* Placed connected polyline segments (solid) */}
+                {committedD && (
+                  <path
+                    d={committedD}
+                    fill="none"
+                    stroke={draftColor}
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                )}
+                {/* Live rubber-band preview segment following cursor freely in any angle */}
+                {activeWireRoutingMode === 'curved' && fullCurvedD ? (
+                  <path
+                    d={fullCurvedD}
+                    fill="none"
+                    stroke={draftColor}
+                    strokeWidth="2.2"
+                    strokeDasharray="6,4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeOpacity="0.85"
+                  />
+                ) : (
+                  lastCommittedSvg &&
+                  cursorSvg && (
+                    <line
+                      x1={lastCommittedSvg.x}
+                      y1={lastCommittedSvg.y}
+                      x2={cursorSvg.x}
+                      y2={cursorSvg.y}
+                      stroke={draftColor}
+                      strokeWidth="2.2"
+                      strokeDasharray="6,4"
+                      strokeLinecap="round"
+                    />
+                  )
+                )}
+                {/* AutoCAD square vertex grips at every placed point */}
                 {wireDraft.waypoints.map((wp, idx) => (
-                  <circle
+                  <rect
                     key={`draft-wp-${idx}`}
-                    cx={PAD + wp.x * SCALE}
-                    cy={PAD + wp.y * SCALE}
-                    r="4"
+                    x={PAD + wp.x * SCALE - 4}
+                    y={PAD + wp.y * SCALE - 4}
+                    width="8"
+                    height="8"
+                    rx="1"
                     fill={draftColor}
                     stroke="#080F20"
                     strokeWidth="1.2"
                   />
                 ))}
+                {/* Active cursor point indicator */}
+                {cursorSvg && (
+                  <circle
+                    cx={cursorSvg.x}
+                    cy={cursorSvg.y}
+                    r="3.2"
+                    fill="#E0F4FF"
+                    stroke={draftColor}
+                    strokeWidth="1.4"
+                  />
+                )}
+                {/* AutoCAD OSNAP ring when hovering near a compatible destination component */}
+                {osnapTarget && (
+                  <g
+                    transform={`translate(${PAD + (osnapTarget as ElectricalPoint).x * SCALE} ${PAD + (osnapTarget as ElectricalPoint).y * SCALE})`}
+                  >
+                    <circle
+                      r="13"
+                      fill="none"
+                      stroke="#22C55E"
+                      strokeWidth="1.8"
+                      strokeDasharray="3,2"
+                    />
+                    <rect
+                      x="-5"
+                      y="-5"
+                      width="10"
+                      height="10"
+                      fill="none"
+                      stroke="#22C55E"
+                      strokeWidth="1.4"
+                    />
+                  </g>
+                )}
+                {/* Dynamic Input HUD: Active Segment Length & Angle + Cumulative Total Length */}
                 <g
-                  transform={`translate(${PAD + lastNode.x * SCALE} ${PAD + lastNode.y * SCALE - 18})`}
+                  transform={`translate(${PAD + lastNode.x * SCALE} ${PAD + lastNode.y * SCALE - 22})`}
                 >
-                  <rect x="-54" y="-10" width="108" height="18" rx="3" fill="#080F20" stroke={draftColor} />
+                  <rect
+                    x="-98"
+                    y="-12"
+                    width="196"
+                    height="20"
+                    rx="3"
+                    fill="#080F20"
+                    fillOpacity="0.94"
+                    stroke={osnapTarget ? '#22C55E' : draftColor}
+                  />
                   <text
                     x="0"
-                    y="2.5"
+                    y="1.5"
                     textAnchor="middle"
                     fill="#E0F4FF"
                     fontFamily="Red Hat Mono, monospace"
-                    fontSize="8.5"
+                    fontSize="8.2"
                   >
-                    {fromPt.code} → {draftLen.toFixed(1)}m (Esc cancel)
+                    {metrics.lastSegmentLengthM.toFixed(2)}m ∠{metrics.lastSegmentAngleDeg.toFixed(0)}° · Click to end · Esc cancel
                   </text>
                 </g>
               </g>
@@ -2622,9 +3390,16 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             const stroke = isActiveFind || isSelected ? '#F5F7FA' : isFindMatch ? '#FBBF24' : isHighPower ? '#FFE2B3' : '#00A8FF';
             const radius = previewOnly ? 4 : isActiveFind ? 10 : isSelected ? 9 : isFindMatch ? 8 : 6.5;
 
+            const isPointDimmed =
+              !!isolatedRoom &&
+              pt.roomId !== isolatedRoom.id &&
+              !isPointInsideRoom(isolatedRoom, pt.x, pt.y);
+
             return (
               <g
                 key={pt.id}
+                opacity={isPointDimmed ? 0.14 : 1}
+                pointerEvents={isPointDimmed ? 'none' : 'auto'}
                 transform={`translate(${px} ${py})`}
                 className={
                   previewOnly || activeTool === 'pan'
@@ -2646,6 +3421,10 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                   }
                   e.stopPropagation();
                   if (activeTool === 'add-wire') {
+                    if (!wireConfigReady) {
+                      onRequestCableConfig?.(pt.id, { x: pt.x, y: pt.y });
+                      return;
+                    }
                     if (!wireDraft) {
                       setWireDraft({
                         fromPointId: pt.id,
@@ -2673,7 +3452,8 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                       if (compat.warning) {
                         onValidationWarning?.(compat.warning);
                       }
-                      onCreateWire?.(fromPt.id, pt.id, wireDraft.waypoints);
+                      const cleaned = finalizePolylineWaypoints(wireDraft.waypoints, pt, false);
+                      onCreateWire?.(fromPt.id, pt.id, cleaned);
                       setWireDraft(null);
                     }
                     return;

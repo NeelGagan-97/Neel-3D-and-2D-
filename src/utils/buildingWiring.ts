@@ -13,6 +13,7 @@ import {
   StaircaseType,
   WireCategory,
   WireLineStyle,
+  WireRoutingMode,
   WireStandard,
   WireWaypoint,
   WiringDisplayConfig,
@@ -88,6 +89,352 @@ export function validateCableSizeForCircuit(
     };
   }
   return { status: 'ok', range };
+}
+
+/** Standard selectable single-core / building wire cross-sections (sq.mm). */
+export const SELECTABLE_WIRE_SIZES_SQ_MM = [1, 1.5, 2, 2.5, 3, 4] as const;
+
+export type CableInstallationCondition =
+  | 'concealed-conduit'
+  | 'surface-conduit'
+  | 'cable-tray';
+
+export interface CableSizingWarning {
+  code:
+    | 'unset-size'
+    | 'overload-ampacity'
+    | 'circuit-range'
+    | 'voltage-drop'
+    | 'installation-derating'
+    | 'protection-coordination'
+    | 'earth-sizing'
+    | 'aluminium-small-size';
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+}
+
+export interface CableSizingEngineeringAssessment {
+  cableSizeSqMm: number | null;
+  cableMaterial: CableMaterial;
+  estimatedLoadW: number;
+  estimatedCurrentA: number;
+  referenceAmpacityA: number | null;
+  deratedAmpacityA: number | null;
+  routeLengthM: number;
+  voltageDropV: number | null;
+  voltageDropPct: number | null;
+  maxAllowedDropPct: number;
+  recommendedMaxBreakerA: number | null;
+  hasCriticalWarning: boolean;
+  warnings: CableSizingWarning[];
+  disclaimer: string;
+}
+
+/**
+ * Conservative reference current-carrying capacity (Amps, PVC 70°C copper in conduit at 30°C ambient,
+ * IS 732 / IEC 60364-5-52 Method B1 reference) interpolated cleanly for 1, 1.5, 2, 2.5, 3, 4+ sq.mm.
+ */
+function lookupReferenceAmpacityA(sizeSqMm: number, material: CableMaterial): number {
+  const copperTable: Array<[number, number]> = [
+    [1.0, 11],
+    [1.5, 14.5],
+    [2.0, 17.5],
+    [2.5, 20],
+    [3.0, 23],
+    [4.0, 27],
+    [6.0, 34],
+    [10.0, 46],
+    [16.0, 61],
+  ];
+  let cuAmps = copperTable[0][1];
+  if (sizeSqMm >= copperTable[copperTable.length - 1][0]) {
+    cuAmps = copperTable[copperTable.length - 1][1];
+  } else {
+    for (let i = 0; i < copperTable.length - 1; i++) {
+      const [s0, a0] = copperTable[i];
+      const [s1, a1] = copperTable[i + 1];
+      if (sizeSqMm >= s0 && sizeSqMm <= s1) {
+        const t = (sizeSqMm - s0) / Math.max(0.001, s1 - s0);
+        cuAmps = a0 + (a1 - a0) * t;
+        break;
+      }
+    }
+  }
+  const matFactor = material === 'Aluminium' ? 0.78 : 1.0;
+  return Number((cuAmps * matFactor).toFixed(1));
+}
+
+function lookupRecommendedMaxBreakerA(sizeSqMm: number, material: CableMaterial): number {
+  const derated = lookupReferenceAmpacityA(sizeSqMm, material) * 0.8;
+  const standardBreakers = [6, 10, 13, 16, 20, 25, 32, 40, 50, 63];
+  let chosen = 6;
+  for (const b of standardBreakers) {
+    if (b <= derated + 0.5) {
+      chosen = b;
+    }
+  }
+  return chosen;
+}
+
+/**
+ * Evaluates advisory engineering warnings for cable sizing based on connected load,
+ * installation conditions (concealed conduit / ambient / grouping derating),
+ * estimated voltage drop over the actual routed length, and MCB/RCCB protection coordination.
+ * Explicitly NEVER treats the selected size as automatic safety certification.
+ */
+export function evaluateCableSizingEngineering(options: {
+  cableSizeSqMm: number | null | undefined;
+  cableMaterial?: CableMaterial;
+  category?: WireCategory;
+  circuit?: CircuitId | '';
+  loadWatts?: number;
+  voltageV?: number;
+  routeLengthM?: number;
+  installationCondition?: CableInstallationCondition;
+}): CableSizingEngineeringAssessment {
+  const size =
+    typeof options.cableSizeSqMm === 'number' && Number.isFinite(options.cableSizeSqMm) && options.cableSizeSqMm > 0
+      ? options.cableSizeSqMm
+      : null;
+  const material: CableMaterial = options.cableMaterial ?? 'Copper';
+  const category: WireCategory = options.category ?? 'phase';
+  const circuit: CircuitId | '' = options.circuit ?? '';
+  const circuitKind = getCircuitKind(circuit);
+  const voltageV = options.voltageV && options.voltageV > 0 ? options.voltageV : 230;
+  const routeLengthM = Math.max(0, Number.isFinite(options.routeLengthM ?? 0) ? (options.routeLengthM ?? 0) : 0);
+  const installationCondition: CableInstallationCondition =
+    options.installationCondition ?? 'concealed-conduit';
+
+  const defaultLoadW =
+    typeof options.loadWatts === 'number' && Number.isFinite(options.loadWatts) && options.loadWatts > 0
+      ? options.loadWatts
+      : circuitKind === 'power'
+        ? 2200
+        : 600;
+  const powerFactor = circuitKind === 'power' ? 0.85 : 0.92;
+  const estimatedCurrentA = Number((defaultLoadW / (voltageV * powerFactor)).toFixed(2));
+  const maxAllowedDropPct = circuitKind === 'lighting' ? 3.0 : 5.0;
+
+  const warnings: CableSizingWarning[] = [];
+  const disclaimer =
+    'Advisory engineering check only — selected cable size is NOT automatic safety certification. Final conductor selection must be verified by a qualified electrical engineer for actual load current, ambient temperature, conduit grouping/derating, voltage drop, earth fault loop impedance, and MCB/RCCB protection coordination (IS 732 / IEC 60364 / local codes).';
+
+  if (category === 'communication') {
+    warnings.push({
+      code: 'installation-derating',
+      severity: 'info',
+      message:
+        'Low-voltage / data cable: maintain physical separation from mains power conduits to avoid electromagnetic interference.',
+    });
+    return {
+      cableSizeSqMm: size,
+      cableMaterial: material,
+      estimatedLoadW: defaultLoadW,
+      estimatedCurrentA: 0,
+      referenceAmpacityA: null,
+      deratedAmpacityA: null,
+      routeLengthM: Number(routeLengthM.toFixed(2)),
+      voltageDropV: null,
+      voltageDropPct: null,
+      maxAllowedDropPct,
+      recommendedMaxBreakerA: null,
+      hasCriticalWarning: false,
+      warnings,
+      disclaimer,
+    };
+  }
+
+  if (size === null) {
+    warnings.push({
+      code: 'unset-size',
+      severity: 'warning',
+      message: `Wire size not configured. Select a cross-section (1, 1.5, 2, 2.5, 3, or 4 sq.mm) appropriate for the ${defaultLoadW} W (${estimatedCurrentA} A) design load.`,
+    });
+    return {
+      cableSizeSqMm: null,
+      cableMaterial: material,
+      estimatedLoadW: defaultLoadW,
+      estimatedCurrentA,
+      referenceAmpacityA: null,
+      deratedAmpacityA: null,
+      routeLengthM: Number(routeLengthM.toFixed(2)),
+      voltageDropV: null,
+      voltageDropPct: null,
+      maxAllowedDropPct,
+      recommendedMaxBreakerA: null,
+      hasCriticalWarning: true,
+      warnings,
+      disclaimer,
+    };
+  }
+
+  const refAmpacity = lookupReferenceAmpacityA(size, material);
+  const installFactor =
+    installationCondition === 'concealed-conduit'
+      ? 0.8
+      : installationCondition === 'surface-conduit'
+        ? 0.88
+        : 0.95;
+  const deratedAmpacity = Number((refAmpacity * installFactor).toFixed(1));
+  const recommendedMaxBreakerA = lookupRecommendedMaxBreakerA(size, material);
+
+  // Single-phase two-wire voltage drop: dV = 2 * I * L * rho / A
+  const resistivity = material === 'Aluminium' ? 0.0285 : 0.0178; // Ohm*mm^2/m at ~70°C operating temp
+  const voltageDropV =
+    routeLengthM > 0 ? Number(((2 * estimatedCurrentA * routeLengthM * resistivity) / size).toFixed(2)) : 0;
+  const voltageDropPct =
+    routeLengthM > 0 ? Number(((voltageDropV / voltageV) * 100).toFixed(2)) : 0;
+
+  if (material === 'Aluminium' && size < 4) {
+    warnings.push({
+      code: 'aluminium-small-size',
+      severity: 'error',
+      message: `Aluminium conductor (${size} sq.mm) below 4 sq.mm is generally restricted for fixed building branch wiring; verify local code or use Copper.`,
+    });
+  }
+
+  if (category !== 'earth' && estimatedCurrentA > deratedAmpacity) {
+    warnings.push({
+      code: 'overload-ampacity',
+      severity: 'error',
+      message: `Load warning: estimated ${estimatedCurrentA} A (${defaultLoadW} W) exceeds derated ${size} sq.mm ${material} capacity (~${deratedAmpacity} A in ${installationCondition.replace('-', ' ')}). Increase cable size or split circuit load.`,
+    });
+  } else if (category !== 'earth' && estimatedCurrentA > deratedAmpacity * 0.8) {
+    warnings.push({
+      code: 'overload-ampacity',
+      severity: 'warning',
+      message: `High thermal utilization: ${estimatedCurrentA} A is >80% of derated ${size} sq.mm capacity (~${deratedAmpacity} A). Consider stepping up cable size for continuous loads.`,
+    });
+  }
+
+  if (circuit) {
+    const cktCheck = validateCableSizeForCircuit(circuit, size);
+    if (cktCheck.status === 'out-of-range' && cktCheck.warning) {
+      warnings.push({
+        code: 'circuit-range',
+        severity: size < cktCheck.range.minSqMm ? 'error' : 'warning',
+        message: cktCheck.warning,
+      });
+    }
+  } else if (size <= 1.0 && defaultLoadW > 1200) {
+    warnings.push({
+      code: 'circuit-range',
+      severity: 'error',
+      message: `1.0 sq.mm wire is typically limited to light/control loads (≤6A). Avoid using 1.0 sq.mm on ${defaultLoadW} W power outlets or heavy appliances.`,
+    });
+  }
+
+  if (category === 'earth' && size < 1.5) {
+    warnings.push({
+      code: 'earth-sizing',
+      severity: 'warning',
+      message: `Protective Earth (PE) conductor (${size} sq.mm) is below the typical 1.5 sq.mm minimum for fixed conduits; verify fault-current adiabatic requirement and continuity.`,
+    });
+  }
+
+  if (routeLengthM > 0 && voltageDropPct > maxAllowedDropPct) {
+    warnings.push({
+      code: 'voltage-drop',
+      severity: 'error',
+      message: `Voltage drop warning: estimated ${voltageDropPct}% (${voltageDropV} V over ${routeLengthM.toFixed(1)} m) exceeds typical ${maxAllowedDropPct}% limit for ${circuitKind} circuits. Increase wire size or shorten route.`,
+    });
+  } else if (routeLengthM > 0 && voltageDropPct > maxAllowedDropPct * 0.75) {
+    warnings.push({
+      code: 'voltage-drop',
+      severity: 'warning',
+      message: `Elevated voltage drop: ~${voltageDropPct}% (${voltageDropV} V over ${routeLengthM.toFixed(1)} m) approaching ${maxAllowedDropPct}% guideline.`,
+    });
+  }
+
+  warnings.push({
+    code: 'protection-coordination',
+    severity: 'info',
+    message: `Protection & installation check: ensure upstream MCB/RCBO rating (typically ≤${recommendedMaxBreakerA} A for ${size} sq.mm ${material}) satisfies Ib ≤ In ≤ Iz after ambient temperature and conduit grouping derating.`,
+  });
+
+  const hasCriticalWarning = warnings.some((w) => w.severity === 'error');
+  return {
+    cableSizeSqMm: size,
+    cableMaterial: material,
+    estimatedLoadW: defaultLoadW,
+    estimatedCurrentA,
+    referenceAmpacityA: refAmpacity,
+    deratedAmpacityA: deratedAmpacity,
+    routeLengthM: Number(routeLengthM.toFixed(2)),
+    voltageDropV,
+    voltageDropPct,
+    maxAllowedDropPct,
+    recommendedMaxBreakerA,
+    hasCriticalWarning,
+    warnings,
+    disclaimer,
+  };
+}
+
+/**
+ * Simplifies raw pointer-drag freehand points using Douglas-Peucker distance tolerance
+ * so irregular, diagonal, and curved free-style cable strokes stay smooth and editable
+ * without creating hundreds of redundant micro-waypoints.
+ */
+export function simplifyFreehandWaypoints(
+  points: ReadonlyArray<WireWaypoint>,
+  toleranceM = 0.08
+): WireWaypoint[] {
+  if (points.length <= 2) {
+    return points.map((p) => ({
+      x: Number(p.x.toFixed(2)),
+      y: Number(p.y.toFixed(2)),
+      ...(typeof p.z === 'number' && Number.isFinite(p.z) ? { z: Number(p.z.toFixed(2)) } : {}),
+    }));
+  }
+
+  const sqDistToSegment = (p: WireWaypoint, a: WireWaypoint, b: WireWaypoint): number => {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    if (dx === 0 && dy === 0) {
+      return (p.x - a.x) ** 2 + (p.y - a.y) ** 2;
+    }
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)));
+    const projX = a.x + t * dx;
+    const projY = a.y + t * dy;
+    return (p.x - projX) ** 2 + (p.y - projY) ** 2;
+  };
+
+  const sqTol = toleranceM * toleranceM;
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+
+  const stack: Array<[number, number]> = [[0, points.length - 1]];
+  while (stack.length > 0) {
+    const [first, last] = stack.pop()!;
+    let maxSq = 0;
+    let index = -1;
+    for (let i = first + 1; i < last; i++) {
+      const sq = sqDistToSegment(points[i], points[first], points[last]);
+      if (sq > maxSq) {
+        maxSq = sq;
+        index = i;
+      }
+    }
+    if (maxSq > sqTol && index !== -1) {
+      keep[index] = 1;
+      stack.push([first, index], [index, last]);
+    }
+  }
+
+  const simplified: WireWaypoint[] = [];
+  for (let i = 0; i < points.length; i++) {
+    if (keep[i]) {
+      const p = points[i];
+      simplified.push({
+        x: Number(p.x.toFixed(2)),
+        y: Number(p.y.toFixed(2)),
+        ...(typeof p.z === 'number' && Number.isFinite(p.z) ? { z: Number(p.z.toFixed(2)) } : {}),
+      });
+    }
+  }
+  return simplified;
 }
 
 /**
@@ -1285,7 +1632,7 @@ export function checkTerminalCompatibility(
   }
 
   // Communication cables should not connect directly to high-power appliances/geysers/ACs
-  const highPowerTypes = new Set(['split_ac', 'geyser', 'socket_16a', 'appliance']);
+  const highPowerTypes = new Set(['split_ac', 'geyser', 'refrigerator', 'socket_16a', 'appliance']);
   if (
     category === 'communication' &&
     (highPowerTypes.has(fromPt.itemType) || highPowerTypes.has(toPt.itemType))
@@ -1564,7 +1911,12 @@ export function buildCircuitCableWireFields(
     specification?: string;
     unit?: string;
     unitPricePerM?: number | null;
+    mrpPerM?: number | null;
+    discountPercent?: number | null;
     gstPercent?: number | null;
+    variantSku?: string;
+    variantLabel?: string;
+    priceCapturedAt?: string;
     datasheetUrl?: string;
   }>
 ): Partial<ElectricalWire> {
@@ -1579,7 +1931,12 @@ export function buildCircuitCableWireFields(
     specification: cfg.specification,
     unit: cfg.unit,
     unitPricePerM: cfg.unitPricePerM ?? null,
+    mrpPerM: cfg.mrpPerM ?? null,
+    discountPercent: cfg.discountPercent ?? null,
     gstPercent: cfg.gstPercent ?? null,
+    ...(cfg.variantSku ? { variantSku: cfg.variantSku } : {}),
+    ...(cfg.variantLabel ? { variantLabel: cfg.variantLabel } : {}),
+    ...(cfg.priceCapturedAt ? { priceCapturedAt: cfg.priceCapturedAt } : {}),
     ...(cfg.datasheetUrl ? { datasheetUrl: cfg.datasheetUrl } : {}),
   };
 }
@@ -1589,10 +1946,23 @@ export function createElectricalWire(options: {
   fromPoint: ElectricalPoint;
   toPoint: ElectricalPoint;
   waypoints?: WireWaypoint[];
+  routingMode?: WireRoutingMode;
   category?: WireCategory;
   circuit?: CircuitId | '';
+  wireType?: string;
+  cores?: number;
+  phaseDesignation?: PhaseDesignation;
   cableMaterial?: CableMaterial;
   cableSizeSqMm?: number | null;
+  productId?: string;
+  manufacturer?: string;
+  brand?: string;
+  productName?: string;
+  productCategory?: string;
+  modelNumber?: string;
+  specification?: string;
+  unitPricePerM?: number | null;
+  gstPercent?: number | null;
 }): ElectricalWire {
   const cfg = getWiringConfig(options.project);
   const category = options.category ?? 'phase';
@@ -1614,18 +1984,31 @@ export function createElectricalWire(options: {
     waypoints: (options.waypoints ?? []).map((wp) => ({
       x: Number(wp.x.toFixed(2)),
       y: Number(wp.y.toFixed(2)),
+      ...(typeof wp.z === 'number' && Number.isFinite(wp.z)
+        ? { z: Number(Math.max(0.05, wp.z).toFixed(2)) }
+        : {}),
     })),
+    routingMode: options.routingMode ?? 'orthogonal',
     circuit: options.circuit !== undefined ? options.circuit : options.fromPoint.circuit,
     category,
-    wireType: catDefaults.wireType,
+    wireType: options.wireType?.trim() || catDefaults.wireType,
     cableMaterial: options.cableMaterial ?? 'Copper',
     cableSizeSqMm: options.cableSizeSqMm !== undefined ? options.cableSizeSqMm : null,
-    cores: catDefaults.cores,
-    phaseDesignation: catDefaults.phaseDesignation,
+    cores: options.cores ?? catDefaults.cores,
+    phaseDesignation: options.phaseDesignation ?? catDefaults.phaseDesignation,
     color: WIRE_STANDARD_COLORS[cfg.standard][category],
     lineThickness: catDefaults.lineThickness,
     lineStyle: catDefaults.lineStyle,
     status: 'connected',
+    ...(options.productId ? { productId: options.productId } : {}),
+    ...(options.manufacturer ? { manufacturer: options.manufacturer } : {}),
+    ...(options.brand ? { brand: options.brand } : {}),
+    ...(options.productName ? { productName: options.productName } : {}),
+    ...(options.productCategory ? { productCategory: options.productCategory } : {}),
+    ...(options.modelNumber ? { modelNumber: options.modelNumber } : {}),
+    ...(options.specification ? { specification: options.specification } : {}),
+    ...(options.unitPricePerM !== undefined ? { unitPricePerM: options.unitPricePerM } : {}),
+    ...(options.gstPercent !== undefined ? { gstPercent: options.gstPercent } : {}),
     assumptionNote:
       options.cableSizeSqMm === undefined || options.cableSizeSqMm === null
         ? 'Cable cross-section not yet specified — select sq.mm based on circuit breaker & load calculation.'
@@ -1936,6 +2319,69 @@ const round2 = (val: number): number => (Number.isFinite(val) ? Number(val.toFix
  *  - Total Required = Base Route + Termination + Installation Allowance
  * All values are returned in both metres and feet.
  */
+/**
+ * Evaluates a smooth Catmull-Rom 3D spline through `points` (tension 0.5).
+ * Used identically for 2D curved path length, 3D length calculation, and smooth geometry.
+ */
+export function sampleCurvedPath3D(
+  points: ReadonlyArray<{ x: number; y: number; z: number }>,
+  samplesPerSegment = 12
+): Array<{ x: number; y: number; z: number }> {
+  if (points.length <= 2) return points.map((p) => ({ ...p }));
+  const out: Array<{ x: number; y: number; z: number }> = [];
+  const n = points.length;
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(n - 1, i + 2)];
+    const steps = i === n - 2 ? samplesPerSegment : samplesPerSegment - 1;
+    for (let s = 0; s <= steps; s++) {
+      const t = s / samplesPerSegment;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      const interp = (v0: number, v1: number, v2: number, v3: number) =>
+        0.5 *
+        (2 * v1 +
+          (-v0 + v2) * t +
+          (2 * v0 - 5 * v1 + 4 * v2 - v3) * t2 +
+          (-v0 + 3 * v1 - 3 * v2 + v3) * t3);
+      out.push({
+        x: interp(p0.x, p1.x, p2.x, p3.x),
+        y: interp(p0.y, p1.y, p2.y, p3.y),
+        z: interp(p0.z, p1.z, p2.z, p3.z),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Generates an SVG path string (Catmull-Rom converted to cubic Bézier segments) for curved 2D wires.
+ */
+export function buildSmoothSvgPath(points: ReadonlyArray<{ x: number; y: number }>): string {
+  if (points.length === 0) return '';
+  if (points.length === 1) return `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  if (points.length === 2) {
+    return `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)} L ${points[1].x.toFixed(1)} ${points[1].y.toFixed(1)}`;
+  }
+  const cmds: string[] = [`M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(points.length - 1, i + 2)];
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    cmds.push(
+      `C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`
+    );
+  }
+  return cmds.join(' ');
+}
+
 export function computeWireLengthBreakdown(
   wire: ElectricalWire,
   project: ProjectData,
@@ -1948,47 +2394,22 @@ export function computeWireLengthBreakdown(
     Math.min(50, Number.isFinite(installationAllowancePct) ? installationAllowancePct : DEFAULT_INSTALLATION_ALLOWANCE_PCT)
   );
 
+  const emptyBreakdown = (): WireLengthBreakdown => ({
+    horizontalM: 0,
+    verticalDropsM: 0,
+    baseRouteM: 0,
+    baseRouteFt: 0,
+    terminationM: 0,
+    terminationFt: 0,
+    allowancePct: safeAllowancePct,
+    allowanceM: 0,
+    allowanceFt: 0,
+    totalM: 0,
+    totalFt: 0,
+  });
+
   if (!fromPt || !toPt) {
-    return {
-      horizontalM: 0,
-      verticalDropsM: 0,
-      baseRouteM: 0,
-      baseRouteFt: 0,
-      terminationM: 0,
-      terminationFt: 0,
-      allowancePct: safeAllowancePct,
-      allowanceM: 0,
-      allowanceFt: 0,
-      totalM: 0,
-      totalFt: 0,
-    };
-  }
-
-  const nodes: { x: number; y: number }[] = [
-    { x: fromPt.x, y: fromPt.y },
-    ...(wire.waypoints ?? []),
-    { x: toPt.x, y: toPt.y },
-  ];
-
-  let planLength = 0;
-  for (let i = 0; i < nodes.length - 1; i++) {
-    const seg = Math.hypot(nodes[i + 1].x - nodes[i].x, nodes[i + 1].y - nodes[i].y);
-    if (!Number.isFinite(seg)) {
-      return {
-        horizontalM: 0,
-        verticalDropsM: 0,
-        baseRouteM: 0,
-        baseRouteFt: 0,
-        terminationM: 0,
-        terminationFt: 0,
-        allowancePct: safeAllowancePct,
-        allowanceM: 0,
-        allowanceFt: 0,
-        totalM: 0,
-        totalFt: 0,
-      };
-    }
-    planLength += seg;
+    return emptyBreakdown();
   }
 
   const { ceilingM } = siteToMeters(project.site);
@@ -2006,15 +2427,95 @@ export function computeWireLengthBreakdown(
 
   const fromAbsZ = fromElev + fromPtZ;
   const toAbsZ = toElev + toPtZ;
-
-  // Include vertical conduit drops from ceiling routing plane (or inter-floor elevation delta)
   const routeZ = Math.max(fromAbsZ, toAbsZ, fromElev + fromFloorH - 0.15);
-  const verticalDrops =
-    getItemFloor(fromPt) === getItemFloor(toPt)
+  const sameFloor = getItemFloor(fromPt) === getItemFloor(toPt);
+  const waypoints = wire.waypoints ?? [];
+  const hasExplicitWaypointZ = waypoints.some(
+    (wp) => typeof wp.z === 'number' && Number.isFinite(wp.z)
+  );
+  const isCurved = wire.routingMode === 'curved' && waypoints.length > 0;
+
+  let planLength = 0;
+  let verticalDrops = 0;
+  let baseRouteRaw = 0;
+
+  if (hasExplicitWaypointZ || isCurved) {
+    // Full 3D route evaluation (X, Y, Z) with exact curved arc sampling when routingMode === 'curved'
+    const routeNodes3D: Array<{ x: number; y: number; z: number }> = [];
+    const firstWpZ =
+      waypoints.length > 0 && typeof waypoints[0].z === 'number' && Number.isFinite(waypoints[0].z)
+        ? fromElev + waypoints[0].z
+        : sameFloor
+          ? routeZ
+          : fromAbsZ;
+    const lastWp = waypoints[waypoints.length - 1];
+    const lastWpZ =
+      lastWp && typeof lastWp.z === 'number' && Number.isFinite(lastWp.z)
+        ? (sameFloor ? fromElev : toElev) + lastWp.z
+        : sameFloor
+          ? routeZ
+          : toAbsZ;
+
+    routeNodes3D.push({ x: fromPt.x, y: fromPt.y, z: firstWpZ });
+    waypoints.forEach((wp) => {
+      const wpAbsZ =
+        typeof wp.z === 'number' && Number.isFinite(wp.z)
+          ? fromElev + wp.z
+          : sameFloor
+            ? routeZ
+            : fromAbsZ;
+      routeNodes3D.push({ x: wp.x, y: wp.y, z: wpAbsZ });
+    });
+    routeNodes3D.push({ x: toPt.x, y: toPt.y, z: lastWpZ });
+
+    const evaluatedPath = isCurved ? sampleCurvedPath3D(routeNodes3D, 12) : routeNodes3D;
+
+    let total3DRun = 0;
+    let totalVerticalAlongRun = 0;
+    for (let i = 0; i < evaluatedPath.length - 1; i++) {
+      const dx = evaluatedPath[i + 1].x - evaluatedPath[i].x;
+      const dy = evaluatedPath[i + 1].y - evaluatedPath[i].y;
+      const dz = evaluatedPath[i + 1].z - evaluatedPath[i].z;
+      const segXY = Math.hypot(dx, dy);
+      const seg3D = Math.hypot(dx, dy, dz);
+      if (!Number.isFinite(seg3D) || !Number.isFinite(segXY)) {
+        return emptyBreakdown();
+      }
+      planLength += segXY;
+      totalVerticalAlongRun += Math.abs(dz);
+      total3DRun += seg3D;
+    }
+
+    const endpointDrops =
+      Math.abs(firstWpZ - fromAbsZ) +
+      Math.abs(lastWpZ - toAbsZ) +
+      (sameFloor ? 0 : 0.6);
+
+    verticalDrops = endpointDrops + totalVerticalAlongRun;
+    baseRouteRaw = total3DRun + endpointDrops;
+  } else {
+    const nodes: { x: number; y: number }[] = [
+      { x: fromPt.x, y: fromPt.y },
+      ...waypoints,
+      { x: toPt.x, y: toPt.y },
+    ];
+
+    for (let i = 0; i < nodes.length - 1; i++) {
+      const seg = Math.hypot(nodes[i + 1].x - nodes[i].x, nodes[i + 1].y - nodes[i].y);
+      if (!Number.isFinite(seg)) {
+        return emptyBreakdown();
+      }
+      planLength += seg;
+    }
+
+    // Include vertical conduit drops from ceiling routing plane (or inter-floor elevation delta)
+    verticalDrops = sameFloor
       ? Math.abs(routeZ - fromAbsZ) + Math.abs(routeZ - toAbsZ)
       : Math.abs(toAbsZ - fromAbsZ) + 0.6;
 
-  const baseRouteRaw = planLength + verticalDrops;
+    baseRouteRaw = planLength + verticalDrops;
+  }
+
   const fromTerm =
     fromPt.itemType === 'distribution_board' || fromPt.itemType === 'earthing_point'
       ? WIRE_TERMINATION_DB_M
@@ -2788,7 +3289,7 @@ export function validateBuildingAndElectrical(project: ProjectData): ValidationI
 
   // 5. Electrical: Earthing check for high-power appliances / 16A sockets when wires exist
   if (wires.length > 0) {
-    const earthRequiredTypes = new Set(['split_ac', 'geyser', 'socket_16a', 'appliance']);
+    const earthRequiredTypes = new Set(['split_ac', 'geyser', 'refrigerator', 'socket_16a', 'appliance']);
     project.points.forEach((pt) => {
       if (earthRequiredTypes.has(pt.itemType) && !earthedPointIds.has(pt.id)) {
         issues.push({
@@ -3272,12 +3773,15 @@ export interface ReconciledBoqRow {
   cableSize: string;
   unit: string;
   quantity: number;
+  mrp?: number | null;
+  discountPercent?: number | null;
   unitPrice: number | null;
   priceSource: BoqPriceSource;
   gstPercent: number | null;
   subtotal: number | null;
   gstAmount: number | null;
   total: number | null;
+  priceCapturedAt?: string;
   notes: string;
 }
 
@@ -3385,7 +3889,16 @@ function buildBoqRowsForSubset(
   const boqEdits = project.summaryOverrides?.boqEdits;
 
   points.forEach((pt) => {
-    const boqEdit = boqEdits?.[pt.itemType];
+    const effectivePtCost =
+      typeof pt.manualPriceOverride === 'number' &&
+      Number.isFinite(pt.manualPriceOverride) &&
+      pt.manualPriceOverride >= 0
+        ? pt.manualPriceOverride
+        : pt.unitCost;
+    const boqRowKey = pt.productId
+      ? `${pt.itemType}::${pt.productId}::${pt.variantSku || ''}::${Number(effectivePtCost.toFixed(2))}`
+      : pt.itemType;
+    const boqEdit = boqEdits?.[boqRowKey] ?? boqEdits?.[pt.itemType];
     const { price, source, note } = resolveBoqPointRate(pt, boqEdit?.unitPrice);
     const catMeta = CATALOG_MAP[pt.itemType];
     const category = catMeta ? catMeta.boqCategory : pt.category;
@@ -3394,6 +3907,19 @@ function buildBoqRowsForSubset(
     const productName = pt.productId ? pt.name : catMeta?.productName ?? pt.name;
     const model = pt.modelNumber?.trim() || 'Not specified';
     const spec = resolveBoqPointSpec(pt);
+    const unit = pt.unit?.trim() || 'Nos';
+    const mrp =
+      typeof pt.mrp === 'number' && Number.isFinite(pt.mrp) && pt.mrp > 0
+        ? Number(pt.mrp.toFixed(2))
+        : null;
+    const discountPercent =
+      typeof pt.discountPercent === 'number' &&
+      Number.isFinite(pt.discountPercent) &&
+      pt.discountPercent >= 0
+        ? Number(pt.discountPercent.toFixed(2))
+        : mrp !== null && price !== null && mrp > price
+          ? Number((((mrp - price) / mrp) * 100).toFixed(2))
+          : null;
     const gstPct =
       typeof pt.gstPercent === 'number' && Number.isFinite(pt.gstPercent) && pt.gstPercent >= 0
         ? pt.gstPercent
@@ -3408,8 +3934,10 @@ function buildBoqRowsForSubset(
       manufacturer,
       model,
       productName,
+      unit,
       pt.wattage,
       price ?? 'NA',
+      discountPercent ?? 'NA',
       source,
       gstPct ?? 'NA',
     ].join('||');
@@ -3444,15 +3972,21 @@ function buildBoqRowsForSubset(
         totalLoadW: pt.wattage,
         circuits: circuitLabel,
         cableSize: '—',
-        unit: 'Nos',
+        unit,
         quantity: 1,
+        mrp,
+        discountPercent,
         unitPrice: price,
         priceSource: source,
         gstPercent: gstPct,
         subtotal: sub,
         gstAmount: gstAmt,
         total,
-        notes: note,
+        priceCapturedAt: pt.priceCapturedAt,
+        notes:
+          discountPercent !== null && discountPercent > 0
+            ? `${note} (${discountPercent}% off MRP)`
+            : note,
         circuitSet,
       });
     }
@@ -3472,8 +4006,11 @@ function buildBoqRowsForSubset(
       unit: string;
       circuitSet: Set<string>;
       rawLengthM: number;
+      mrp: number | null;
+      discountPercent: number | null;
       unitPrice: number | null;
       gstPercent: number | null;
+      priceCapturedAt?: string;
     }
   >();
 
@@ -3508,9 +4045,23 @@ function buildBoqRowsForSubset(
       typeof rawUnitPrice === 'number' && Number.isFinite(rawUnitPrice) && rawUnitPrice > 0
         ? Number(rawUnitPrice.toFixed(2))
         : null;
+    const rawMrp = w.mrpPerM !== undefined ? w.mrpPerM : cktCfg?.mrpPerM;
+    const mrp =
+      typeof rawMrp === 'number' && Number.isFinite(rawMrp) && rawMrp > 0
+        ? Number(rawMrp.toFixed(2))
+        : null;
+    const rawDiscount =
+      w.discountPercent !== undefined ? w.discountPercent : cktCfg?.discountPercent;
+    const discountPercent =
+      typeof rawDiscount === 'number' && Number.isFinite(rawDiscount) && rawDiscount >= 0
+        ? Number(rawDiscount.toFixed(2))
+        : mrp !== null && unitPrice !== null && mrp > unitPrice
+          ? Number((((mrp - unitPrice) / mrp) * 100).toFixed(2))
+          : null;
     const rawGst = w.gstPercent !== undefined ? w.gstPercent : cktCfg?.gstPercent;
     const gstPercent =
       typeof rawGst === 'number' && Number.isFinite(rawGst) && rawGst >= 0 ? rawGst : null;
+    const priceCapturedAt = w.priceCapturedAt ?? cktCfg?.priceCapturedAt;
     const cktName = w.circuit || 'Unassigned';
 
     const key = [
@@ -3522,6 +4073,7 @@ function buildBoqRowsForSubset(
       w.category,
       w.cableMaterial,
       unitPrice ?? 'NA',
+      discountPercent ?? 'NA',
       gstPercent ?? 'NA',
     ].join('||');
     const ex = wireGroups.get(key);
@@ -3540,8 +4092,11 @@ function buildBoqRowsForSubset(
         unit,
         circuitSet: new Set([cktName]),
         rawLengthM: lenM,
+        mrp,
+        discountPercent,
         unitPrice,
         gstPercent,
+        priceCapturedAt,
       });
     }
   });
@@ -3570,12 +4125,15 @@ function buildBoqRowsForSubset(
       cableSize: wg.cableSize,
       unit: wg.unit,
       quantity: qtyM,
+      mrp: wg.mrp,
+      discountPercent: wg.discountPercent,
       unitPrice: wg.unitPrice,
       priceSource,
       gstPercent: wg.gstPercent,
       subtotal: sub,
       gstAmount: gstAmt,
       total,
+      priceCapturedAt: wg.priceCapturedAt,
       notes:
         wg.unitPrice === null
           ? `Routed ${rawM.toFixed(2)}m${allowancePct > 0 ? ` (+${allowancePct}% allowance)` : ''} · Rate not configured`
@@ -3605,7 +4163,7 @@ export function computeReconciledBoq(
 
   const rows = buildBoqRowsForSubset(project.points, wires, project, allowancePercent);
 
-  // Include explicit user-added custom BOQ rows from Project Summary if present
+  // Include explicit user-added custom / central-catalogue BOQ rows from Project Summary if present
   (project.summaryOverrides?.addedBoqRows ?? []).forEach((row) => {
     const unitRate =
       typeof row.unitPrice === 'number' && Number.isFinite(row.unitPrice) && row.unitPrice >= 0
@@ -3619,27 +4177,60 @@ export function computeReconciledBoq(
         : row.estimatedCost > 0
           ? Number(row.estimatedCost.toFixed(2))
           : null;
+    const gstPct =
+      typeof row.gstPercent === 'number' && Number.isFinite(row.gstPercent) && row.gstPercent >= 0
+        ? row.gstPercent
+        : null;
+    const gstAmt =
+      computedCost !== null && gstPct !== null
+        ? Number(((computedCost * gstPct) / 100).toFixed(2))
+        : null;
+    const grandTotal =
+      computedCost !== null ? Number((computedCost + (gstAmt ?? 0)).toFixed(2)) : null;
+    const mrp =
+      typeof row.mrp === 'number' && Number.isFinite(row.mrp) && row.mrp > 0
+        ? Number(row.mrp.toFixed(2))
+        : null;
+    const discountPercent =
+      typeof row.discountPercent === 'number' &&
+      Number.isFinite(row.discountPercent) &&
+      row.discountPercent >= 0
+        ? Number(row.discountPercent.toFixed(2))
+        : mrp !== null && unitRate !== null && mrp > unitRate
+          ? Number((((mrp - unitRate) / mrp) * 100).toFixed(2))
+          : null;
+
     rows.push({
       kind: 'manual',
       productCategory: row.category || 'Custom',
-      manufacturer: 'Manual Entry',
-      brand: 'Manual Entry',
+      manufacturer: row.manufacturer?.trim() || 'Manual Entry',
+      brand: row.brand?.trim() || row.manufacturer?.trim() || 'Manual Entry',
       productName: row.productName,
-      model: 'Not specified',
-      specification: row.totalWattage > 0 ? `${row.totalWattage}W total` : 'User-added BOQ row',
+      model: row.modelNumber?.trim() || 'Not specified',
+      specification:
+        row.specification?.trim() ||
+        (row.totalWattage > 0 ? `${row.totalWattage}W total` : 'User-added BOQ row'),
       ratedLoadW: row.quantity > 0 ? Math.round(row.totalWattage / row.quantity) : 0,
       totalLoadW: row.totalWattage,
       circuits: 'Manual',
       cableSize: '—',
-      unit: 'Nos',
+      unit: row.unit?.trim() || 'Nos',
       quantity: row.quantity,
+      mrp,
+      discountPercent,
       unitPrice: unitRate,
-      priceSource: unitRate !== null ? 'override' : 'missing',
-      gstPercent: null,
+      priceSource:
+        unitRate !== null ? (row.productId ? 'catalogue' : 'override') : 'missing',
+      gstPercent: gstPct,
       subtotal: computedCost,
-      gstAmount: null,
-      total: computedCost,
-      notes: 'Manual override row',
+      gstAmount: gstAmt,
+      total: grandTotal,
+      priceCapturedAt: row.priceCapturedAt,
+      notes: row.productId
+        ? discountPercent !== null && discountPercent > 0
+          ? `Central catalogue BOQ item (${discountPercent}% off MRP)`
+          : 'Central catalogue BOQ item'
+        : 'Manual override row',
     });
   });
 
@@ -3998,4 +4589,163 @@ export function computeWireConsumptionSummary(
     overallProcurementAllowanceM,
   };
 }
+
+// ============================================================================
+// AutoCAD LINE / POLYLINE Interactive Cable-Routing Helpers
+// ============================================================================
+
+export interface PolylineSegmentMetrics {
+  segmentLengthsM: number[];
+  totalLengthM: number;
+  lastSegmentLengthM: number;
+  lastSegmentAngleDeg: number;
+}
+
+/**
+ * Computes exact Euclidean segment lengths, cumulative polyline total length (sum of all connected segments),
+ * and the active rubber-band segment length & angle (0°–360°) with zero orthogonal clamping.
+ */
+export function computePolylineSegmentMetrics(
+  nodes: ReadonlyArray<{ x: number; y: number }>
+): PolylineSegmentMetrics {
+  if (nodes.length < 2) {
+    return {
+      segmentLengthsM: [],
+      totalLengthM: 0,
+      lastSegmentLengthM: 0,
+      lastSegmentAngleDeg: 0,
+    };
+  }
+  const segmentLengthsM: number[] = [];
+  let totalLengthM = 0;
+  let lastDx = 0;
+  let lastDy = 0;
+  for (let i = 0; i < nodes.length - 1; i++) {
+    const dx = nodes[i + 1].x - nodes[i].x;
+    const dy = nodes[i + 1].y - nodes[i].y;
+    const segLen = Math.hypot(dx, dy);
+    segmentLengthsM.push(segLen);
+    totalLengthM += segLen;
+    if (i === nodes.length - 2) {
+      lastDx = dx;
+      lastDy = dy;
+    }
+  }
+  const lastSegmentLengthM = segmentLengthsM[segmentLengthsM.length - 1] ?? 0;
+  // Standard CAD angle: 0° = +X (East), 90° = -Y (North on screen) normalized to [0, 360)
+  let angleDeg = (Math.atan2(-lastDy, lastDx) * 180) / Math.PI;
+  if (angleDeg < 0) angleDeg += 360;
+  return {
+    segmentLengthsM,
+    totalLengthM,
+    lastSegmentLengthM,
+    lastSegmentAngleDeg: Number(angleDeg.toFixed(1)),
+  };
+}
+
+/**
+ * Resolves the AutoCAD POLYLINE start point when the user clicks anywhere on the 2D canvas:
+ * - If within `snapRadiusM` of an electrical component, anchors directly on that component (0 initial waypoints).
+ * - Otherwise anchors `fromPoint` to the nearest available electrical component AND places the exact
+ *   clicked canvas coordinate as the first intermediate vertex so endpoints always remain connected to components.
+ */
+export function resolvePolylineStartPoint(
+  clickCoord: { x: number; y: number },
+  points: ReadonlyArray<ElectricalPoint>,
+  options?: { snapRadiusM?: number; defaultZ?: number }
+): {
+  fromPoint: ElectricalPoint;
+  initialWaypoints: WireWaypoint[];
+  snappedToComponent: boolean;
+} | null {
+  if (points.length === 0) return null;
+  const snapRadiusM = options?.snapRadiusM ?? 0.55;
+  let nearest: ElectricalPoint = points[0];
+  let nearestDist = Math.hypot(nearest.x - clickCoord.x, nearest.y - clickCoord.y);
+  for (let i = 1; i < points.length; i++) {
+    const d = Math.hypot(points[i].x - clickCoord.x, points[i].y - clickCoord.y);
+    if (d < nearestDist) {
+      nearestDist = d;
+      nearest = points[i];
+    }
+  }
+  if (nearestDist <= snapRadiusM) {
+    return {
+      fromPoint: nearest,
+      initialWaypoints: [],
+      snappedToComponent: true,
+    };
+  }
+  const firstWp: WireWaypoint = {
+    x: Number(clickCoord.x.toFixed(2)),
+    y: Number(clickCoord.y.toFixed(2)),
+    ...(options?.defaultZ !== undefined ? { z: options.defaultZ } : {}),
+  };
+  return {
+    fromPoint: nearest,
+    initialWaypoints: [firstWp],
+    snappedToComponent: false,
+  };
+}
+
+/**
+ * Appends a free-angle polyline vertex to the active route without forcing H/V constraints,
+ * ignoring zero-distance duplicate clicks (`< minDistM`).
+ */
+export function appendPolylineVertex(
+  waypoints: ReadonlyArray<WireWaypoint>,
+  anchorPoint: { x: number; y: number },
+  clickCoord: { x: number; y: number },
+  options?: { defaultZ?: number; minDistM?: number }
+): WireWaypoint[] {
+  const minDistM = options?.minDistM ?? 0.04;
+  const last = waypoints.length > 0 ? waypoints[waypoints.length - 1] : anchorPoint;
+  const nx = Number(clickCoord.x.toFixed(2));
+  const ny = Number(clickCoord.y.toFixed(2));
+  if (Math.hypot(nx - last.x, ny - last.y) < minDistM) {
+    return [...waypoints];
+  }
+  return [
+    ...waypoints,
+    {
+      x: nx,
+      y: ny,
+      ...(options?.defaultZ !== undefined ? { z: options.defaultZ } : {}),
+    },
+  ];
+}
+
+/**
+ * Cleans up an active polyline's intermediate vertices when finishing via Enter or double-click:
+ * - On double-click, removes a redundant near-identical trailing vertex caused by the second click.
+ * - Trims a trailing vertex only if it sits right on top of the destination electrical component.
+ */
+export function finalizePolylineWaypoints(
+  waypoints: ReadonlyArray<WireWaypoint>,
+  targetPoint: { x: number; y: number },
+  isDoubleClick: boolean
+): WireWaypoint[] {
+  let result = [...waypoints];
+  if (
+    isDoubleClick &&
+    result.length >= 2 &&
+    Math.hypot(
+      result[result.length - 1].x - result[result.length - 2].x,
+      result[result.length - 1].y - result[result.length - 2].y
+    ) < 0.12
+  ) {
+    result = result.slice(0, -1);
+  }
+  if (
+    result.length > 0 &&
+    Math.hypot(
+      result[result.length - 1].x - targetPoint.x,
+      result[result.length - 1].y - targetPoint.y
+    ) < 0.25
+  ) {
+    result = result.slice(0, -1);
+  }
+  return result;
+}
+
 

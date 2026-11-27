@@ -14,7 +14,8 @@ export type CatalogueCategory =
   | 'LED Strips'
   | 'LED Battens'
   | 'Fans'
-  | 'Electrical Appliances';
+  | 'Electrical Appliances'
+  | 'Conduits & Accessories';
 
 export type ManufacturerName =
   | 'Polycab'
@@ -32,44 +33,111 @@ export type ManufacturerName =
   | 'Bajaj';
 
 export interface ManufacturerReference {
-  name: ManufacturerName;
+  id?: string;
+  slug?: string;
+  name: string;
   websiteUrl: string;
+  logoUrl?: string | null;
+  logoStoragePath?: string | null;
   primaryCategories: CatalogueCategory[];
   notes: string;
+  productCount?: number;
+  source?: 'official-directory' | 'cauvery-import' | 'admin-entry';
+  isActive?: boolean;
+}
+
+export interface ProductCatalogueVariant {
+  id: string;
+  sku: string;
+  modelNumber?: string | null;
+  label: string;
+  displayName: string;
+  attributes?: Record<string, string>;
+  mrp: number | null;
+  unitPrice: number | null;
+  discountPercent: number | null;
+  imageStoragePath?: string | null;
+  imageUrl?: string | null;
+  inStock?: boolean;
+}
+
+export interface ProductGstDetails {
+  name?: string | null;
+  cgst?: number | null;
+  sgst?: number | null;
+  igst?: number | null;
+  taxIncluded?: boolean;
 }
 
 export interface ProductCatalogueItem {
   id: string;
+  sourceKey?: string;
+  sourceUrl?: string | null;
+  sourceCategory?: string | null;
   category: CatalogueCategory;
-  manufacturer: ManufacturerName | string;
+  subcategory?: string | null;
+  manufacturerId?: string | null;
+  manufacturer: string;
   brand: string;
   productName: string;
   modelNumber: string;
-  /** Optional product image URL provided by administrator/import */
-  imageUrl?: string;
-  /** Freeform verified technical specification from manufacturer datasheet */
+  sku?: string | null;
   specification: string;
-  /** Rated voltage / current / wattage string (e.g. "240V AC, 16A" or "1100V FRLS") */
+  technicalSpecs?: Record<string, string>;
+  variants?: ProductCatalogueVariant[];
   rating: string;
-  /** Rated wattage in Watts if applicable (null if not specified) */
   wattageW: number | null;
-  /** Conductor cross-section in sq.mm for cables & wires (null for non-cable items) */
   cableSizeSqMm: number | null;
-  /** Physical dimensions text from datasheet */
   dimensions: string;
-  /** Unit of measurement (e.g. "Nos", "m", "Coil (90m)") */
   unit: string;
-  /** Verified unit price in INR (null when not yet configured — never invented) */
+  /** Maximum Retail Price (INR); strictly null when unavailable */
+  mrp?: number | null;
+  /** Selling / net unit price (INR, ex-GST when taxIncluded is false); strictly null if unavailable */
   unitPrice: number | null;
-  /** Applicable GST percentage (null when not yet configured) */
+  /** Discount percentage relative to MRP; strictly null when unavailable */
+  discountPercent?: number | null;
+  /** GST percentage (e.g., 18); strictly null if not provided */
   gstPercent: number | null;
-  /** Manufacturer datasheet URL */
-  datasheetUrl?: string;
-  /** Manufacturer product page URL */
-  manufacturerUrl?: string;
-  /** Optional mapping to a Design Studio electrical component type for 1-click placement */
+  gstDetails?: ProductGstDetails | null;
+  /** Permanent Supabase Storage / local storage object path (never external runtime URL) */
+  imageStoragePath?: string | null;
+  /** Blue Space-hosted image URL (Supabase Storage public URL or /api/catalogue/images/...) */
+  imageUrl?: string | null;
+  galleryImages?: string[];
+  datasheetUrl?: string | null;
+  manufacturerUrl?: string | null;
+  /** Optional mapping to Blue Space 2D/3D electrical symbol type */
   mappedItemType?: ElectricalItemType;
-  /** Tracks origin of record (admin manual entry or spreadsheet import) */
-  source: 'admin-entry' | 'csv-import';
+  source: 'admin-entry' | 'csv-import' | 'cauvery-import';
+  isActive?: boolean;
   updatedAt: string;
+}
+
+export interface CatalogueImportErrorRecord {
+  stage: 'fetch-page' | 'parse-product' | 'download-image' | 'upload-image' | 'persist';
+  ref: string;
+  message: string;
+  timestamp: string;
+}
+
+export interface CatalogueImportJobStatus {
+  id: string;
+  sourceDomain: string;
+  status: 'idle' | 'queued' | 'running' | 'paused' | 'completed' | 'failed';
+  currentPage: number;
+  totalPages: number;
+  pageSize: number;
+  discoveredCount: number;
+  importedCount: number;
+  updatedCount: number;
+  skippedDuplicatesCount: number;
+  failedCount: number;
+  manufacturersCount: number;
+  imagesUploadedCount: number;
+  imagesFailedCount: number;
+  storageBackend: 'supabase' | 'local-store';
+  errors: CatalogueImportErrorRecord[];
+  startedAt: string | null;
+  updatedAt: string | null;
+  completedAt: string | null;
 }

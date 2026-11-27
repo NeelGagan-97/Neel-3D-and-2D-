@@ -22,6 +22,8 @@ import {
   RoomZone,
   StaircaseItem,
   StudioEntityRef,
+  WireRoutingMode,
+  WireWaypoint,
 } from '../types/design';
 import {
   buildCircuitCableWireFields,
@@ -29,7 +31,14 @@ import {
   getNextWireSequence,
   getProjectFloors,
 } from './buildingWiring';
-import { formatFloorLabel, getItemFloor, sliceProjectForFloor } from './geometry';
+import {
+  extractMergedWalls,
+  formatFloorLabel,
+  getItemFloor,
+  makeFloorWallKey,
+  MergedWallSegment,
+  sliceProjectForFloor,
+} from './geometry';
 import { sanitizeSafeUrl } from './urlSecurity';
 
 export const MAX_HISTORY_ENTRIES = 100;
@@ -740,6 +749,7 @@ export function moveEntitiesInProject(
         ? {
             ...w,
             waypoints: w.waypoints.map((wp) => ({
+              ...wp,
               x: shift(wp.x, dxM),
               y: shift(wp.y, dyM),
             })),
@@ -1672,11 +1682,382 @@ export function assignCatalogueCableToCircuit(
       specification: product.specification,
       unit: product.unit || 'm',
       unitPricePerM: product.unitPrice,
+      mrpPerM: product.mrp ?? null,
+      discountPercent: product.discountPercent ?? null,
       gstPercent: product.gstPercent,
+      variantSku: product.sku || undefined,
+      priceCapturedAt: new Date().toISOString(),
       datasheetUrl: sanitizeSafeUrl(product.datasheetUrl),
     },
     true
   );
 }
+
+// --- Wall Visibility, Cutaway / Cross-Section & Individual Wall Editing ---
+
+/**
+ * Sets or toggles visibility of any individual wall (perimeter, room boundary, or custom wall)
+ * on a specific floor for cutaway / cross-section views without deleting rooms, electrical
+ * points, or wiring.
+ */
+export function setWallHiddenInProject(
+  project: ProjectData,
+  floor: number,
+  wallId: string,
+  hidden: boolean
+): ProjectData {
+  const key = makeFloorWallKey(floor, wallId);
+  const currentSet = new Set(project.hiddenWallIds ?? []);
+  if (hidden) {
+    currentSet.add(key);
+  } else {
+    currentSet.delete(key);
+    currentSet.delete(wallId);
+  }
+  const hasCustom = project.customWalls.some((cw) => cw.id === wallId);
+  const nextCustomWalls = hasCustom
+    ? project.customWalls.map((cw) => (cw.id === wallId ? { ...cw, hidden } : cw))
+    : project.customWalls;
+
+  return {
+    ...project,
+    hiddenWallIds: Array.from(currentSet),
+    customWalls: nextCustomWalls,
+  };
+}
+
+export function toggleWallVisibilityInProject(
+  project: ProjectData,
+  floor: number,
+  wallId: string
+): { project: ProjectData; hidden: boolean } {
+  const key = makeFloorWallKey(floor, wallId);
+  const cw = project.customWalls.find((w) => w.id === wallId);
+  const currentlyHidden =
+    Boolean(cw?.hidden) ||
+    Boolean(project.hiddenWallIds?.includes(key) || project.hiddenWallIds?.includes(wallId));
+  const nextHidden = !currentlyHidden;
+  return {
+    project: setWallHiddenInProject(project, floor, wallId, nextHidden),
+    hidden: nextHidden,
+  };
+}
+
+export function restoreAllHiddenWallsInProject(
+  project: ProjectData,
+  floor?: number
+): { project: ProjectData; restoredCount: number } {
+  const prevKeys = project.hiddenWallIds ?? [];
+  const floorPrefix = typeof floor === 'number' ? `f${Math.floor(floor)}:` : null;
+
+  const nextHiddenWallIds = floorPrefix
+    ? prevKeys.filter((k) => !k.startsWith(floorPrefix) && k.includes(':'))
+    : [];
+
+  let restoredCustom = 0;
+  const nextCustomWalls = project.customWalls.map((cw) => {
+    if (!cw.hidden) return cw;
+    if (typeof floor === 'number' && getItemFloor(cw) !== Math.floor(floor)) return cw;
+    restoredCustom += 1;
+    return { ...cw, hidden: false };
+  });
+
+  const removedKeys = prevKeys.length - nextHiddenWallIds.length;
+  const restoredCount = Math.max(removedKeys, restoredCustom);
+
+  return {
+    project: {
+      ...project,
+      hiddenWallIds: nextHiddenWallIds,
+      customWalls: nextCustomWalls,
+    },
+    restoredCount,
+  };
+}
+
+export type WallCutawayPreset = 'front' | 'south-east' | 'exterior' | 'restore';
+
+export function applyWallCutawayPreset(
+  project: ProjectData,
+  floor: number,
+  preset: WallCutawayPreset
+): ProjectData {
+  const base = restoreAllHiddenWallsInProject(project, floor).project;
+  if (preset === 'restore') return base;
+
+  const floorSlice = sliceProjectForFloor(base, floor);
+  const allWalls = extractMergedWalls(floorSlice, { includeHidden: true, floor });
+  const toHide: string[] = [];
+
+  if (preset === 'front') {
+    allWalls.forEach((w) => {
+      if (w.id === 'ext-s') toHide.push(w.id);
+    });
+  } else if (preset === 'south-east') {
+    allWalls.forEach((w) => {
+      if (w.id === 'ext-s' || w.id === 'ext-e') toHide.push(w.id);
+    });
+  } else if (preset === 'exterior') {
+    allWalls.forEach((w) => {
+      if (w.isExterior) toHide.push(w.id);
+    });
+  }
+
+  return toHide.reduce(
+    (acc, wid) => setWallHiddenInProject(acc, floor, wid, true),
+    base
+  );
+}
+
+export function countHiddenWallsOnFloor(project: ProjectData, floor: number): number {
+  const floorSlice = sliceProjectForFloor(project, floor);
+  const allWalls = extractMergedWalls(floorSlice, { includeHidden: true, floor });
+  return allWalls.filter((w) => w.isHidden).length;
+}
+
+/**
+ * Converts an auto-generated perimeter or room-boundary wall into an independently editable
+ * CustomWall (suppressing the original auto-edge via hiddenWallIds) without modifying rooms,
+ * electrical objects, or wiring. If the wall is already custom, returns it as-is.
+ */
+export function materializeWallForEdit(
+  project: ProjectData,
+  floor: number,
+  wallSegment: MergedWallSegment
+): { project: ProjectData; customWallId: string } {
+  if (wallSegment.source === 'custom' && wallSegment.customWallId) {
+    return { project, customWallId: wallSegment.customWallId };
+  }
+
+  const existingIds = new Set(project.customWalls.map((w) => w.id));
+  const customWallId = generateUniqueEntityId('cw', existingIds);
+  const newWall: CustomWall = {
+    id: customWallId,
+    floor,
+    x1: Number(wallSegment.x1.toFixed(3)),
+    y1: Number(wallSegment.y1.toFixed(3)),
+    x2: Number(wallSegment.x2.toFixed(3)),
+    y2: Number(wallSegment.y2.toFixed(3)),
+    thickness: wallSegment.thickness,
+    wallKind: wallSegment.isExterior ? 'external' : 'internal',
+    hidden: false,
+  };
+
+  const withSuppressedAuto = setWallHiddenInProject(project, floor, wallSegment.id, true);
+  return {
+    project: {
+      ...withSuppressedAuto,
+      customWalls: [...withSuppressedAuto.customWalls, newWall],
+    },
+    customWallId,
+  };
+}
+
+/**
+ * Removes an individual wall cleanly: deletes a custom wall from customWalls, or hides an
+ * auto-generated perimeter/room wall without ever deleting rooms, electrical objects, or wiring.
+ */
+export function removeWallFromProject(
+  project: ProjectData,
+  floor: number,
+  wallId: string
+): { project: ProjectData; removed: boolean; mode: 'deleted-custom' | 'removed-auto' } {
+  const isCustom = project.customWalls.some((w) => w.id === wallId);
+  if (isCustom) {
+    const key = makeFloorWallKey(floor, wallId);
+    return {
+      project: {
+        ...project,
+        customWalls: project.customWalls.filter((w) => w.id !== wallId),
+        hiddenWallIds: (project.hiddenWallIds ?? []).filter((k) => k !== key && k !== wallId),
+      },
+      removed: true,
+      mode: 'deleted-custom',
+    };
+  }
+  return {
+    project: setWallHiddenInProject(project, floor, wallId, true),
+    removed: true,
+    mode: 'removed-auto',
+  };
+}
+
+export function updateCustomWallEndpoints(
+  project: ProjectData,
+  wallId: string,
+  patch: {
+    x1?: number;
+    y1?: number;
+    x2?: number;
+    y2?: number;
+    thickness?: number;
+    wallKind?: 'internal' | 'external';
+  }
+): ProjectData {
+  return {
+    ...project,
+    customWalls: project.customWalls.map((w) =>
+      w.id === wallId
+        ? {
+            ...w,
+            x1: patch.x1 !== undefined ? Number(patch.x1.toFixed(3)) : w.x1,
+            y1: patch.y1 !== undefined ? Number(patch.y1.toFixed(3)) : w.y1,
+            x2: patch.x2 !== undefined ? Number(patch.x2.toFixed(3)) : w.x2,
+            y2: patch.y2 !== undefined ? Number(patch.y2.toFixed(3)) : w.y2,
+            thickness: patch.thickness ?? w.thickness,
+            wallKind: patch.wallKind ?? w.wallKind,
+          }
+        : w
+    ),
+  };
+}
+
+// --- Flexible 3D Cable Routing Waypoint Helpers ---
+
+export function addWireWaypointToProject(
+  project: ProjectData,
+  wireId: string,
+  index: number,
+  waypoint: WireWaypoint
+): ProjectData {
+  return {
+    ...project,
+    wires: (project.wires ?? []).map((w) => {
+      if (w.id !== wireId) return w;
+      const next = [...(w.waypoints ?? [])];
+      const clampedIdx = Math.max(0, Math.min(next.length, index));
+      const cleanWp: WireWaypoint = {
+        x: Number(waypoint.x.toFixed(3)),
+        y: Number(waypoint.y.toFixed(3)),
+        ...(typeof waypoint.z === 'number' && Number.isFinite(waypoint.z)
+          ? { z: Number(Math.max(0.05, waypoint.z).toFixed(3)) }
+          : {}),
+      };
+      next.splice(clampedIdx, 0, cleanWp);
+      return { ...w, waypoints: next };
+    }),
+  };
+}
+
+export function moveWireWaypointInProject(
+  project: ProjectData,
+  wireId: string,
+  index: number,
+  patch: { x?: number; y?: number; z?: number | undefined }
+): ProjectData {
+  return {
+    ...project,
+    wires: (project.wires ?? []).map((w) => {
+      if (w.id !== wireId) return w;
+      const next = (w.waypoints ?? []).map((wp, i) => {
+        if (i !== index) return wp;
+        const nextWp: WireWaypoint = {
+          x: patch.x !== undefined ? Number(patch.x.toFixed(3)) : wp.x,
+          y: patch.y !== undefined ? Number(patch.y.toFixed(3)) : wp.y,
+        };
+        const zVal = 'z' in patch ? patch.z : wp.z;
+        if (typeof zVal === 'number' && Number.isFinite(zVal)) {
+          nextWp.z = Number(Math.max(0.05, zVal).toFixed(3));
+        }
+        return nextWp;
+      });
+      return { ...w, waypoints: next };
+    }),
+  };
+}
+
+export function deleteWireWaypointFromProject(
+  project: ProjectData,
+  wireId: string,
+  index: number
+): ProjectData {
+  return {
+    ...project,
+    wires: (project.wires ?? []).map((w) => {
+      if (w.id !== wireId) return w;
+      return {
+        ...w,
+        waypoints: (w.waypoints ?? []).filter((_, i) => i !== index),
+      };
+    }),
+  };
+}
+
+export function updateWireRoutingModeInProject(
+  project: ProjectData,
+  wireId: string,
+  routingMode: WireRoutingMode
+): ProjectData {
+  return {
+    ...project,
+    wires: (project.wires ?? []).map((w) =>
+      w.id === wireId ? { ...w, routingMode } : w
+    ),
+  };
+}
+
+// --- Room-Level Electrical Placement Helper ---
+
+/**
+ * Places an electrical product strictly inside a specific room, clamping coordinates within the
+ * room's interior bounds and preserving exact position, rotation, height (z), and roomId.
+ */
+export function placeElectricalPointInRoom(
+  project: ProjectData,
+  itemType: ElectricalItemType,
+  roomId: string,
+  x: number,
+  y: number,
+  options?: { z?: number; rotation?: number }
+): { project: ProjectData; point: ElectricalPoint } | null {
+  const room = project.rooms.find((r) => r.id === roomId);
+  const cat = CATALOG_MAP[itemType];
+  if (!room || !cat) return null;
+
+  const pad = Math.min(0.18, room.width * 0.15, room.height * 0.15);
+  const cx = Number(
+    Math.max(room.x + pad, Math.min(room.x + room.width - pad, x)).toFixed(2)
+  );
+  const cy = Number(
+    Math.max(room.y + pad, Math.min(room.y + room.height - pad, y)).toFixed(2)
+  );
+  const floor = getItemFloor(room);
+  const existingIds = new Set(project.points.map((p) => p.id));
+  const usedCodes = new Set(project.points.map((p) => p.code));
+  const code = generateNextPointCode(itemType, usedCodes);
+
+  const newPoint: ElectricalPoint = {
+    id: generateUniqueEntityId('pt', existingIds),
+    floor,
+    code,
+    name: `${cat.productName} — ${room.name}`,
+    itemType,
+    category: cat.category,
+    roomId: room.id,
+    x: cx,
+    y: cy,
+    z:
+      typeof options?.z === 'number' && Number.isFinite(options.z)
+        ? Number(Math.max(0.05, options.z).toFixed(2))
+        : cat.defaultMountHeight,
+    rotation:
+      typeof options?.rotation === 'number' && Number.isFinite(options.rotation)
+        ? ((Math.round(options.rotation) % 360) + 360) % 360
+        : 0,
+    wattage: cat.defaultWattage,
+    voltage: 230,
+    circuit: cat.defaultCircuit,
+    unitCost: cat.unitCost,
+  };
+
+  return {
+    project: {
+      ...project,
+      points: [...project.points, newPoint],
+    },
+    point: newPoint,
+  };
+}
+
 
 

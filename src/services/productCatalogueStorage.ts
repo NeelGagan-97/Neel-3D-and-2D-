@@ -1,15 +1,24 @@
 import readXlsxFile from 'read-excel-file/universal';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
 import {
   CatalogueCategory,
+  CatalogueImportJobStatus,
   ManufacturerName,
   ManufacturerReference,
   ProductCatalogueItem,
+  ProductCatalogueVariant,
 } from '../types/catalogue';
 import { ElectricalItemType } from '../types/design';
 import { formatSafeCsvRow, sanitizeCsvTextValue } from '../utils/csvSecurity';
-import { sanitizeSafeUrl, validateSafeUrl } from '../utils/urlSecurity';
+import {
+  sanitizeSafeCatalogueImageUrl,
+  sanitizeSafeUrl,
+  validateSafeUrl,
+} from '../utils/urlSecurity';
 
 const CATALOGUE_STORAGE_KEY = 'blue_space_product_catalogue_v1';
+const MANUFACTURER_STORAGE_KEY = 'blue_space_manufacturer_directory_v1';
+const SUPABASE_STORAGE_BUCKET = 'catalogue-images';
 
 export const SPREADSHEET_LIMITS = {
   maxFileSizeBytes: 5 * 1024 * 1024, // 5 MB
@@ -33,6 +42,7 @@ const RECOGNIZED_ANY_HEADERS = new Set([
   ...RECOGNIZED_PRODUCT_NAME_HEADERS,
   'category',
   'productcategory',
+  'subcategory',
   'type',
   'manufacturer',
   'make',
@@ -71,6 +81,8 @@ const RECOGNIZED_ANY_HEADERS = new Set([
   'price',
   'rate',
   'mrp',
+  'discount',
+  'discountpercent',
   'cost',
   'gstpercent',
   'gst',
@@ -103,22 +115,28 @@ export const CATALOGUE_CATEGORIES: CatalogueCategory[] = [
   'LED Battens',
   'Fans',
   'Electrical Appliances',
+  'Conduits & Accessories',
 ];
 
 export const MANUFACTURER_REFERENCES: ManufacturerReference[] = [
   {
+    slug: 'polycab',
     name: 'Polycab',
     websiteUrl: 'https://polycab.com/',
     primaryCategories: ['Cables & Wires', 'Switches', 'Distribution Boards', 'Fans', 'LED Bulbs'],
     notes: 'Official manufacturer directory for house wires, FRLS cables, switchgear, lighting & fans.',
+    source: 'official-directory',
   },
   {
+    slug: 'finolex',
     name: 'Finolex',
     websiteUrl: 'https://www.finolex.com/',
     primaryCategories: ['Cables & Wires', 'Switches', 'MCBs', 'Fans', 'LED Bulbs'],
     notes: 'Official manufacturer directory for Flame Retardant house wires, conduits, switchgear & lighting.',
+    source: 'official-directory',
   },
   {
+    slug: 'havells',
     name: 'Havells',
     websiteUrl: 'https://havells.com/',
     primaryCategories: [
@@ -132,81 +150,111 @@ export const MANUFACTURER_REFERENCES: ManufacturerReference[] = [
       'Electrical Appliances',
     ],
     notes: 'Official manufacturer directory for cables, Crabtree/Havells modular switchgear, DBs, fans & appliances.',
+    source: 'official-directory',
   },
   {
+    slug: 'rr-kabel',
     name: 'RR Kabel',
     websiteUrl: 'https://www.rrkabel.com/',
     primaryCategories: ['Cables & Wires', 'Switches', 'Fans', 'LED Panels', 'LED Downlights'],
     notes: 'Official manufacturer directory for FRLSH / LSZH building wires, fans and architectural LED luminaires.',
+    source: 'official-directory',
   },
   {
+    slug: 'kei',
     name: 'KEI',
     websiteUrl: 'https://www.kei-ind.com/',
     primaryCategories: ['Cables & Wires'],
     notes: 'Official manufacturer directory for residential house wires, multi-core flexible & armoured cables.',
+    source: 'official-directory',
   },
   {
+    slug: 'legrand',
     name: 'Legrand',
     websiteUrl: 'https://www.legrand.co.in/',
     primaryCategories: ['Switches', 'Sockets', 'Distribution Boards', 'MCBs', 'RCCBs & RCBOs'],
     notes: 'Official manufacturer directory for modular wiring accessories, Ekinoxe/DX3 DBs, MCBs & RCCBs.',
+    source: 'official-directory',
   },
   {
+    slug: 'schneider-electric',
     name: 'Schneider Electric',
     websiteUrl: 'https://www.se.com/in/en/',
     primaryCategories: ['Switches', 'Sockets', 'Distribution Boards', 'MCBs', 'RCCBs & RCBOs', 'Earthing Accessories'],
     notes: 'Official manufacturer directory for Acti9/Easy9 switchgear, distribution boards & modular switches.',
+    source: 'official-directory',
   },
   {
+    slug: 'anchor-panasonic',
     name: 'Anchor / Panasonic',
     websiteUrl: 'https://lsin.panasonic.com/',
     primaryCategories: ['Switches', 'Sockets', 'Cables & Wires', 'Distribution Boards', 'MCBs', 'Fans'],
     notes: 'Official manufacturer directory for Anchor Roma/Penta/Woods modular switches, wires & switchgear.',
+    source: 'official-directory',
   },
   {
+    slug: 'gm-modular',
     name: 'GM Modular',
     websiteUrl: 'https://www.gmmodular.com/',
     primaryCategories: ['Switches', 'Sockets', 'LED Panels', 'LED Strips', 'LED Downlights', 'Fans'],
     notes: 'Official manufacturer directory for modular switches, sockets, home automation & LED lighting.',
+    source: 'official-directory',
   },
   {
+    slug: 'philips-signify',
     name: 'Philips / Signify',
     websiteUrl: 'https://www.lighting.philips.co.in/',
     primaryCategories: ['LED Bulbs', 'LED Panels', 'LED Downlights', 'LED Strips', 'LED Battens'],
     notes: 'Official manufacturer directory for LED luminaires, downlights, recessed panels, strips & battens.',
+    source: 'official-directory',
   },
   {
+    slug: 'wipro',
     name: 'Wipro',
     websiteUrl: 'https://www.wiprolighting.com/',
     primaryCategories: ['LED Bulbs', 'LED Panels', 'LED Downlights', 'LED Strips', 'LED Battens', 'Switches'],
     notes: 'Official manufacturer directory for residential/commercial LED luminaires & Garnet/North-West accessories.',
+    source: 'official-directory',
   },
   {
+    slug: 'crompton',
     name: 'Crompton',
     websiteUrl: 'https://www.crompton.co.in/',
     primaryCategories: ['Fans', 'LED Bulbs', 'LED Panels', 'LED Battens', 'Electrical Appliances'],
     notes: 'Official manufacturer directory for BLDC/induction fans, water heaters & LED luminaires.',
+    source: 'official-directory',
   },
   {
+    slug: 'bajaj',
     name: 'Bajaj',
     websiteUrl: 'https://www.bajajelectricals.com/',
     primaryCategories: ['Fans', 'LED Bulbs', 'LED Battens', 'LED Downlights', 'Electrical Appliances'],
     notes: 'Official manufacturer directory for ceiling/exhaust fans, water heaters & LED lighting.',
+    source: 'official-directory',
   },
 ];
 
-export const MANUFACTURER_NAMES: ManufacturerName[] = MANUFACTURER_REFERENCES.map((m) => m.name);
+export const MANUFACTURER_NAMES: ManufacturerName[] = MANUFACTURER_REFERENCES.map(
+  (m) => m.name as ManufacturerName
+);
 
-export function inferMappedItemType(category: CatalogueCategory, productName = ''): ElectricalItemType | undefined {
+export function inferMappedItemType(
+  category: CatalogueCategory,
+  productName = ''
+): ElectricalItemType | undefined {
   const lower = productName.toLowerCase();
   switch (category) {
     case 'Cables & Wires':
       return undefined;
     case 'Switches':
-      return lower.includes('board') || lower.includes('plate') ? 'switchboard' : 'switch';
+      return lower.includes('board') || lower.includes('plate') || lower.includes('frame')
+        ? 'switchboard'
+        : 'switch';
     case 'Sockets':
       if (lower.includes('usb')) return 'usb_outlet';
-      if (lower.includes('16a') || lower.includes('20a') || lower.includes('power')) return 'socket_16a';
+      if (lower.includes('16a') || lower.includes('20a') || lower.includes('25a') || lower.includes('power')) {
+        return 'socket_16a';
+      }
       return 'socket_5a';
     case 'Distribution Boards':
     case 'MCBs':
@@ -216,7 +264,7 @@ export function inferMappedItemType(category: CatalogueCategory, productName = '
       return 'earthing_point';
     case 'LED Bulbs':
     case 'LED Battens':
-      return 'led_light';
+      return lower.includes('chandelier') ? 'chandelier' : 'led_light';
     case 'LED Panels':
       return 'panel_light';
     case 'LED Downlights':
@@ -224,11 +272,13 @@ export function inferMappedItemType(category: CatalogueCategory, productName = '
     case 'LED Strips':
       return 'strip_light';
     case 'Fans':
-      return lower.includes('exhaust') ? 'exhaust_fan' : 'ceiling_fan';
+      return lower.includes('exhaust') || lower.includes('ventilat') ? 'exhaust_fan' : 'ceiling_fan';
     case 'Electrical Appliances':
       if (lower.includes('ac') || lower.includes('air conditioner') || lower.includes('split')) return 'split_ac';
       if (lower.includes('geyser') || lower.includes('water heater')) return 'geyser';
       return 'appliance';
+    case 'Conduits & Accessories':
+      return 'switch';
     default:
       return undefined;
   }
@@ -251,6 +301,9 @@ function normalizeCategory(raw: string): CatalogueCategory {
   if (cleaned.includes('batten') || cleaned.includes('tube')) return 'LED Battens';
   if (cleaned.includes('bulb') || cleaned.includes('lamp') || cleaned.includes('led')) return 'LED Bulbs';
   if (cleaned.includes('fan')) return 'Fans';
+  if (cleaned.includes('conduit') || cleaned.includes('pipe') || cleaned.includes('lug') || cleaned.includes('box') || cleaned.includes('accessor')) {
+    return 'Conduits & Accessories';
+  }
   return 'Electrical Appliances';
 }
 
@@ -266,15 +319,62 @@ function parseOptionalNumber(val: unknown): { value: number | null; invalid: boo
 }
 
 function sanitizeStoredProductUrls(item: ProductCatalogueItem): ProductCatalogueItem {
+  const safeImage = sanitizeSafeCatalogueImageUrl(item.imageUrl);
+  const safeGallery = Array.isArray(item.galleryImages)
+    ? item.galleryImages
+        .map((u) => sanitizeSafeCatalogueImageUrl(u))
+        .filter((u): u is string => Boolean(u))
+    : undefined;
+  const safeVariants = Array.isArray(item.variants)
+    ? item.variants.map((v) => ({
+        ...v,
+        imageUrl: sanitizeSafeCatalogueImageUrl(v.imageUrl) ?? null,
+      }))
+    : undefined;
   return {
     ...item,
-    imageUrl: sanitizeSafeUrl(item.imageUrl),
+    imageUrl: safeImage,
+    galleryImages: safeGallery && safeGallery.length > 0 ? safeGallery : undefined,
+    variants: safeVariants,
     datasheetUrl: sanitizeSafeUrl(item.datasheetUrl),
     manufacturerUrl: sanitizeSafeUrl(item.manufacturerUrl),
+    sourceUrl: sanitizeSafeUrl(item.sourceUrl),
   };
 }
 
-export function loadCatalogueProducts(): ProductCatalogueItem[] {
+// ----------------------------------------------------------------------------
+// Central In-Memory Reactive Store (Single Source Across All Studio Modules)
+// ----------------------------------------------------------------------------
+let centralProductsCache: ProductCatalogueItem[] | null = null;
+let centralManufacturersCache: ManufacturerReference[] | null = null;
+let centralStorageBackend: 'supabase' | 'local-store' = 'local-store';
+let centralHydrationPromise: Promise<void> | null = null;
+let centralHydratedOnce = false;
+const catalogueListeners = new Set<() => void>();
+
+function notifyCatalogueListeners(): void {
+  catalogueListeners.forEach((fn) => {
+    try {
+      fn();
+    } catch {
+      // ignore subscriber exceptions
+    }
+  });
+}
+
+export function subscribeCentralCatalogue(listener: () => void): () => void {
+  catalogueListeners.add(listener);
+  return () => {
+    catalogueListeners.delete(listener);
+  };
+}
+
+export function getCentralStorageBackend(): 'supabase' | 'local-store' {
+  return centralStorageBackend;
+}
+
+function loadLocalBrowserProducts(): ProductCatalogueItem[] {
+  if (typeof localStorage === 'undefined') return [];
   try {
     const raw = localStorage.getItem(CATALOGUE_STORAGE_KEY);
     if (!raw) return [];
@@ -291,13 +391,362 @@ export function loadCatalogueProducts(): ProductCatalogueItem[] {
   }
 }
 
-export function saveCatalogueProducts(items: ProductCatalogueItem[]): void {
+function loadLocalBrowserManufacturers(): ManufacturerReference[] {
+  if (typeof localStorage === 'undefined') return [...MANUFACTURER_REFERENCES];
   try {
-    const sanitized = items.map(sanitizeStoredProductUrls);
-    localStorage.setItem(CATALOGUE_STORAGE_KEY, JSON.stringify(sanitized));
+    const raw = localStorage.getItem(MANUFACTURER_STORAGE_KEY);
+    if (!raw) return [...MANUFACTURER_REFERENCES];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return [...MANUFACTURER_REFERENCES];
+    return parsed;
+  } catch {
+    return [...MANUFACTURER_REFERENCES];
+  }
+}
+
+function saveLocalBrowserManufacturers(mfrs: ManufacturerReference[]): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(MANUFACTURER_STORAGE_KEY, JSON.stringify(mfrs));
   } catch {
     // ignore storage quota errors
   }
+}
+
+function mergeProductLists(
+  remote: ProductCatalogueItem[],
+  local: ProductCatalogueItem[]
+): ProductCatalogueItem[] {
+  const byKey = new Map<string, ProductCatalogueItem>();
+  for (const p of remote) {
+    const clean = sanitizeStoredProductUrls(p);
+    byKey.set(clean.sourceKey || clean.id, clean);
+  }
+  // Preserve any local-only manual or CSV items that haven't been synced to server yet
+  for (const p of local) {
+    const clean = sanitizeStoredProductUrls(p);
+    const key = clean.sourceKey || clean.id;
+    if (!byKey.has(key) && clean.source !== 'cauvery-import') {
+      byKey.set(key, clean);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+function computeManufacturerCounts(
+  products: ProductCatalogueItem[],
+  baseManufacturers: ManufacturerReference[]
+): ManufacturerReference[] {
+  const byKey = new Map<string, ManufacturerReference>();
+  const makeKey = (name: string, slug?: string) =>
+    (slug || name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')) ||
+    'unspecified';
+
+  for (const m of MANUFACTURER_REFERENCES) {
+    const key = makeKey(m.name, m.slug);
+    byKey.set(key, {
+      ...m,
+      slug: key,
+      primaryCategories: [...m.primaryCategories],
+      productCount: 0,
+    });
+  }
+  for (const m of baseManufacturers) {
+    const key = makeKey(m.name, m.slug);
+    const prev = byKey.get(key);
+    byKey.set(key, {
+      ...(prev ?? {}),
+      ...m,
+      slug: key,
+      primaryCategories: Array.from(
+        new Set([...(prev?.primaryCategories ?? []), ...(m.primaryCategories ?? [])])
+      ),
+      productCount: 0,
+    });
+  }
+  for (const p of products) {
+    if (p.isActive === false) continue;
+    const name = (p.manufacturer || '').trim();
+    if (!name || name === 'Unspecified') continue;
+    const key = makeKey(name);
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.productCount = (existing.productCount ?? 0) + 1;
+      if (!existing.primaryCategories.includes(p.category)) {
+        existing.primaryCategories.push(p.category);
+      }
+    } else {
+      byKey.set(key, {
+        id: `mfr-${key}`,
+        slug: key,
+        name,
+        websiteUrl: p.manufacturerUrl || 'https://www.cauverypowers.com/',
+        primaryCategories: [p.category],
+        notes: `Electrical manufacturer (${p.category}).`,
+        productCount: 1,
+        source: p.source === 'cauvery-import' ? 'cauvery-import' : 'admin-entry',
+      });
+    }
+  }
+
+  return Array.from(byKey.values()).sort((a, b) => {
+    const diff = (b.productCount ?? 0) - (a.productCount ?? 0);
+    if (diff !== 0) return diff;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+async function buildAdminHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-BlueSpace-Role': 'ADMIN',
+  };
+  if (supabase && isSupabaseConfigured) {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data?.session?.access_token;
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+    } catch {
+      // ignore session lookup failure
+    }
+  }
+  return headers;
+}
+
+/**
+ * Loads the central product catalogue and manufacturer directory from Supabase / server API
+ * into memory and notifies all subscribed UI modules (Electrical Library, 2D/3D Inspector,
+ * Cable Routing, Product Comparison, and Smart BOQ).
+ */
+export async function hydrateCentralCatalogue(force = false): Promise<{
+  products: ProductCatalogueItem[];
+  manufacturers: ManufacturerReference[];
+  storageBackend: 'supabase' | 'local-store';
+}> {
+  if (centralHydrationPromise && !force) {
+    await centralHydrationPromise;
+    return {
+      products: loadCatalogueProducts(),
+      manufacturers: loadCatalogueManufacturers(),
+      storageBackend: centralStorageBackend,
+    };
+  }
+
+  if (centralHydratedOnce && !force && centralProductsCache) {
+    return {
+      products: centralProductsCache,
+      manufacturers: centralManufacturersCache ?? loadCatalogueManufacturers(),
+      storageBackend: centralStorageBackend,
+    };
+  }
+
+  const run = async () => {
+    const localItems = loadLocalBrowserProducts();
+    let remoteProducts: ProductCatalogueItem[] = [];
+    let remoteManufacturers: ManufacturerReference[] = [];
+    let backend: 'supabase' | 'local-store' = 'local-store';
+
+    // 1. Try direct Supabase read when browser Supabase is configured & user is signed in
+    if (supabase && isSupabaseConfigured) {
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData?.session?.access_token) {
+          const collected: ProductCatalogueItem[] = [];
+          const pageSize = 1000;
+          let offset = 0;
+          while (true) {
+            const { data, error } = await supabase
+              .from('catalogue_products')
+              .select('*')
+              .eq('is_active', true)
+              .order('updated_at', { ascending: false })
+              .range(offset, offset + pageSize - 1);
+            if (error) break;
+            const rows = data ?? [];
+            for (const row of rows) {
+              collected.push(
+                sanitizeStoredProductUrls({
+                  id: String(row.id),
+                  sourceKey: typeof row.source_key === 'string' ? row.source_key : undefined,
+                  sourceUrl: typeof row.source_url === 'string' ? row.source_url : null,
+                  sourceCategory: typeof row.source_category === 'string' ? row.source_category : null,
+                  category: normalizeCategory(String(row.category || '')),
+                  subcategory: typeof row.subcategory === 'string' ? row.subcategory : null,
+                  manufacturerId: typeof row.manufacturer_id === 'string' ? row.manufacturer_id : null,
+                  manufacturer: String(row.manufacturer || 'Unspecified'),
+                  brand: String(row.brand || row.manufacturer || 'Unspecified'),
+                  productName: String(row.product_name || ''),
+                  modelNumber: String(row.model_number || 'Not specified'),
+                  sku: typeof row.sku === 'string' ? row.sku : null,
+                  specification: String(row.specification || ''),
+                  technicalSpecs:
+                    row.technical_specs && typeof row.technical_specs === 'object'
+                      ? (row.technical_specs as Record<string, string>)
+                      : undefined,
+                  variants: Array.isArray(row.variants)
+                    ? (row.variants as ProductCatalogueVariant[])
+                    : undefined,
+                  rating: String(row.rating || ''),
+                  wattageW: row.wattage_w !== null && row.wattage_w !== undefined ? Number(row.wattage_w) : null,
+                  cableSizeSqMm:
+                    row.cable_size_sq_mm !== null && row.cable_size_sq_mm !== undefined
+                      ? Number(row.cable_size_sq_mm)
+                      : null,
+                  dimensions: String(row.dimensions || ''),
+                  unit: String(row.unit || 'Nos'),
+                  mrp: row.mrp !== null && row.mrp !== undefined ? Number(row.mrp) : null,
+                  unitPrice:
+                    row.unit_price !== null && row.unit_price !== undefined ? Number(row.unit_price) : null,
+                  discountPercent:
+                    row.discount_percent !== null && row.discount_percent !== undefined
+                      ? Number(row.discount_percent)
+                      : null,
+                  gstPercent:
+                    row.gst_percent !== null && row.gst_percent !== undefined
+                      ? Number(row.gst_percent)
+                      : null,
+                  gstDetails:
+                    row.gst_details && typeof row.gst_details === 'object'
+                      ? (row.gst_details as ProductCatalogueItem['gstDetails'])
+                      : null,
+                  imageStoragePath:
+                    typeof row.image_storage_path === 'string' ? row.image_storage_path : null,
+                  imageUrl: typeof row.image_url === 'string' ? row.image_url : null,
+                  galleryImages: Array.isArray(row.gallery_images)
+                    ? (row.gallery_images as string[])
+                    : undefined,
+                  datasheetUrl: typeof row.datasheet_url === 'string' ? row.datasheet_url : null,
+                  manufacturerUrl:
+                    typeof row.manufacturer_url === 'string' ? row.manufacturer_url : null,
+                  mappedItemType:
+                    typeof row.mapped_item_type === 'string'
+                      ? (row.mapped_item_type as ElectricalItemType)
+                      : undefined,
+                  source: (row.source as ProductCatalogueItem['source']) || 'admin-entry',
+                  isActive: row.is_active !== false,
+                  updatedAt: String(row.updated_at || new Date().toISOString()),
+                })
+              );
+            }
+            if (rows.length < pageSize) break;
+            offset += pageSize;
+          }
+
+          const { data: mfrRows } = await supabase
+            .from('catalogue_manufacturers')
+            .select('*')
+            .eq('is_active', true);
+
+          if (collected.length > 0 || (mfrRows && mfrRows.length > 0)) {
+            remoteProducts = collected;
+            remoteManufacturers = (mfrRows ?? []).map((m) => ({
+              id: String(m.id),
+              slug: String(m.slug),
+              name: String(m.name),
+              websiteUrl: String(m.website_url || ''),
+              logoStoragePath: typeof m.logo_storage_path === 'string' ? m.logo_storage_path : null,
+              logoUrl: typeof m.logo_url === 'string' ? m.logo_url : null,
+              primaryCategories: Array.isArray(m.primary_categories)
+                ? (m.primary_categories as CatalogueCategory[])
+                : [],
+              notes: String(m.notes || ''),
+              source: (m.source as ManufacturerReference['source']) || 'admin-entry',
+              isActive: m.is_active !== false,
+            }));
+            backend = 'supabase';
+          }
+        }
+      } catch {
+        // Fall through to central API
+      }
+    }
+
+    // 2. Fallback / primary preview source: Blue Space server central catalogue API
+    if (remoteProducts.length === 0 && typeof fetch === 'function') {
+      try {
+        const resp = await fetch('/api/catalogue/central', {
+          headers: { Accept: 'application/json' },
+        });
+        if (resp.ok) {
+          const json = (await resp.json()) as {
+            ok?: boolean;
+            products?: ProductCatalogueItem[];
+            manufacturers?: ManufacturerReference[];
+            storageBackend?: 'supabase' | 'local-store';
+          };
+          if (json?.ok && Array.isArray(json.products)) {
+            remoteProducts = json.products.map(sanitizeStoredProductUrls);
+            remoteManufacturers = Array.isArray(json.manufacturers) ? json.manufacturers : [];
+            backend = json.storageBackend || 'local-store';
+          }
+        }
+      } catch {
+        // Offline or unit test environment without server
+      }
+    }
+
+    const mergedProducts = mergeProductLists(remoteProducts, localItems);
+    const mergedManufacturers = computeManufacturerCounts(
+      mergedProducts,
+      remoteManufacturers.length > 0 ? remoteManufacturers : loadLocalBrowserManufacturers()
+    );
+
+    centralProductsCache = mergedProducts;
+    centralManufacturersCache = mergedManufacturers;
+    centralStorageBackend = backend;
+    centralHydratedOnce = true;
+    saveLocalBrowserManufacturers(mergedManufacturers);
+    notifyCatalogueListeners();
+  };
+
+  centralHydrationPromise = run();
+  try {
+    await centralHydrationPromise;
+  } finally {
+    centralHydrationPromise = null;
+  }
+
+  return {
+    products: centralProductsCache ?? [],
+    manufacturers: centralManufacturersCache ?? [...MANUFACTURER_REFERENCES],
+    storageBackend: centralStorageBackend,
+  };
+}
+
+export function loadCatalogueProducts(): ProductCatalogueItem[] {
+  if (centralProductsCache !== null) {
+    return centralProductsCache;
+  }
+  return loadLocalBrowserProducts();
+}
+
+export function loadCatalogueManufacturers(): ManufacturerReference[] {
+  if (centralManufacturersCache !== null) {
+    return centralManufacturersCache;
+  }
+  return computeManufacturerCounts(loadCatalogueProducts(), loadLocalBrowserManufacturers());
+}
+
+export function saveCatalogueProducts(items: ProductCatalogueItem[]): void {
+  const sanitized = items.map(sanitizeStoredProductUrls);
+  centralProductsCache = sanitized;
+  centralManufacturersCache = computeManufacturerCounts(
+    sanitized,
+    centralManufacturersCache ?? loadLocalBrowserManufacturers()
+  );
+  if (typeof localStorage !== 'undefined') {
+    try {
+      // Keep localStorage within browser quota by storing user-entered items locally
+      // while full central catalogue lives in Supabase / server snapshot
+      const localManualOnly = sanitized.filter((p) => p.source !== 'cauvery-import');
+      localStorage.setItem(CATALOGUE_STORAGE_KEY, JSON.stringify(localManualOnly.slice(0, 500)));
+    } catch {
+      // ignore storage quota errors
+    }
+  }
+  notifyCatalogueListeners();
 }
 
 export function addCatalogueProduct(
@@ -340,6 +789,319 @@ export function deleteCatalogueProduct(id: string): ProductCatalogueItem[] {
   return next;
 }
 
+export async function saveCentralCatalogueProduct(
+  payload: Omit<ProductCatalogueItem, 'id' | 'updatedAt'> & { id?: string }
+): Promise<{ ok: boolean; product?: ProductCatalogueItem; products: ProductCatalogueItem[]; error?: string }> {
+  try {
+    const headers = await buildAdminHeaders();
+    const resp = await fetch('/api/catalogue/products', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    const json = (await resp.json()) as { ok?: boolean; product?: ProductCatalogueItem; error?: string };
+    if (!resp.ok || !json.ok || !json.product) {
+      throw new Error(json?.error || `HTTP ${resp.status}`);
+    }
+    const saved = sanitizeStoredProductUrls(json.product);
+    const existing = loadCatalogueProducts();
+    const idx = existing.findIndex((p) => p.id === saved.id);
+    const next =
+      idx >= 0
+        ? existing.map((p, i) => (i === idx ? saved : p))
+        : [saved, ...existing];
+    saveCatalogueProducts(next);
+    return { ok: true, product: saved, products: next };
+  } catch (err) {
+    // Fallback to local state if server route unavailable
+    const next = payload.id
+      ? updateCatalogueProduct(payload.id, payload)
+      : addCatalogueProduct(payload);
+    return {
+      ok: true,
+      products: next,
+      error: err instanceof Error ? err.message : undefined,
+    };
+  }
+}
+
+export async function removeCentralCatalogueProduct(
+  id: string
+): Promise<{ ok: boolean; products: ProductCatalogueItem[]; error?: string }> {
+  try {
+    const headers = await buildAdminHeaders();
+    const resp = await fetch(`/api/catalogue/products/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers,
+    });
+    if (!resp.ok) {
+      const json = (await resp.json().catch(() => null)) as { error?: string } | null;
+      return { ok: false, products: loadCatalogueProducts(), error: json?.error || `HTTP ${resp.status}` };
+    }
+  } catch {
+    // allow local fallback when offline
+  }
+  const next = deleteCatalogueProduct(id);
+  return { ok: true, products: next };
+}
+
+export async function saveCentralManufacturer(
+  mfr: Omit<ManufacturerReference, 'slug'> & { slug?: string }
+): Promise<{ ok: boolean; manufacturers: ManufacturerReference[]; error?: string }> {
+  try {
+    const headers = await buildAdminHeaders();
+    const resp = await fetch('/api/catalogue/manufacturers', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(mfr),
+    });
+    const json = (await resp.json()) as {
+      ok?: boolean;
+      manufacturer?: ManufacturerReference;
+      error?: string;
+    };
+    if (!resp.ok || !json.ok || !json.manufacturer) {
+      return {
+        ok: false,
+        manufacturers: loadCatalogueManufacturers(),
+        error: json?.error || `HTTP ${resp.status}`,
+      };
+    }
+    const existing = loadCatalogueManufacturers();
+    const saved = json.manufacturer;
+    const idx = existing.findIndex((x) => x.slug === saved.slug);
+    const merged =
+      idx >= 0
+        ? existing.map((x, i) => (i === idx ? { ...x, ...saved } : x))
+        : [...existing, saved];
+    centralManufacturersCache = computeManufacturerCounts(loadCatalogueProducts(), merged);
+    saveLocalBrowserManufacturers(centralManufacturersCache);
+    notifyCatalogueListeners();
+    return { ok: true, manufacturers: centralManufacturersCache };
+  } catch (err) {
+    return {
+      ok: false,
+      manufacturers: loadCatalogueManufacturers(),
+      error: err instanceof Error ? err.message : 'Failed to save manufacturer.',
+    };
+  }
+}
+
+export async function removeCentralManufacturer(
+  slug: string
+): Promise<{ ok: boolean; manufacturers: ManufacturerReference[]; error?: string }> {
+  try {
+    const headers = await buildAdminHeaders();
+    const resp = await fetch(`/api/catalogue/manufacturers/${encodeURIComponent(slug)}`, {
+      method: 'DELETE',
+      headers,
+    });
+    if (!resp.ok) {
+      const json = (await resp.json().catch(() => null)) as { error?: string } | null;
+      return {
+        ok: false,
+        manufacturers: loadCatalogueManufacturers(),
+        error: json?.error || `HTTP ${resp.status}`,
+      };
+    }
+    const next = loadCatalogueManufacturers().filter((m) => m.slug !== slug);
+    centralManufacturersCache = next;
+    saveLocalBrowserManufacturers(next);
+    notifyCatalogueListeners();
+    return { ok: true, manufacturers: next };
+  } catch (err) {
+    return {
+      ok: false,
+      manufacturers: loadCatalogueManufacturers(),
+      error: err instanceof Error ? err.message : 'Failed to delete manufacturer.',
+    };
+  }
+}
+
+/**
+ * Uploads an admin-selected image file directly to Supabase Storage (if configured)
+ * or to Blue Space's permanent server image store — never storing external hotlinks.
+ */
+export async function uploadCatalogueProductImage(
+  file: File
+): Promise<{ ok: boolean; storagePath?: string; publicUrl?: string; error?: string }> {
+  if (file.size === 0 || file.size > 5 * 1024 * 1024) {
+    return { ok: false, error: 'Image must be between 1 byte and 5 MB.' };
+  }
+  const allowedMimes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+  if (!allowedMimes.has(file.type)) {
+    return { ok: false, error: 'Only JPEG, PNG, WebP, or GIF images are supported.' };
+  }
+
+  // Try direct Supabase Storage upload when configured & authenticated
+  if (supabase && isSupabaseConfigured) {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData?.session?.access_token) {
+        const ext =
+          file.type === 'image/png'
+            ? 'png'
+            : file.type === 'image/webp'
+              ? 'webp'
+              : file.type === 'image/gif'
+                ? 'gif'
+                : 'jpg';
+        const objectPath = `products/admin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const up = await supabase.storage
+          .from(SUPABASE_STORAGE_BUCKET)
+          .upload(objectPath, file, { contentType: file.type, upsert: true });
+        if (!up.error) {
+          const pub = supabase.storage.from(SUPABASE_STORAGE_BUCKET).getPublicUrl(objectPath);
+          if (pub?.data?.publicUrl) {
+            return { ok: true, storagePath: objectPath, publicUrl: pub.data.publicUrl };
+          }
+        }
+      }
+    } catch {
+      // Fall through to server upload endpoint
+    }
+  }
+
+  try {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read selected image file.'));
+      reader.readAsDataURL(file);
+    });
+    const headers = await buildAdminHeaders();
+    const resp = await fetch('/api/catalogue/images/upload', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ dataUrl }),
+    });
+    const json = (await resp.json()) as {
+      ok?: boolean;
+      storagePath?: string;
+      publicUrl?: string;
+      error?: string;
+    };
+    if (!resp.ok || !json.ok || !json.publicUrl) {
+      return { ok: false, error: json?.error || 'Failed to upload product image.' };
+    }
+    return { ok: true, storagePath: json.storagePath, publicUrl: json.publicUrl };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to upload product image.',
+    };
+  }
+}
+
+export async function fetchCauveryImportStatus(): Promise<{
+  ok: boolean;
+  status?: CatalogueImportJobStatus;
+  supabaseServerConfigured?: boolean;
+  error?: string;
+}> {
+  try {
+    const resp = await fetch('/api/catalogue/import/cauvery/status');
+    const json = (await resp.json()) as {
+      ok?: boolean;
+      status?: CatalogueImportJobStatus;
+      supabaseServerConfigured?: boolean;
+      error?: string;
+    };
+    if (!resp.ok || !json.ok) {
+      return { ok: false, error: json?.error || `HTTP ${resp.status}` };
+    }
+    return {
+      ok: true,
+      status: json.status,
+      supabaseServerConfigured: json.supabaseServerConfigured,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Status check failed.' };
+  }
+}
+
+export async function triggerCauveryImport(
+  resume = false
+): Promise<{ ok: boolean; status?: CatalogueImportJobStatus; error?: string }> {
+  try {
+    const headers = await buildAdminHeaders();
+    const resp = await fetch('/api/catalogue/import/cauvery/start', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ resume }),
+    });
+    const json = (await resp.json()) as {
+      ok?: boolean;
+      status?: CatalogueImportJobStatus;
+      error?: string;
+    };
+    if (!resp.ok || !json.ok) {
+      return { ok: false, error: json?.error || `HTTP ${resp.status}` };
+    }
+    return { ok: true, status: json.status };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Failed to start import.' };
+  }
+}
+
+export async function pauseCauveryImport(): Promise<{
+  ok: boolean;
+  status?: CatalogueImportJobStatus;
+  error?: string;
+}> {
+  try {
+    const headers = await buildAdminHeaders();
+    const resp = await fetch('/api/catalogue/import/cauvery/pause', {
+      method: 'POST',
+      headers,
+    });
+    const json = (await resp.json()) as {
+      ok?: boolean;
+      status?: CatalogueImportJobStatus;
+      error?: string;
+    };
+    if (!resp.ok || !json.ok) {
+      return { ok: false, error: json?.error || `HTTP ${resp.status}` };
+    }
+    return { ok: true, status: json.status };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Failed to pause import.' };
+  }
+}
+
+/**
+ * Resolves a ProductCatalogueItem with a specific variant's SKU, model number,
+ * display name, MRP, selling price, discount %, and hosted image so every downstream
+ * module (2D/3D placement, Cable Routing, Smart BOQ) snapshots exact variant pricing.
+ */
+export function resolveProductWithVariant(
+  product: ProductCatalogueItem,
+  variantSku?: string | null
+): ProductCatalogueItem & { selectedVariant?: ProductCatalogueVariant } {
+  if (!variantSku || !product.variants || product.variants.length === 0) {
+    return product;
+  }
+  const variant = product.variants.find((v) => v.sku === variantSku || v.id === variantSku);
+  if (!variant) return product;
+  const specSuffix = variant.label && !product.specification.includes(variant.label)
+    ? `${product.specification ? `${product.specification} · ` : ''}${variant.label}`
+    : product.specification;
+  return {
+    ...product,
+    productName: variant.displayName || product.productName,
+    modelNumber: variant.modelNumber || variant.sku || product.modelNumber,
+    sku: variant.sku || product.sku,
+    specification: specSuffix,
+    mrp: variant.mrp !== null ? variant.mrp : product.mrp,
+    unitPrice: variant.unitPrice !== null ? variant.unitPrice : product.unitPrice,
+    discountPercent:
+      variant.discountPercent !== null ? variant.discountPercent : product.discountPercent,
+    imageUrl: variant.imageUrl || product.imageUrl,
+    imageStoragePath: variant.imageStoragePath || product.imageStoragePath,
+    selectedVariant: variant,
+  };
+}
+
 export interface CatalogueImportResult {
   items: ProductCatalogueItem[];
   errors: string[];
@@ -354,8 +1116,8 @@ export interface SpreadsheetFileMeta {
 function isZipSignature(bytes: Uint8Array): boolean {
   return (
     bytes.length >= 4 &&
-    bytes[0] === 0x50 && // P
-    bytes[1] === 0x4b && // K
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
     (bytes[2] === 0x03 || bytes[2] === 0x05 || bytes[2] === 0x07) &&
     (bytes[3] === 0x04 || bytes[3] === 0x06 || bytes[3] === 0x08)
   );
@@ -382,10 +1144,6 @@ function looksLikeTextCsv(bytes: Uint8Array): boolean {
   return nullBytes === 0;
 }
 
-/**
- * Validates file extension, MIME type, size, and magic bytes before parsing.
- * Accepts modern .xlsx (OOXML ZIP) and .csv files; rejects legacy binary .xls, macro .xlsm, and oversized/malformed uploads.
- */
 export function validateSpreadsheetUpload(
   bytes: Uint8Array,
   meta?: SpreadsheetFileMeta
@@ -478,7 +1236,6 @@ export function validateSpreadsheetUpload(
     return { ok: true, format: 'csv' };
   }
 
-  // Fallback when filename wasn't supplied (e.g., programmatic ArrayBuffer calls)
   if (isZip) {
     return { ok: true, format: 'xlsx' };
   }
@@ -491,9 +1248,6 @@ export function validateSpreadsheetUpload(
   };
 }
 
-/**
- * Safe RFC-4180 CSV parser with strict row and column limits.
- */
 function parseCsvRows(text: string): { rows: string[][]; error?: string } {
   const cleaned = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const rows: string[][] = [];
@@ -589,15 +1343,9 @@ function sanitizeImportedText(val: unknown): string {
     str.length > SPREADSHEET_LIMITS.maxCellLength
       ? str.slice(0, SPREADSHEET_LIMITS.maxCellLength)
       : str;
-  // Neutralize leading spreadsheet formula characters if present in imported text
   return sanitizeCsvTextValue(truncated);
 }
 
-/**
- * Parses an administrator-supplied Excel (.xlsx) or CSV spreadsheet into verified ProductCatalogueItems.
- * Enforces strict upload validation, structural limits, safe URL validation, and prototype-pollution protection.
- * Never fabricates missing prices, specs, or model numbers — leaves missing numeric fields as null.
- */
 export async function parseCatalogueSpreadsheet(
   input: ArrayBuffer | Uint8Array,
   meta?: SpreadsheetFileMeta
@@ -663,7 +1411,6 @@ export async function parseCatalogueSpreadsheet(
       };
     }
 
-    // Reject prototype-pollution headers explicitly
     for (const rawCell of headerRow) {
       const rawKey = String(rawCell ?? '').trim().toLowerCase();
       if (FORBIDDEN_HEADER_KEYS.has(rawKey)) {
@@ -737,6 +1484,7 @@ export async function parseCatalogueSpreadsheet(
       const manufacturer = getStr('manufacturer', 'make', 'vendor', 'company');
       const modelNumber = getStr('modelnumber', 'model', 'sku', 'partnumber', 'catalogcode', 'code');
       const rawCategory = getStr('category', 'productcategory', 'type');
+      const subcategory = getStr('subcategory') || null;
 
       const category = normalizeCategory(rawCategory || productName);
       const brand = getStr('brand', 'series', 'range') || manufacturer || 'Unspecified';
@@ -749,7 +1497,9 @@ export async function parseCatalogueSpreadsheet(
       const cableSizeParsed = parseOptionalNumber(
         getRaw('cablesizesqmm', 'cablesize', 'sqmm', 'crosssection')
       );
-      const unitPriceParsed = parseOptionalNumber(getRaw('unitprice', 'price', 'rate', 'mrp', 'cost'));
+      const mrpParsed = parseOptionalNumber(getRaw('mrp'));
+      const unitPriceParsed = parseOptionalNumber(getRaw('unitprice', 'price', 'rate', 'cost', 'mrp'));
+      const discountParsed = parseOptionalNumber(getRaw('discountpercent', 'discount'));
       const gstParsed = parseOptionalNumber(getRaw('gstpercent', 'gst', 'taxpercent', 'tax'));
 
       if (wattageParsed.invalid || (wattageParsed.value !== null && wattageParsed.value < 0)) {
@@ -792,6 +1542,7 @@ export async function parseCatalogueSpreadsheet(
       items.push({
         id: `cat-imp-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 5)}`,
         category,
+        subcategory,
         manufacturer: manufacturer || 'Unspecified',
         brand,
         productName,
@@ -803,7 +1554,9 @@ export async function parseCatalogueSpreadsheet(
         cableSizeSqMm: cableSizeParsed.value,
         dimensions,
         unit,
+        mrp: mrpParsed.value,
         unitPrice: unitPriceParsed.value,
+        discountPercent: discountParsed.value,
         gstPercent: gstParsed.value,
         datasheetUrl: datasheetCheck.valid ? datasheetCheck.normalized : undefined,
         manufacturerUrl: manufacturerCheck.valid ? manufacturerCheck.normalized : undefined,
@@ -825,6 +1578,7 @@ export async function parseCatalogueSpreadsheet(
 export function downloadCatalogueCsvTemplate(): void {
   const headers = [
     'Category',
+    'Subcategory',
     'Manufacturer',
     'Brand',
     'Product Name',
@@ -835,18 +1589,20 @@ export function downloadCatalogueCsvTemplate(): void {
     'Cable Size (sq.mm)',
     'Dimensions',
     'Unit',
+    'MRP',
     'Unit Price',
+    'Discount %',
     'GST %',
     'Image URL',
     'Datasheet URL',
     'Manufacturer URL',
   ];
 
-  // Header-only template plus one clearly marked placeholder row that has no fake SKU/price
   const csv = [
     formatSafeCsvRow(headers),
     formatSafeCsvRow([
       'Cables & Wires',
+      'House Wire',
       'Polycab',
       'Enter Brand / Series',
       'Enter Manufacturer Verified Product Name',
@@ -857,6 +1613,8 @@ export function downloadCatalogueCsvTemplate(): void {
       2.5,
       '',
       'm',
+      '',
+      '',
       '',
       18,
       '',

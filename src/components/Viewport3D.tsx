@@ -30,6 +30,7 @@ import { createSkyAtmosphere, SkyAtmosphereHandles } from '../three/skyAtmospher
 import {
   CameraMode,
   CameraPreset,
+  CanvasTool,
   ElectricalItemType,
   ElectricalPoint,
   FloorView3DMode,
@@ -81,6 +82,16 @@ interface Viewport3DProps {
   onSwitchTo2D?: () => void;
   onExitFpsMode?: () => void;
   onRegisterFpsPointerLock?: (requestLockFn: (() => void) | null) => void;
+  isolatedRoomId?: string | null;
+  activeTool?: CanvasTool;
+  onEnterRoomView?: (roomId: string) => void;
+  onToggleHideWall?: (floor: number, wallId: string) => void;
+  onUpdateWireWaypoint?: (
+    wireId: string,
+    index: number,
+    patch: { x?: number; y?: number; z?: number },
+    recordHistory?: boolean
+  ) => void;
 }
 
 interface Viewport3DFailure {
@@ -189,6 +200,11 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
   onSwitchTo2D,
   onExitFpsMode,
   onRegisterFpsPointerLock,
+  isolatedRoomId = null,
+  activeTool = 'select',
+  onEnterRoomView,
+  onToggleHideWall,
+  onUpdateWireWaypoint,
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [viewportFailure, setViewportFailure] = useState<Viewport3DFailure | null>(null);
@@ -222,6 +238,11 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
   const onCameraCaptureReadyRef = useRef(onCameraCaptureReady);
   const onExitFpsModeRef = useRef(onExitFpsMode);
   const onRegisterFpsPointerLockRef = useRef(onRegisterFpsPointerLock);
+  const onEnterRoomViewRef = useRef(onEnterRoomView);
+  const onToggleHideWallRef = useRef(onToggleHideWall);
+  const onUpdateWireWaypointRef = useRef(onUpdateWireWaypoint);
+  const isolatedRoomIdRef = useRef<string | null>(isolatedRoomId);
+  const activeToolRef = useRef<CanvasTool>(activeTool);
   const pendingPlaceRef = useRef(pendingPlaceItem);
   const projectRef = useRef(project);
   const activeFloorRef = useRef(activeFloor);
@@ -248,6 +269,11 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
   onCameraCaptureReadyRef.current = onCameraCaptureReady;
   onExitFpsModeRef.current = onExitFpsMode;
   onRegisterFpsPointerLockRef.current = onRegisterFpsPointerLock;
+  onEnterRoomViewRef.current = onEnterRoomView;
+  onToggleHideWallRef.current = onToggleHideWall;
+  onUpdateWireWaypointRef.current = onUpdateWireWaypoint;
+  isolatedRoomIdRef.current = isolatedRoomId;
+  activeToolRef.current = activeTool;
   pendingPlaceRef.current = pendingPlaceItem;
   projectRef.current = project;
   activeFloorRef.current = activeFloor;
@@ -262,15 +288,29 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
   showPinsRef.current = showPins && !previewOnly;
   electricalVisibilityRef.current = electricalVisibility;
 
-  // Visible interactive 3D pins strictly scoped to visible floors
+  // Visible interactive 3D pins strictly scoped to visible floors (or isolated room)
   const featuredPoints = useMemo<ElectricalPoint[]>(() => {
     if (previewOnly || !showPins) return [];
-    const pool =
+    const basePool =
       floorViewMode === 'active-only'
         ? project.points.filter((p) => getItemFloor(p) === activeFloor)
         : floorViewMode === 'up-to-active'
           ? project.points.filter((p) => getItemFloor(p) <= activeFloor)
           : project.points;
+    const isolatedRoom = isolatedRoomId
+      ? project.rooms.find((r) => r.id === isolatedRoomId) ?? null
+      : null;
+    const pool = isolatedRoom
+      ? project.points.filter(
+          (p) =>
+            p.roomId === isolatedRoom.id ||
+            (getItemFloor(p) === getItemFloor(isolatedRoom) &&
+              p.x >= isolatedRoom.x - 0.15 &&
+              p.x <= isolatedRoom.x + isolatedRoom.width + 0.15 &&
+              p.y >= isolatedRoom.y - 0.15 &&
+              p.y <= isolatedRoom.y + isolatedRoom.height + 0.15)
+        )
+      : basePool;
 
     const byPriority: ElectricalPoint[] = [];
     const addIf = (p?: ElectricalPoint) => {
@@ -284,7 +324,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
       pool.filter((p) => highlightedIds.has(p.id)).forEach(addIf);
     }
     pool.filter((p) => selectedIds.has(p.id)).forEach(addIf);
-    // Include fans, ACs, switchboards, panels, sockets, geysers, and other visible fixtures
+    // Include fans, ACs, switchboards, panels, sockets, geysers, refrigerators, and other visible fixtures
     pool.filter((p) => p.itemType === 'ceiling_fan' || p.itemType === 'exhaust_fan').forEach(addIf);
     pool.filter((p) => p.itemType === 'split_ac').forEach(addIf);
     pool.filter((p) => p.itemType === 'switchboard' || p.itemType === 'switch').forEach(addIf);
@@ -297,13 +337,15 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           p.itemType === 'socket_5a' || p.itemType === 'socket_16a' || p.itemType === 'usb_outlet'
       )
       .forEach(addIf);
-    pool.filter((p) => p.itemType === 'geyser').forEach(addIf);
+    pool.filter((p) => p.itemType === 'geyser' || p.itemType === 'refrigerator').forEach(addIf);
     pool.forEach(addIf);
     return byPriority.slice(0, 60);
   }, [
     project.points,
+    project.rooms,
     activeFloor,
     floorViewMode,
+    isolatedRoomId,
     selectedIds,
     highlightedIds,
     activeHighlightId,
@@ -344,6 +386,11 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
     requestFpsPointerLock: () => void;
     exitFpsPointerLock: () => void;
     beginDragFromPin: (pointId: string, floorNum: number, clientX: number, clientY: number) => void;
+    dropElectricalAtClient: (
+      itemType: ElectricalItemType,
+      clientX: number,
+      clientY: number
+    ) => void;
   } | null>(null);
 
   // Initialize Three.js WebGLRenderer once per initAttempt with full lifecycle protection
@@ -389,6 +436,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
     let onPointerMove: ((e: PointerEvent) => void) | null = null;
     let onWindowPointerUp: (() => void) | null = null;
     let onPointerUp: ((e: PointerEvent) => void) | null = null;
+    let onDoubleClick: ((e: MouseEvent) => void) | null = null;
     let onContextMenu: ((e: MouseEvent) => void) | null = null;
     let onKeyDown: ((e: KeyboardEvent) => void) | null = null;
     let onKeyUp: ((e: KeyboardEvent) => void) | null = null;
@@ -448,6 +496,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         if (onPointerDown) renderer.domElement.removeEventListener('pointerdown', onPointerDown, true);
         if (onContextMenu) renderer.domElement.removeEventListener('contextmenu', onContextMenu);
         if (onPointerUp) renderer.domElement.removeEventListener('pointerup', onPointerUp);
+        if (onDoubleClick) renderer.domElement.removeEventListener('dblclick', onDoubleClick);
         if (onPointerMove) window.removeEventListener('pointermove', onPointerMove);
         if (onWindowPointerUp) window.removeEventListener('pointerup', onWindowPointerUp);
         if (onKeyDown) window.removeEventListener('keydown', onKeyDown);
@@ -1063,8 +1112,14 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           }
         }
 
+        const isolatedRoom =
+          !previewOnly && mode !== 'fps' && isolatedRoomIdRef.current
+            ? projectRef.current.rooms.find((r) => r.id === isolatedRoomIdRef.current) ?? null
+            : null;
+
         const zoomScale = 100 / Math.max(55, Math.min(160, zoomPct));
-        const useOrtho = !previewOnly && mode !== 'fps' && isOrthographicPreset(preset);
+        const useOrtho =
+          !previewOnly && mode !== 'fps' && (Boolean(isolatedRoom) || isOrthographicPreset(preset));
 
         // Switch active camera cleanly without recreating renderer or controls
         const targetCam = useOrtho ? createdOrthoCamera : createdCamera;
@@ -1074,65 +1129,84 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           (createdControls as unknown as { object: THREE.Camera }).object = activeCamera;
         }
 
-        if (useOrtho) {
-          orthoHalfHeight = Math.max(4 * sceneScale, spanWorld * 0.62 * zoomScale);
+        if (isolatedRoom) {
+          const roomFloorY = getFloorElevationM(projectRef.current, getItemFloor(isolatedRoom));
+          const roomCenterX = (isolatedRoom.x + isolatedRoom.width / 2 - safeLengthM / 2) * sceneScale;
+          const roomCenterZ = (isolatedRoom.y + isolatedRoom.height / 2 - safeWidthM / 2) * sceneScale;
+          const roomLookY = (roomFloorY + 0.5) * sceneScale;
+          const roomSpan = Math.max(isolatedRoom.width, isolatedRoom.height) * sceneScale;
+          orthoHalfHeight = Math.max(2.1 * sceneScale, roomSpan * 0.65 * zoomScale);
           createdOrthoCamera.zoom = 1;
           updateOrthoFrustum(lastViewportW || width, lastViewportH || height);
-          createdControls.maxPolarAngle = Math.PI - 0.02;
-        } else {
           createdControls.maxPolarAngle = Math.PI / 2 - 0.02;
-        }
-
-        if (mode === 'fps' && !previewOnly) {
-          clearWalkKeys();
-          createdControls.enabled = false;
-          fpsObstacles = buildFloorCollisionObstacles(projectRef.current, activeFloorRef.current);
-          const spawn = computeInitialFpsSpawn(
-            projectRef.current,
-            activeFloorRef.current,
-            fpsObstacles
-          );
-          const eyeY = (floorBaseY + FPS_EYE_HEIGHT_M) * sceneScale;
-          const spawnWx = (spawn.x - safeLengthM / 2) * sceneScale;
-          const spawnWz = (spawn.y - safeWidthM / 2) * sceneScale;
-          fpsYaw = spawn.yaw;
-          fpsPitch = 0; // Straight ahead level gaze, never downward or bird's-eye
-          _targetCamPos.set(spawnWx, eyeY, spawnWz);
-          _targetLook.set(
-            spawnWx - Math.sin(fpsYaw) * 2 * sceneScale,
-            eyeY,
-            spawnWz - Math.cos(fpsYaw) * 2 * sceneScale
-          );
-        } else {
           exitFpsPointerLock();
           clearWalkKeys();
           createdControls.enabled = true;
-          const distFactor = previewOnly
-            ? 0.94
-            : floorViewModeRef.current === 'exploded'
-              ? 0.78
-              : 0.68;
-          const dist = Math.max(4.5 * sceneScale, spanWorld * distFactor * zoomScale);
-          const orthoDist = Math.max(12 * sceneScale, spanWorld * 1.8);
-
-          if (preset === 'top') {
-            _targetCamPos.set(lookX, lookY + orthoDist, lookZ + 0.001);
-          } else if (preset === 'front') {
-            _targetCamPos.set(lookX, lookY, lookZ + orthoDist);
-          } else if (preset === 'rear') {
-            _targetCamPos.set(lookX, lookY, lookZ - orthoDist);
-          } else if (preset === 'left') {
-            _targetCamPos.set(lookX - orthoDist, lookY, lookZ);
-          } else if (preset === 'right') {
-            _targetCamPos.set(lookX + orthoDist, lookY, lookZ);
-          } else if (preset === 'isometric') {
-            const iso = orthoDist * 0.62;
-            _targetCamPos.set(lookX + iso, lookY + iso, lookZ + iso);
+          const orthoDist = Math.max(10 * sceneScale, roomSpan * 2.2);
+          _targetCamPos.set(roomCenterX, roomLookY + orthoDist, roomCenterZ + 0.001);
+          _targetLook.set(roomCenterX, roomLookY, roomCenterZ);
+          createdControls.maxDistance = Math.max(30 * sceneScale, roomSpan * 5);
+        } else {
+          if (useOrtho) {
+            orthoHalfHeight = Math.max(4 * sceneScale, spanWorld * 0.62 * zoomScale);
+            createdOrthoCamera.zoom = 1;
+            updateOrthoFrustum(lastViewportW || width, lastViewportH || height);
+            createdControls.maxPolarAngle = Math.PI - 0.02;
           } else {
-            _targetCamPos.set(lookX + dist * 0.72, lookY + dist * 0.68, lookZ + dist * 0.86);
+            createdControls.maxPolarAngle = Math.PI / 2 - 0.02;
           }
-          _targetLook.set(lookX, lookY, lookZ);
-          createdControls.maxDistance = Math.max(42 * sceneScale, spanWorld * 3.5);
+
+          if (mode === 'fps' && !previewOnly) {
+            clearWalkKeys();
+            createdControls.enabled = false;
+            fpsObstacles = buildFloorCollisionObstacles(projectRef.current, activeFloorRef.current);
+            const spawn = computeInitialFpsSpawn(
+              projectRef.current,
+              activeFloorRef.current,
+              fpsObstacles
+            );
+            const eyeY = (floorBaseY + FPS_EYE_HEIGHT_M) * sceneScale;
+            const spawnWx = (spawn.x - safeLengthM / 2) * sceneScale;
+            const spawnWz = (spawn.y - safeWidthM / 2) * sceneScale;
+            fpsYaw = spawn.yaw;
+            fpsPitch = 0; // Straight ahead level gaze, never downward or bird's-eye
+            _targetCamPos.set(spawnWx, eyeY, spawnWz);
+            _targetLook.set(
+              spawnWx - Math.sin(fpsYaw) * 2 * sceneScale,
+              eyeY,
+              spawnWz - Math.cos(fpsYaw) * 2 * sceneScale
+            );
+          } else {
+            exitFpsPointerLock();
+            clearWalkKeys();
+            createdControls.enabled = true;
+            const distFactor = previewOnly
+              ? 0.94
+              : floorViewModeRef.current === 'exploded'
+                ? 0.78
+                : 0.68;
+            const dist = Math.max(4.5 * sceneScale, spanWorld * distFactor * zoomScale);
+            const orthoDist = Math.max(12 * sceneScale, spanWorld * 1.8);
+
+            if (preset === 'top') {
+              _targetCamPos.set(lookX, lookY + orthoDist, lookZ + 0.001);
+            } else if (preset === 'front') {
+              _targetCamPos.set(lookX, lookY, lookZ + orthoDist);
+            } else if (preset === 'rear') {
+              _targetCamPos.set(lookX, lookY, lookZ - orthoDist);
+            } else if (preset === 'left') {
+              _targetCamPos.set(lookX - orthoDist, lookY, lookZ);
+            } else if (preset === 'right') {
+              _targetCamPos.set(lookX + orthoDist, lookY, lookZ);
+            } else if (preset === 'isometric') {
+              const iso = orthoDist * 0.62;
+              _targetCamPos.set(lookX + iso, lookY + iso, lookZ + iso);
+            } else {
+              _targetCamPos.set(lookX + dist * 0.72, lookY + dist * 0.68, lookZ + dist * 0.86);
+            }
+            _targetLook.set(lookX, lookY, lookZ);
+            createdControls.maxDistance = Math.max(42 * sceneScale, spanWorld * 3.5);
+          }
         }
 
         if (immediate || useOrtho || mode === 'fps') {
@@ -1269,6 +1343,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
               selectedIds: selectedIdsRef.current,
               highlightedIds: highlightedIdsRef.current,
               activeHighlightId: activeHighlightIdRef.current,
+              isolatedRoomId: isolatedRoomIdRef.current,
             }
           );
           built.root.scale.setScalar(sceneScale);
@@ -1302,9 +1377,11 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
       let pointerDownPos = { x: 0, y: 0 };
       let rightDownPos: { x: number; y: number } | null = null;
       let active3DDrag: {
-        kind: 'point' | 'furniture';
+        kind: 'point' | 'furniture' | 'wireWaypoint';
         id: string;
         floorNum: number;
+        wpIndex?: number;
+        origZ?: number;
         startX: number;
         startY: number;
         moved: boolean;
@@ -1312,18 +1389,46 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         lastMoveTs: number;
       } | null = null;
 
-      const projectClientToFloorMeters = (clientX: number, clientY: number, floorNum: number) => {
+      const projectClientToFloorMeters = (
+        clientX: number,
+        clientY: number,
+        floorNum: number,
+        elevationOffsetM = 0
+      ) => {
         const rect = createdRenderer.domElement.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) return null;
         _rayMouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
         _rayMouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(_rayMouse, activeCamera);
         const { lengthM, widthM } = siteToMeters(projectRef.current.site);
-        const floorBaseY = getFloorElevationM(projectRef.current, floorNum);
+        const floorBaseY = getFloorElevationM(projectRef.current, floorNum) + elevationOffsetM;
         _groundPlane.constant = -(floorBaseY * sceneScale);
         if (!raycaster.ray.intersectPlane(_groundPlane, _planeHit)) return null;
-        const px = THREE.MathUtils.clamp(_planeHit.x / sceneScale + lengthM / 2, 0.2, lengthM - 0.2);
-        const py = THREE.MathUtils.clamp(_planeHit.z / sceneScale + widthM / 2, 0.2, widthM - 0.2);
+        let px = THREE.MathUtils.clamp(_planeHit.x / sceneScale + lengthM / 2, 0.15, lengthM - 0.15);
+        let py = THREE.MathUtils.clamp(_planeHit.z / sceneScale + widthM / 2, 0.15, widthM - 0.15);
+
+        const isolatedRoom = isolatedRoomIdRef.current
+          ? projectRef.current.rooms.find((r) => r.id === isolatedRoomIdRef.current) ?? null
+          : null;
+        if (isolatedRoom && getItemFloor(isolatedRoom) === floorNum) {
+          const pad = 0.12;
+          px = THREE.MathUtils.clamp(
+            px,
+            isolatedRoom.x + pad,
+            isolatedRoom.x + Math.max(pad * 2, isolatedRoom.width - pad)
+          );
+          py = THREE.MathUtils.clamp(
+            py,
+            isolatedRoom.y + pad,
+            isolatedRoom.y + Math.max(pad * 2, isolatedRoom.height - pad)
+          );
+          return {
+            x: Math.round(px * 20) / 20,
+            y: Math.round(py * 20) / 20,
+            roomId: isolatedRoom.id,
+          };
+        }
+
         const floorRooms = projectRef.current.rooms.filter((r) => getItemFloor(r) === floorNum);
         const room = findRoomAtPoint(floorRooms, px, py) ?? floorRooms[0];
         return {
@@ -1331,6 +1436,21 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           y: Math.round(py * 20) / 20,
           roomId: room?.id ?? '',
         };
+      };
+
+      const dropElectricalAtClient = (
+        itemType: ElectricalItemType,
+        clientX: number,
+        clientY: number
+      ) => {
+        if (previewOnly || !onPlaceRef.current) return;
+        const isolatedRoom = isolatedRoomIdRef.current
+          ? projectRef.current.rooms.find((r) => r.id === isolatedRoomIdRef.current) ?? null
+          : null;
+        const targetFloor = isolatedRoom ? getItemFloor(isolatedRoom) : activeFloorRef.current;
+        const target = projectClientToFloorMeters(clientX, clientY, targetFloor);
+        if (!target) return;
+        onPlaceRef.current(itemType, target.x, target.y, target.roomId);
       };
 
       const beginDragFromPin = (pointId: string, floorNum: number, clientX: number, clientY: number) => {
@@ -1379,6 +1499,36 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           .intersectObjects(clickables, true)
           .filter((h) => isObjectVisibleInScene(h.object));
         if (hits.length === 0) return;
+
+        // Priority 1: Draggable 3D wire waypoint control handle (normal drag = X/Y, Shift+drag = Z height)
+        const wpHit = hits.find((h) => h.object.userData?.wireWaypoint);
+        if (wpHit && onUpdateWireWaypointRef.current) {
+          const wpMeta = wpHit.object.userData.wireWaypoint as {
+            wireId: string;
+            index: number;
+            floor: number;
+            baseY: number;
+          };
+          const wire = (projectRef.current.wires ?? []).find((w) => w.id === wpMeta.wireId);
+          const { ceilingM } = siteToMeters(projectRef.current.site);
+          const defaultZ = Math.max(0.2, ceilingM - 0.14);
+          const origZ = wire?.waypoints[wpMeta.index]?.z ?? defaultZ;
+          e.stopPropagation();
+          active3DDrag = {
+            kind: 'wireWaypoint',
+            id: wpMeta.wireId,
+            floorNum: wpMeta.floor,
+            wpIndex: wpMeta.index,
+            origZ,
+            startX: e.clientX,
+            startY: e.clientY,
+            moved: false,
+            snapshotRecorded: false,
+            lastMoveTs: 0,
+          };
+          createdControls.enabled = false;
+          return;
+        }
 
         const hitObj = hits[0].object;
         const pid = hitObj.userData?.pointId as string | undefined;
@@ -1489,6 +1639,39 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           if (now - active3DDrag.lastMoveTs < 28) return;
           active3DDrag.lastMoveTs = now;
 
+          if (active3DDrag.kind === 'wireWaypoint' && active3DDrag.wpIndex !== undefined) {
+            const { ceilingM } = siteToMeters(projectRef.current.site);
+            const origZ = active3DDrag.origZ ?? Math.max(0.2, ceilingM - 0.14);
+            if (e.shiftKey) {
+              const deltaZ = -(e.clientY - active3DDrag.startY) * 0.012;
+              const nextZ = Number(
+                THREE.MathUtils.clamp(origZ + deltaZ, 0.1, Math.max(0.5, ceilingM - 0.04)).toFixed(2)
+              );
+              onUpdateWireWaypointRef.current?.(
+                active3DDrag.id,
+                active3DDrag.wpIndex,
+                { z: nextZ },
+                false
+              );
+            } else {
+              const target = projectClientToFloorMeters(
+                e.clientX,
+                e.clientY,
+                active3DDrag.floorNum,
+                origZ
+              );
+              if (target) {
+                onUpdateWireWaypointRef.current?.(
+                  active3DDrag.id,
+                  active3DDrag.wpIndex,
+                  { x: target.x, y: target.y },
+                  false
+                );
+              }
+            }
+            return;
+          }
+
           const target = projectClientToFloorMeters(e.clientX, e.clientY, active3DDrag.floorNum);
           if (!target) return;
           if (active3DDrag.kind === 'point') {
@@ -1549,22 +1732,13 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         raycaster.setFromCamera(_rayMouse, activeCamera);
 
         if (pendingPlaceRef.current && onPlaceRef.current) {
-          const { lengthM, widthM } = siteToMeters(projectRef.current.site);
-          const floorBaseY = getFloorElevationM(projectRef.current, activeFloorRef.current);
-          _groundPlane.constant = -(floorBaseY * sceneScale);
-          if (raycaster.ray.intersectPlane(_groundPlane, _planeHit)) {
-            const px = THREE.MathUtils.clamp(_planeHit.x / sceneScale + lengthM / 2, 0.3, lengthM - 0.3);
-            const py = THREE.MathUtils.clamp(_planeHit.z / sceneScale + widthM / 2, 0.3, widthM - 0.3);
-            const floorRooms = projectRef.current.rooms.filter(
-              (r) => getItemFloor(r) === activeFloorRef.current
-            );
-            const room = findRoomAtPoint(floorRooms, px, py) ?? floorRooms[0];
-            onPlaceRef.current(
-              pendingPlaceRef.current,
-              Math.round(px * 10) / 10,
-              Math.round(py * 10) / 10,
-              room?.id ?? ''
-            );
+          const isolatedRoom = isolatedRoomIdRef.current
+            ? projectRef.current.rooms.find((r) => r.id === isolatedRoomIdRef.current) ?? null
+            : null;
+          const targetFloor = isolatedRoom ? getItemFloor(isolatedRoom) : activeFloorRef.current;
+          const target = projectClientToFloorMeters(e.clientX, e.clientY, targetFloor);
+          if (target) {
+            onPlaceRef.current(pendingPlaceRef.current, target.x, target.y, target.roomId);
           }
           return;
         }
@@ -1574,16 +1748,49 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           .intersectObjects(clickables, true)
           .filter((h) => isObjectVisibleInScene(h.object));
         if (hits.length > 0) {
-          const pid = hits[0].object.userData?.pointId as string | undefined;
-          const fid = hits[0].object.userData?.furnitureId as string | undefined;
-          const sid = hits[0].object.userData?.staircaseId as string | undefined;
-          const wid = hits[0].object.userData?.wireId as string | undefined;
+          // If Hide/Cutaway Wall tool is active, clicking any wall toggles its visibility immediately
+          if (activeToolRef.current === 'hide-wall') {
+            const wallHit = hits.find((h) => h.object.userData?.wallId);
+            if (wallHit && onToggleHideWallRef.current) {
+              const wId = wallHit.object.userData.wallId as string;
+              const wFloor =
+                (wallHit.object.userData.wallFloor as number | undefined) ?? activeFloorRef.current;
+              onToggleHideWallRef.current(wFloor, wId);
+              return;
+            }
+          }
+
+          const pid = hits.find((h) => h.object.userData?.pointId)?.object.userData?.pointId as
+            | string
+            | undefined;
+          const wpMeta = hits.find((h) => h.object.userData?.wireWaypoint)?.object.userData
+            ?.wireWaypoint as { wireId: string } | undefined;
+          const wid = hits.find((h) => h.object.userData?.wireId)?.object.userData?.wireId as
+            | string
+            | undefined;
+          const fid = hits.find((h) => h.object.userData?.furnitureId)?.object.userData
+            ?.furnitureId as string | undefined;
+          const sid = hits.find((h) => h.object.userData?.staircaseId)?.object.userData
+            ?.staircaseId as string | undefined;
+          const wallHit = hits.find((h) => h.object.userData?.wallId);
+          const roomId = hits.find((h) => h.object.userData?.roomId)?.object.userData?.roomId as
+            | string
+            | undefined;
+
           if (pid) {
             if (onSelectEntityRef.current) {
               onSelectEntityRef.current({ kind: 'point', id: pid }, e.shiftKey);
             } else {
               onSelectRef.current?.(pid, e.shiftKey);
             }
+            return;
+          }
+          if (wpMeta && onSelectEntityRef.current) {
+            onSelectEntityRef.current({ kind: 'wire', id: wpMeta.wireId }, e.shiftKey);
+            return;
+          }
+          if (wid && onSelectEntityRef.current) {
+            onSelectEntityRef.current({ kind: 'wire', id: wid }, e.shiftKey);
             return;
           }
           if (fid && onSelectEntityRef.current) {
@@ -1594,12 +1801,35 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
             onSelectEntityRef.current({ kind: 'staircase', id: sid }, e.shiftKey);
             return;
           }
-          if (wid && onSelectEntityRef.current) {
-            onSelectEntityRef.current({ kind: 'wire', id: wid }, e.shiftKey);
+          if (wallHit && onSelectEntityRef.current) {
+            const wId = wallHit.object.userData.wallId as string;
+            onSelectEntityRef.current({ kind: 'wall', id: wId }, e.shiftKey);
+            return;
+          }
+          if (roomId && onSelectEntityRef.current) {
+            onSelectEntityRef.current({ kind: 'room', id: roomId }, e.shiftKey);
             return;
           }
         } else if (!e.shiftKey && onSelectEntityRef.current) {
           onSelectEntityRef.current(null);
+        }
+      };
+
+      onDoubleClick = (e: MouseEvent) => {
+        if (previewOnly || cameraModeRef.current === 'fps' || !onEnterRoomViewRef.current) return;
+        const rect = createdRenderer.domElement.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        _rayMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        _rayMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(_rayMouse, activeCamera);
+        const clickables = engineRef.current?.built?.clickables ?? [];
+        const hits = raycaster
+          .intersectObjects(clickables, true)
+          .filter((h) => isObjectVisibleInScene(h.object));
+        const roomHit = hits.find((h) => h.object.userData?.roomId);
+        if (roomHit) {
+          const rid = roomHit.object.userData.roomId as string;
+          onEnterRoomViewRef.current(rid);
         }
       };
 
@@ -1729,6 +1959,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
       window.addEventListener('pointermove', onPointerMove);
       window.addEventListener('pointerup', onWindowPointerUp);
       createdRenderer.domElement.addEventListener('pointerup', onPointerUp);
+      createdRenderer.domElement.addEventListener('dblclick', onDoubleClick);
       window.addEventListener('keydown', onKeyDown);
       window.addEventListener('keyup', onKeyUp);
       window.addEventListener('blur', onWindowBlur);
@@ -1798,6 +2029,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         requestFpsPointerLock,
         exitFpsPointerLock,
         beginDragFromPin,
+        dropElectricalAtClient,
       };
       onCameraCaptureReadyRef.current?.(captureCurrentCameraView);
       onRegisterFpsPointerLockRef.current?.(requestFpsPointerLock);
@@ -1864,9 +2096,10 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
     cameraMode,
     activeFloor,
     floorViewMode,
+    isolatedRoomId,
   ]);
 
-  // Smoothly update camera when cameraMode, cameraPreset, zoom, site dimensions, floors count, or active floor view changes
+  // Smoothly update camera when cameraMode, cameraPreset, zoom, site dimensions, floors count, active floor view, or isolated room changes
   useEffect(() => {
     if (skipFirstCameraRef.current) {
       skipFirstCameraRef.current = false;
@@ -1884,6 +2117,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
     project.floorConfigs,
     activeFloor,
     floorViewMode,
+    isolatedRoomId,
   ]);
 
   // Apply user-selected saved camera angle
@@ -1911,14 +2145,36 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
     setElectricalVisibility((prev) => toggleElectricalVisibilityGroup(prev, group));
   };
 
+  const handle3DDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (previewOnly) return;
+    if (e.dataTransfer.types.includes('application/x-bluespace-electrical')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  };
+
+  const handle3DDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (previewOnly) return;
+    const itemType = e.dataTransfer.getData('application/x-bluespace-electrical') as
+      | ElectricalItemType
+      | '';
+    if (!itemType) return;
+    e.preventDefault();
+    engineRef.current?.dropElectricalAtClient(itemType, e.clientX, e.clientY);
+  };
+
   return (
-    <div className="relative w-full h-full flex-1 min-h-0 overflow-hidden bg-surface">
+    <div
+      onDragOver={handle3DDragOver}
+      onDrop={handle3DDrop}
+      className="relative w-full h-full flex-1 min-h-0 overflow-hidden bg-surface"
+    >
       {/* Dedicated empty mount node for WebGL canvas (kept mounted for context recovery & clean Retry 3D) */}
       <div
         ref={mountRef}
         className={`absolute inset-0 w-full h-full ${
           viewportFailure ? 'pointer-events-none opacity-0' : ''
-        } ${pendingPlaceItem ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+        } ${pendingPlaceItem || activeTool === 'hide-wall' ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
       />
 
       {/* Safe 2D Fallback + Diagnostic Banner when 3D initialization or rendering fails */}

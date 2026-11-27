@@ -1,0 +1,21 @@
+{
+  "id": "cauvery-1795806833729",
+  "sourceDomain": "www.cauverypowers.com",
+  "status": "completed",
+  "currentPage": 33,
+  "totalPages": 33,
+  "pageSize": 50,
+  "discoveredCount": 1606,
+  "importedCount": 1606,
+  "updatedCount": 0,
+  "skippedDuplicatesCount": 0,
+  "failedCount": 0,
+  "manufacturersCount": 42,
+  "imagesUploadedCount": 0,
+  "imagesFailedCount": 0,
+  "storageBackend": "local-store",
+  "errors": [],
+  "startedAt": "2026-11-27T19:13:53.729Z",
+  "updatedAt": "2026-11-27T19:14:04.501Z",
+  "completedAt": "2026-11-27T19:14:04.501Z"
+}

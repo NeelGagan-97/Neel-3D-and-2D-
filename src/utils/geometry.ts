@@ -230,6 +230,26 @@ export interface MergedWallSegment {
   isExterior: boolean;
   source: 'perimeter' | 'room' | 'custom';
   customWallId?: string;
+  floor?: number;
+  isHidden?: boolean;
+}
+
+export function makeFloorWallKey(floor: number, wallId: string): string {
+  const fl = Number.isFinite(floor) ? Math.floor(floor) : 1;
+  return `f${fl}:${wallId}`;
+}
+
+export function isWallHiddenInProject(
+  project: ProjectData,
+  floor: number,
+  wallId: string,
+  customWallHidden?: boolean
+): boolean {
+  if (customWallHidden) return true;
+  const hiddenList = project.hiddenWallIds;
+  if (!hiddenList || hiddenList.length === 0) return false;
+  const key = makeFloorWallKey(floor, wallId);
+  return hiddenList.includes(key) || hiddenList.includes(wallId);
 }
 
 /**
@@ -273,23 +293,46 @@ function mergeCollinearSegments(
   return merged;
 }
 
+export interface ExtractMergedWallsOptions {
+  /** Include hidden walls (marked with isHidden: true) so 2D can render dashed restore markers */
+  includeHidden?: boolean;
+  /** Explicit floor index used to match floor-scoped hiddenWallIds */
+  floor?: number;
+}
+
 /**
  * Extracts canonical, deduplicated wall geometry from site perimeter + room boundaries + custom walls.
  * Adjacent rooms sharing a wall produce a single unified partition wall without overlapping geometry.
  */
-export function extractMergedWalls(project: ProjectData): MergedWallSegment[] {
+export function extractMergedWalls(
+  project: ProjectData,
+  options?: ExtractMergedWallsOptions
+): MergedWallSegment[] {
   const { lengthM, widthM, wallThickM } = siteToMeters(project.site);
   const result: MergedWallSegment[] = [];
+  const effectiveFloor =
+    typeof options?.floor === 'number' && Number.isFinite(options.floor)
+      ? Math.floor(options.floor)
+      : project.rooms[0]?.floor ?? project.customWalls[0]?.floor ?? 1;
+  const includeHidden = Boolean(options?.includeHidden);
+
+  const pushWall = (seg: MergedWallSegment, customHidden?: boolean) => {
+    const hidden = isWallHiddenInProject(project, effectiveFloor, seg.id, customHidden);
+    if (hidden && !includeHidden) return;
+    result.push({
+      ...seg,
+      floor: effectiveFloor,
+      isHidden: hidden,
+    });
+  };
 
   // 1. Exterior site perimeter walls (omitted when an imported CAD/PDF supplies its own reconstructed building outline)
   const suppressPerimeter = Boolean(project.aiDrawingImport?.suppressAutoSitePerimeter && project.customWalls.length > 0);
   if (!suppressPerimeter) {
-    result.push(
-      { id: 'ext-n', x1: 0, y1: 0, x2: lengthM, y2: 0, thickness: wallThickM, isExterior: true, source: 'perimeter' },
-      { id: 'ext-s', x1: 0, y1: widthM, x2: lengthM, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' },
-      { id: 'ext-w', x1: 0, y1: 0, x2: 0, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' },
-      { id: 'ext-e', x1: lengthM, y1: 0, x2: lengthM, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' }
-    );
+    pushWall({ id: 'ext-n', x1: 0, y1: 0, x2: lengthM, y2: 0, thickness: wallThickM, isExterior: true, source: 'perimeter' });
+    pushWall({ id: 'ext-s', x1: 0, y1: widthM, x2: lengthM, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' });
+    pushWall({ id: 'ext-w', x1: 0, y1: 0, x2: 0, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' });
+    pushWall({ id: 'ext-e', x1: lengthM, y1: 0, x2: lengthM, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' });
   }
 
   // 2. Collect interior room boundary edges (skipping rooms whose walls are explicitly reconstructed as customWalls)
@@ -327,7 +370,7 @@ export function extractMergedWalls(project: ProjectData): MergedWallSegment[] {
   });
 
   mergeCollinearSegments(hSegs).forEach((s, idx) => {
-    result.push({
+    pushWall({
       id: `rm-h-${idx}`,
       x1: s.start,
       y1: s.fixed,
@@ -340,7 +383,7 @@ export function extractMergedWalls(project: ProjectData): MergedWallSegment[] {
   });
 
   mergeCollinearSegments(vSegs).forEach((s, idx) => {
-    result.push({
+    pushWall({
       id: `rm-v-${idx}`,
       x1: s.fixed,
       y1: s.start,
@@ -354,17 +397,20 @@ export function extractMergedWalls(project: ProjectData): MergedWallSegment[] {
 
   // 3. User-drawn custom walls
   project.customWalls.forEach((cw) => {
-    result.push({
-      id: cw.id,
-      x1: cw.x1,
-      y1: cw.y1,
-      x2: cw.x2,
-      y2: cw.y2,
-      thickness: cw.thickness ?? Math.max(0.11, wallThickM * 0.75),
-      isExterior: cw.wallKind === 'external',
-      source: 'custom',
-      customWallId: cw.id,
-    });
+    pushWall(
+      {
+        id: cw.id,
+        x1: cw.x1,
+        y1: cw.y1,
+        x2: cw.x2,
+        y2: cw.y2,
+        thickness: cw.thickness ?? Math.max(0.11, wallThickM * 0.75),
+        isExterior: cw.wallKind === 'external',
+        source: 'custom',
+        customWallId: cw.id,
+      },
+      cw.hidden
+    );
   });
 
   return result;

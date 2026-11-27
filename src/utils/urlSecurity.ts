@@ -76,3 +76,22 @@ export function sanitizeSafeUrl(raw: unknown): string | undefined {
   const res = validateSafeUrl(raw);
   return res.valid ? res.normalized : undefined;
 }
+
+const SAFE_INTERNAL_CATALOGUE_IMAGE_RE =
+  /^\/api\/catalogue\/images\/[a-f0-9]{16,64}\.(jpg|jpeg|png|webp|gif)$/i;
+
+/**
+ * Validates a Blue Space catalogue image URL: allows either a verified internal
+ * server-hosted image path (/api/catalogue/images/<hash>.<ext>) or a valid https/http URL
+ * (such as a Supabase Storage public URL).
+ */
+export function sanitizeSafeCatalogueImageUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (SAFE_INTERNAL_CATALOGUE_IMAGE_RE.test(trimmed)) {
+    return trimmed;
+  }
+  return sanitizeSafeUrl(trimmed);
+}
+
