@@ -676,6 +676,9 @@ export default function App() {
         onNavigateRoute={(r) => navigateRoute(r)}
         onOpenProject={handleOpenProject}
         onCreateProject={handleCreateProject}
+        onAiDrawingImport={(importedProject) => {
+          handleImportProject(projectStorage.exportNativeBluespace(importedProject));
+        }}
       />
     );
   } else if (route === 'studio') {

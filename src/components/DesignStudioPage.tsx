@@ -16,6 +16,8 @@ import {
 } from '../services/productCatalogueStorage';
 import { ParsedImportPreview, projectStorage } from '../services/projectStorage';
 import { ProductCatalogueItem } from '../types/catalogue';
+import { ConvertTo2DResult } from '../utils/aiDrawingConverter';
+import { AiDrawingImporterModal } from './aiDrawing/AiDrawingImporterModal';
 import {
   ArchitecturalOpening,
   BuildingType,
@@ -86,6 +88,8 @@ import {
   WIRE_STANDARD_LABELS,
 } from '../utils/buildingWiring';
 import { downloadExcelBoq } from '../utils/excelBoqExporter';
+import { downloadValidatedProjectDxf } from '../utils/dxfExporter';
+import type { CadCapabilitiesResponse } from '../types/aiDrawing';
 import {
   downloadFloorPlanPdf,
   downloadFloorPlanPng,
@@ -202,6 +206,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const [floorView3D, setFloorView3D] = useState<FloorView3DMode>('active-only');
   const [showGuideModal, setShowGuideModal] = useState<boolean>(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>('orbit');
+  const requestFpsPointerLockRef = useRef<(() => void) | null>(null);
   const [cameraPreset, setCameraPreset] = useState<CameraPreset>('perspective');
   const [appliedSavedView, setAppliedSavedView] = useState<SavedCameraView | null>(null);
   const captureCameraRef = useRef<(() => SavedCameraView | null) | null>(null);
@@ -220,6 +225,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   const [catalogueOpen, setCatalogueOpen] = useState<boolean>(false);
   const [catalogueVersion, setCatalogueVersion] = useState<number>(0);
   const [pdfModalOpen, setPdfModalOpen] = useState<boolean>(false);
+  const [aiDrawingModalOpen, setAiDrawingModalOpen] = useState<boolean>(false);
   const [importPreview, setImportPreview] = useState<ParsedImportPreview | null>(null);
   const [pendingDeleteFloor, setPendingDeleteFloor] = useState<number | null>(null);
 
@@ -316,6 +322,97 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
     selectedEntities.length === 1 ? selectedEntities[0] : null;
 
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [cadCapabilities, setCadCapabilities] = useState<CadCapabilitiesResponse | null>(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetch('/api/cad/capabilities', { signal: ctrl.signal })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && typeof data.dxfReady === 'boolean') {
+          setCadCapabilities(data as CadCapabilitiesResponse);
+        }
+      })
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, []);
+
+  const handleExportValidatedDxf = () => {
+    const res = downloadValidatedProjectDxf(project, activeFloor);
+    if (!res.ok) {
+      notify(res.error, 'error');
+      return;
+    }
+    notify(
+      `Exported validated editable AutoCAD DXF (${res.bundle.validation.entityCount} entities across ${res.bundle.validation.layerNames.length} CAD layers).`,
+      'success'
+    );
+  };
+
+  const handleExportNativeDwg = async () => {
+    if (!cadCapabilities?.dwgReady) {
+      notify(
+        cadCapabilities?.dwgReason ||
+          'Native binary DWG export requires an installed licensed CAD converter (ODA File Converter or LibreDWG dxf2dwg). Use validated AutoCAD DXF export instead — Blue Space never renames DXF as DWG.',
+        'warning'
+      );
+      return;
+    }
+    try {
+      const resp = await fetch('/api/cad/export-dwg', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project, activeFloor }),
+      });
+      if (!resp.ok) {
+        const errJson = await resp.json().catch(() => null);
+        notify(errJson?.error || 'Native DWG export failed.', 'error');
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${project.name.replace(/[^a-zA-Z0-9_-]+/g, '-') || 'bluespace-cad'}.dwg`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      notify(`Exported native binary DWG via ${cadCapabilities.dwgEngine}.`, 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Native DWG export failed.', 'error');
+    }
+  };
+
+  const handleApprove2DFor3D = () => {
+    onUpdateProject(
+      (prev) => ({
+        ...prev,
+        aiDrawingImport: prev.aiDrawingImport
+          ? {
+              ...prev.aiDrawingImport,
+              approvedFor3D: true,
+              approvedFor3DAt: new Date().toISOString(),
+            }
+          : prev.aiDrawingImport,
+      }),
+      true
+    );
+    setViewMode('3d');
+    notify('2D CAD approved — 3D architectural & electrical model synchronized in Blue Space.', 'success');
+  };
+
+  const requestSwitchTo3D = () => {
+    if (project.aiDrawingImport && project.aiDrawingImport.approvedFor3D === false) {
+      notify(
+        'Review your reconstructed 2D CAD layers first, then click "Approve 2D & Open 3D" on the top-left overlay bar to convert the approved 2D model into 3D.',
+        'warning'
+      );
+      return;
+    }
+    setViewMode('3d');
+    notify('3D Preview synchronized from 2D floor plan geometry');
+  };
   const [openToolbarDropdown, setOpenToolbarDropdown] = useState<'view' | 'camera' | 'sky' | null>(null);
   const [openDrawer, setOpenDrawer] = useState<
     'tools' | 'rooms' | 'site' | 'electrical' | 'wiring' | 'floors' | 'properties' | null
@@ -674,15 +771,23 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         e.preventDefault();
         setCanvasContextMenu(null);
         setOpenDrawer(null);
-        setCameraMode((prev) => {
-          const next = prev === 'fps' ? 'orbit' : 'fps';
+        if (cameraMode === 'fps') {
+          try {
+            if (document.pointerLockElement) {
+              document.exitPointerLock?.();
+            }
+          } catch {
+            // Ignore pointer lock exit errors
+          }
+          setCameraMode('orbit');
+          notify('Exited First-Person Navigation back to Orbit view');
+        } else {
+          setCameraMode('fps');
+          requestFpsPointerLockRef.current?.();
           notify(
-            next === 'fps'
-              ? `Entered 3D Walk (1:3 Scale) on ${formatFloorLabel(activeFloor)} — navigate with W/A/S/D or Arrows`
-              : 'Exited 3D Walk back to Orbit view'
+            `Entered First-Person Navigation (1.65m eye level) on ${formatFloorLabel(activeFloor)} — Mouse to look, WASD to move, ESC to exit`
           );
-          return next;
-        });
+        }
         return;
       }
 
@@ -748,8 +853,15 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
           } else if (canvasContextMenu) {
             setCanvasContextMenu(null);
           } else if (viewMode === '3d' && cameraMode === 'fps') {
+            try {
+              if (document.pointerLockElement) {
+                document.exitPointerLock?.();
+              }
+            } catch {
+              // Ignore
+            }
             setCameraMode('orbit');
-            notify('Exited 3D Walk back to Orbit view');
+            notify('Exited First-Person Navigation back to Orbit view');
           } else if (findOpen) {
             setFindOpen(false);
             notify('Closed Find Component');
@@ -2195,6 +2307,17 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             <span>Save As</span>
           </button>
 
+          {/* AI Drawing Import Direct Entry Point */}
+          <button
+            type="button"
+            onClick={() => setAiDrawingModalOpen(true)}
+            title="Convert a PDF, PNG, or JPG drawing into an editable 2D Blue Space model"
+            className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-primary-container/40 border border-primary/60 text-primary hover:bg-primary hover:text-on-primary font-label text-label-sm cursor-pointer whitespace-nowrap"
+          >
+            <span className="material-symbols-outlined text-[15px]" aria-hidden="true">auto_awesome</span>
+            <span>AI Drawing Import</span>
+          </button>
+
           {/* Export & Import Dropdown */}
           <div className="relative">
             <button
@@ -2302,12 +2425,57 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   type="button"
                   onClick={() => {
                     setShowExportMenu(false);
+                    handleExportValidatedDxf();
+                  }}
+                  className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-primary hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-primary text-[16px]">architecture</span>
+                  <span>Export Editable CAD (.dxf)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowExportMenu(false);
+                    void handleExportNativeDwg();
+                  }}
+                  className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer ${
+                    cadCapabilities?.dwgReady ? 'text-on-surface' : 'text-on-surface-variant'
+                  }`}
+                  title={
+                    cadCapabilities?.dwgReady
+                      ? `Native DWG via ${cadCapabilities.dwgEngine}`
+                      : cadCapabilities?.dwgReason ||
+                        'Native DWG requires an installed ODA/LibreDWG converter on the server (DXF is never renamed as DWG)'
+                  }
+                >
+                  <span className="material-symbols-outlined text-[16px]">deployed_code_alert</span>
+                  <span>
+                    Export Native DWG (.dwg)
+                    {!cadCapabilities?.dwgReady ? ' — Needs Engine' : ''}
+                  </span>
+                </button>
+                <div className="my-1 border-t border-outline-variant" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowExportMenu(false);
                     importInputRef.current?.click();
                   }}
                   className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-[16px]">upload_file</span>
                   <span>Import (.bluespace / .json)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowExportMenu(false);
+                    setAiDrawingModalOpen(true);
+                  }}
+                  className="px-gutter-md py-gutter-xs text-left font-label text-label-sm text-primary hover:bg-surface-container-high flex items-center gap-gutter-sm cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-primary text-[16px]">auto_awesome</span>
+                  <span>AI Drawing Import (PDF / Image)...</span>
                 </button>
               </div>
             )}
@@ -2444,9 +2612,8 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setViewMode('3d');
                     setOpenToolbarDropdown(null);
-                    notify('3D Preview synchronized from 2D floor plan geometry');
+                    requestSwitchTo3D();
                   }}
                   className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
                     viewMode === '3d' ? 'text-primary' : 'text-on-surface'
@@ -2454,7 +2621,10 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 >
                   <span className="inline-flex items-center gap-gutter-xs">
                     <span className="material-symbols-outlined text-[16px]" aria-hidden="true">view_in_ar</span>
-                    <span>3D Preview</span>
+                    <span>
+                      3D Preview
+                      {project.aiDrawingImport?.approvedFor3D === false ? ' (Approve 2D)' : ''}
+                    </span>
                   </span>
                   {viewMode === '3d' && (
                     <span className="material-symbols-outlined text-[15px]" aria-hidden="true">check</span>
@@ -2525,7 +2695,10 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                       setCameraPreset('perspective');
                       setAppliedSavedView(null);
                       setOpenToolbarDropdown(null);
-                      notify(`First-Person walkthrough (1:3 Scale) on ${getFloorLabel(project, activeFloor)} — use W/A/S/D or Arrows & drag to look`);
+                      requestFpsPointerLockRef.current?.();
+                      notify(
+                        `Entered First-Person Navigation (1.65m eye level) on ${getFloorLabel(project, activeFloor)} — Mouse to look, WASD to move, ESC to exit`
+                      );
                     }}
                     className={`px-gutter-md py-gutter-xs text-left font-label text-label-sm hover:bg-surface-container-high flex items-center justify-between gap-2 cursor-pointer ${
                       cameraMode === 'fps' ? 'text-primary' : 'text-on-surface'
@@ -3977,7 +4150,12 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                             icon: cameraMode === 'fps' ? '3d_rotation' : 'directions_walk',
                             shortcut: 'E',
                             onSelect: () => {
-                              setCameraMode((prev) => (prev === 'fps' ? 'orbit' : 'fps'));
+                              if (cameraMode === 'fps') {
+                                setCameraMode('orbit');
+                              } else {
+                                setCameraMode('fps');
+                                requestFpsPointerLockRef.current?.();
+                              }
                             },
                           },
                           {
@@ -4015,7 +4193,7 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                             id: 'switch-3d',
                             label: 'Switch to 3D Preview',
                             icon: 'view_in_ar',
-                            onSelect: () => setViewMode('3d'),
+                            onSelect: () => requestSwitchTo3D(),
                           },
                         ]),
                     {
@@ -4146,8 +4324,11 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                 onMoveStaircase={handleMoveStaircase}
                 onCreateWire={handleCreateWire}
                 onUpdateWireWaypoints={handleUpdateWireWaypoints}
+                onAutoRouteWires={handleAutoRouteFromDb}
                 onRecordHistorySnapshot={onRecordSnapshot}
                 onValidationWarning={(msg) => notify(msg, 'warning')}
+                onApprove2DFor3D={handleApprove2DFor3D}
+                onExportDxf={handleExportValidatedDxf}
               />
             ) : (
               <Viewport3D
@@ -4188,6 +4369,16 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
                   setCanvasContextMenu(pos);
                 }}
                 onSwitchTo2D={() => setViewMode('2d')}
+                onExitFpsMode={() => {
+                  setCameraMode((prev) => {
+                    if (prev !== 'fps') return prev;
+                    notify('Exited First-Person Navigation back to Orbit view');
+                    return 'orbit';
+                  });
+                }}
+                onRegisterFpsPointerLock={(fn) => {
+                  requestFpsPointerLockRef.current = fn;
+                }}
               />
             )}
           </div>
@@ -5800,6 +5991,36 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
         preview={importPreview}
         onCancel={() => setImportPreview(null)}
         onConfirmImport={handleConfirmSafeImport}
+      />
+
+      {/* AI DRAWING TO 2D IMPORTER MODAL (PDF / PNG / JPG) */}
+      <AiDrawingImporterModal
+        isOpen={aiDrawingModalOpen}
+        onClose={() => setAiDrawingModalOpen(false)}
+        activeProject={project}
+        activeFloor={activeFloor}
+        onNotify={(type, msg) => notify(msg, type)}
+        onImportComplete={(result: ConvertTo2DResult) => {
+          const { summary, isNewProject, project: nextProj } = result;
+          if (isNewProject) {
+            const res = onImportProject(projectStorage.exportNativeBluespace(nextProj));
+            if (!res.ok) {
+              notify(res.error || 'Could not load imported 2D project.', 'error');
+              return;
+            }
+          } else {
+            onUpdateProject(() => nextProj, true);
+          }
+          setViewMode('2d');
+          notify(
+            `Generated editable 2D CAD model: ${summary.walls} walls, ${summary.rooms} rooms, ${summary.openings} openings, ${summary.electricalPoints} electrical points. Review layers & click "Approve 2D & Open 3D" when ready for 3D.${
+              nextProj.aiDrawingImport?.calibrated
+                ? ''
+                : ' Note: Drawing scale is uncalibrated — review dimensions.'
+            }`,
+            nextProj.aiDrawingImport?.calibrated ? 'success' : 'warning'
+          );
+        }}
       />
 
       {/* DESIGN STUDIO NOTIFICATION TOAST (INFO / SUCCESS / WARNING / ERROR) */}

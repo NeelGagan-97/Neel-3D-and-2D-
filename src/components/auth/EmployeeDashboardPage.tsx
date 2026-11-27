@@ -7,6 +7,7 @@ import { canViewAdminNavigation } from '../../utils/authValidation';
 import { downloadProjectJson } from '../../utils/exporters';
 import { Navbar } from '../Navbar';
 import { ProjectCreationInput, ProjectCreationModal } from '../ProjectCreationModal';
+import { AiDrawingImporterModal } from '../aiDrawing/AiDrawingImporterModal';
 
 interface EmployeeDashboardPageProps {
   projects: ProjectData[];
@@ -17,6 +18,7 @@ interface EmployeeDashboardPageProps {
   onNavigateRoute: (route: AppRoute) => void;
   onOpenProject: (projectId: string, targetScreen: ScreenId, initialView?: ViewMode) => void;
   onCreateProject: (input: ProjectCreationInput) => void;
+  onAiDrawingImport?: (project: ProjectData) => void;
 }
 
 function formatDate(iso: string | null | undefined): string {
@@ -39,6 +41,7 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
   onNavigateRoute,
   onOpenProject,
   onCreateProject,
+  onAiDrawingImport,
 }) => {
   const { isAuthenticated, authLoading, profileLoading, user, profile, signOut } = useAuth();
   const showAdminNav = canViewAdminNavigation({
@@ -48,6 +51,7 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
     profile,
   });
   const [showNewModal, setShowNewModal] = useState(false);
+  const [showAiDrawingModal, setShowAiDrawingModal] = useState(false);
 
   const handleSignOut = async () => {
     await signOut();
@@ -121,6 +125,16 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
                 architecture
               </span>
               <span>Create New Space</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAiDrawingModal(true)}
+              className="inline-flex items-center gap-gutter-xs px-gutter-lg py-gutter-sm rounded-md bg-primary-container/40 border border-primary/60 text-primary hover:bg-primary hover:text-on-primary font-label text-label-md cursor-pointer whitespace-nowrap"
+            >
+              <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+                auto_awesome
+              </span>
+              <span>AI Drawing Import</span>
             </button>
             <button
               type="button"
@@ -322,6 +336,14 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
           }}
         />
       )}
+
+      <AiDrawingImporterModal
+        isOpen={showAiDrawingModal}
+        onClose={() => setShowAiDrawingModal(false)}
+        onImportComplete={(result) => {
+          onAiDrawingImport?.(result.project);
+        }}
+      />
     </div>
   );
 };

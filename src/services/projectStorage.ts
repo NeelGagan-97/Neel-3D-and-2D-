@@ -49,6 +49,8 @@ function normalizeProject(p: ProjectData): ProjectData {
         ? p.circuitCableConfigs
         : undefined,
     savedCameraViews: Array.isArray(p.savedCameraViews) ? p.savedCameraViews : undefined,
+    aiDrawingImport:
+      p.aiDrawingImport && typeof p.aiDrawingImport === 'object' ? p.aiDrawingImport : undefined,
   };
   return migrateProjectFloorSchema(base);
 }
@@ -128,6 +130,9 @@ export const projectStorage: ProjectRepository = {
         : {}),
       ...(project.summaryOverrides !== undefined
         ? { summaryOverrides: project.summaryOverrides }
+        : {}),
+      ...(project.aiDrawingImport !== undefined
+        ? { aiDrawingImport: project.aiDrawingImport }
         : {}),
       settings: {
         status: project.status,
@@ -264,6 +269,9 @@ export const projectStorage: ProjectRepository = {
           : {}),
         ...(data.summaryOverrides && typeof data.summaryOverrides === 'object'
           ? { summaryOverrides: data.summaryOverrides }
+          : {}),
+        ...(data.aiDrawingImport && typeof data.aiDrawingImport === 'object'
+          ? { aiDrawingImport: data.aiDrawingImport }
           : {}),
         updatedAt: new Date().toISOString(),
       });

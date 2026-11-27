@@ -241,26 +241,35 @@ export const WIRE_STANDARD_LABELS: Record<WireStandard, string> = {
 
 export const WIRE_STANDARD_COLORS: Record<WireStandard, Record<WireCategory, string>> = {
   'IS-732': {
-    phase: '#EF4444', // Red (L1)
-    neutral: '#64748B', // Black / Slate visible on dark CAD
-    earth: '#22C55E', // Green
+    phase: '#EF4444', // Red (Phase L)
+    neutral: '#3B82F6', // Blue (Neutral N)
+    earth: '#22C55E', // Green (Earth / Ground E)
     control: '#F59E0B', // Amber / Orange
     communication: '#38BDF8', // Sky Blue
   },
   'IEC-60446': {
-    phase: '#B45309', // Brown
-    neutral: '#3B82F6', // Blue
-    earth: '#84CC16', // Green-Yellow
+    phase: '#EF4444', // Red / Brown-L
+    neutral: '#3B82F6', // Blue (Neutral N)
+    earth: '#22C55E', // Green / PE
     control: '#A855F7', // Violet
     communication: '#22D3EE', // Cyan
   },
   NEC: {
-    phase: '#F97316', // Hot (Red/Orange for CAD visibility)
-    neutral: '#E2E8F0', // White
-    earth: '#22C55E', // Green
+    phase: '#EF4444', // Red / Hot (Phase L)
+    neutral: '#3B82F6', // Blue (Neutral N for dark CAD legibility)
+    earth: '#22C55E', // Green (Earth / Ground E)
     control: '#FACC15', // Yellow
     communication: '#06B6D4', // Cyan
   },
+};
+
+export const CONDUCTOR_COLOR_LEGEND: Record<
+  'phase' | 'neutral' | 'earth',
+  { label: string; shortLabel: string; color: string }
+> = {
+  phase: { label: 'Phase (L)', shortLabel: 'L', color: '#EF4444' },
+  neutral: { label: 'Neutral (N)', shortLabel: 'N', color: '#3B82F6' },
+  earth: { label: 'Earth (E)', shortLabel: 'E', color: '#22C55E' },
 };
 
 export const WIRE_CATEGORY_DEFAULTS: Record<
@@ -1624,18 +1633,35 @@ export function createElectricalWire(options: {
   };
 }
 
+const isControlOrJunctionHub = (pt: ElectricalPoint): boolean =>
+  pt.itemType === 'switchboard' ||
+  pt.itemType === 'switch' ||
+  /switchboard|switch\s*box|junction/i.test(pt.name || '');
+
+const isDedicatedDirectFromDbLoad = (pt: ElectricalPoint): boolean =>
+  pt.itemType === 'split_ac' || pt.itemType === 'geyser';
+
 /**
- * Generates real, editable obstacle-aware orthogonal cable runs from the Main Distribution Board (DB-1)
- * to unwired branch circuit components (daisy-chained cleanly per floor & circuit along wall tracks),
- * plus protective Earth (PE) bonding from Main Earthing Point (EP-1) to DB-1 and heavy power loads.
- * Preserves all existing user-routed cables untouched and never creates duplicate connections.
+ * Generates real, editable obstacle-aware orthogonal 3-conductor cable runs:
+ *   - Phase (L) – Red
+ *   - Neutral (N) – Blue
+ *   - Earth/Ground (E) – Green
+ *
+ * Routes all three conductors separately and continuously along actual electrical pathways
+ * following real circuit topology:
+ *   EP-1 -> DB-1 (main earthing)
+ *   DB-1 -> Switchboards / Switches / Junction Boxes (circuit feed)
+ *   Switchboards / Junction Boxes -> Connected Loads (lights, fans, sockets, etc.)
+ *   DB-1 -> Dedicated Heavy Loads (ACs, geysers, or circuits without local switchboards)
+ *
+ * Preserves all existing user-routed cables untouched, completes any missing L/N/E conductors,
+ * and never creates duplicate connections.
  */
 export function autoRouteUnwiredCables(project: ProjectData): {
   nextWires: ElectricalWire[];
   addedCount: number;
   skippedCount: number;
 } {
-  const { lengthM, widthM } = siteToMeters(project.site);
   const existing = [...(project.wires ?? [])];
   const dbPt = project.points.find((p) => p.itemType === 'distribution_board');
   const epPt = project.points.find((p) => p.itemType === 'earthing_point');
@@ -1647,6 +1673,20 @@ export function autoRouteUnwiredCables(project: ProjectData): {
   let skippedCount = 0;
   const workingWires = [...existing];
   const wiringCfg = getWiringConfig(project);
+
+  const connectedByCategory: Record<'phase' | 'neutral' | 'earth', Set<string>> = {
+    phase: new Set<string>(),
+    neutral: new Set<string>(),
+    earth: new Set<string>(),
+  };
+
+  const registerWireConnectivity = (wire: Pick<ElectricalWire, 'category' | 'fromPointId' | 'toPointId'>) => {
+    if (wire.category === 'phase' || wire.category === 'neutral' || wire.category === 'earth') {
+      connectedByCategory[wire.category].add(wire.fromPointId);
+      connectedByCategory[wire.category].add(wire.toPointId);
+    }
+  };
+  workingWires.forEach(registerWireConnectivity);
 
   const pushWire = (
     fromPt: ElectricalPoint,
@@ -1684,7 +1724,7 @@ export function autoRouteUnwiredCables(project: ProjectData): {
       fromPt.itemType === 'distribution_board' || fromPt.itemType === 'earthing_point'
         ? toFloor
         : fromFloor;
-    workingWires.push({
+    const created: ElectricalWire = {
       id: `wire-auto-${Date.now()}-${seq}-${Math.random().toString(36).slice(2, 5)}`,
       code: `W-${String(seq).padStart(2, '0')}`,
       floor: servedFloor,
@@ -1706,9 +1746,37 @@ export function autoRouteUnwiredCables(project: ProjectData): {
       lineStyle: catDefaults.lineStyle,
       status: 'connected',
       ...buildCircuitCableWireFields(cktCfg),
-    });
+    };
+    workingWires.push(created);
+    registerWireConnectivity(created);
     addedCount += 1;
   };
+
+  const pushThreeConductors = (
+    fromPt: ElectricalPoint,
+    toPt: ElectricalPoint,
+    circuit: CircuitId | '',
+    phaseSizeSqMm: number,
+    earthSizeSqMm: number,
+    material: CableMaterial
+  ) => {
+    if (!connectedByCategory.phase.has(toPt.id) || !isDuplicateWireConnection(workingWires, fromPt.id, toPt.id, 'phase')) {
+      if (!connectedByCategory.phase.has(toPt.id)) {
+        pushWire(fromPt, toPt, 'phase', circuit, phaseSizeSqMm, material);
+      }
+    }
+    if (!connectedByCategory.neutral.has(toPt.id)) {
+      pushWire(fromPt, toPt, 'neutral', circuit, phaseSizeSqMm, material);
+    }
+    if (!connectedByCategory.earth.has(toPt.id)) {
+      pushWire(fromPt, toPt, 'earth', circuit, earthSizeSqMm, material);
+    }
+  };
+
+  const needsAnyConductor = (pt: ElectricalPoint): boolean =>
+    !connectedByCategory.phase.has(pt.id) ||
+    !connectedByCategory.neutral.has(pt.id) ||
+    !connectedByCategory.earth.has(pt.id);
 
   // 1. Bond EP-1 -> DB-1 with Earth conductor
   if (epPt) {
@@ -1716,15 +1784,7 @@ export function autoRouteUnwiredCables(project: ProjectData): {
     pushWire(epPt, dbPt, 'earth', 'CKT-P2 (Power 16A)', earthSize, 'Copper');
   }
 
-  // 2. Group branch load points by (floor, circuit) and route nearest-neighbor chain from DB-1
-  const alreadyPhaseConnected = new Set<string>();
-  workingWires.forEach((w) => {
-    if (w.category === 'phase') {
-      alreadyPhaseConnected.add(w.fromPointId);
-      alreadyPhaseConnected.add(w.toPointId);
-    }
-  });
-
+  // 2. Group branch points by (floor, circuit) and route DB -> Switchboards/Junctions -> Loads
   const branchPoints = project.points.filter(
     (p) => p.itemType !== 'distribution_board' && p.itemType !== 'earthing_point'
   );
@@ -1737,20 +1797,16 @@ export function autoRouteUnwiredCables(project: ProjectData): {
     groups.set(key, arr);
   });
 
-  const earthRequiredTypes = new Set(['split_ac', 'geyser', 'socket_16a', 'appliance']);
-
-  groups.forEach((pts) => {
-    const unwired = pts.filter((p) => !alreadyPhaseConnected.has(p.id));
-    if (unwired.length === 0) return;
-
-    const ckt = (unwired[0].circuit || '') as CircuitId | '';
-    const cktCfg = ckt ? project.circuitCableConfigs?.[ckt] : undefined;
-    const defaultSize = cktCfg?.cableSizeSqMm ?? (getCircuitKind(ckt) === 'power' ? 2.5 : 1.5);
-    const mat: CableMaterial = cktCfg?.cableMaterial ?? 'Copper';
-
-    // Order by nearest-neighbor starting from DB
-    const remaining = [...unwired];
-    let currentAnchor: ElectricalPoint = dbPt;
+  const routeNearestChain = (
+    startAnchor: ElectricalPoint,
+    targets: ElectricalPoint[],
+    circuit: CircuitId | '',
+    phaseSize: number,
+    earthSize: number,
+    mat: CableMaterial
+  ) => {
+    const remaining = targets.filter(needsAnyConductor);
+    let currentAnchor = startAnchor;
     while (remaining.length > 0) {
       let bestIdx = 0;
       let bestDist = Infinity;
@@ -1762,28 +1818,151 @@ export function autoRouteUnwiredCables(project: ProjectData): {
         }
       }
       const nextPt = remaining.splice(bestIdx, 1)[0];
-      pushWire(currentAnchor, nextPt, 'phase', ckt, defaultSize, mat);
-      pushWire(currentAnchor, nextPt, 'neutral', ckt, defaultSize, mat);
-      if (earthRequiredTypes.has(nextPt.itemType)) {
-        const peSource = currentAnchor.itemType === 'distribution_board' ? dbPt : currentAnchor;
-        pushWire(peSource, nextPt, 'earth', ckt, Math.min(defaultSize, 2.5), mat);
-      }
-      alreadyPhaseConnected.add(nextPt.id);
+      pushThreeConductors(currentAnchor, nextPt, circuit, phaseSize, earthSize, mat);
       currentAnchor = nextPt;
     }
+  };
+
+  const pickNearestHub = (pt: ElectricalPoint, candidates: ElectricalPoint[]): ElectricalPoint | null => {
+    if (candidates.length === 0) return null;
+    let best = candidates[0];
+    let bestDist = Math.hypot(best.x - pt.x, best.y - pt.y);
+    for (let i = 1; i < candidates.length; i++) {
+      const d = Math.hypot(candidates[i].x - pt.x, candidates[i].y - pt.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = candidates[i];
+      }
+    }
+    return best;
+  };
+
+  groups.forEach((pts) => {
+    const ckt = (pts[0]?.circuit || '') as CircuitId | '';
+    const cktCfg = ckt ? project.circuitCableConfigs?.[ckt] : undefined;
+    const defaultSize = cktCfg?.cableSizeSqMm ?? (getCircuitKind(ckt) === 'power' ? 2.5 : 1.5);
+    const earthSize = Math.min(defaultSize, 2.5);
+    const mat: CableMaterial = cktCfg?.cableMaterial ?? 'Copper';
+
+    const circuitHubs = pts.filter(isControlOrJunctionHub);
+    const circuitLoads = pts.filter((p) => !isControlOrJunctionHub(p));
+
+    // Stage A: Feed DB -> Switchboards / Switches / Junction Boxes on this circuit (all 3 conductors: L, N, E)
+    if (circuitHubs.length > 0) {
+      routeNearestChain(dbPt, circuitHubs, ckt, defaultSize, earthSize, mat);
+    }
+
+    // Stage B: Assign each load to its governing same-circuit Switchboard/Junction hub (or DB for dedicated/direct loads)
+    const loadsByAnchor = new Map<string, { anchor: ElectricalPoint; loads: ElectricalPoint[] }>();
+    const addLoadToAnchor = (anchor: ElectricalPoint, load: ElectricalPoint) => {
+      const entry = loadsByAnchor.get(anchor.id);
+      if (entry) {
+        entry.loads.push(load);
+      } else {
+        loadsByAnchor.set(anchor.id, { anchor, loads: [load] });
+      }
+    };
+
+    circuitLoads.forEach((load) => {
+      if (!needsAnyConductor(load)) return;
+
+      const sameRoomCircuitHubs = circuitHubs.filter(
+        (h) => load.roomId && h.roomId === load.roomId
+      );
+
+      if (isDedicatedDirectFromDbLoad(load)) {
+        // Dedicated power loads (AC / Geyser) run directly from DB unless a dedicated local switch is on the same circuit & room
+        const anchor = pickNearestHub(load, sameRoomCircuitHubs) ?? dbPt;
+        addLoadToAnchor(anchor, load);
+        return;
+      }
+
+      // Prefer a switchboard/switch on the same circuit & same room, else same circuit on same floor, else DB directly
+      const governingHub =
+        pickNearestHub(load, sameRoomCircuitHubs) ??
+        pickNearestHub(load, circuitHubs) ??
+        dbPt;
+
+      addLoadToAnchor(governingHub, load);
+    });
+
+    // Route continuous 3-conductor branches from each anchor to its assigned loads
+    loadsByAnchor.forEach(({ anchor, loads }) => {
+      routeNearestChain(anchor, loads, ckt, defaultSize, earthSize, mat);
+    });
   });
 
   return { nextWires: workingWires, addedCount, skippedCount };
 }
 
+export const DEFAULT_INSTALLATION_ALLOWANCE_PCT = 10;
+export const WIRE_TERMINATION_DEVICE_M = 0.15;
+export const WIRE_TERMINATION_DB_M = 0.3;
+
+export interface WireLengthBreakdown {
+  /** Calibrated horizontal routed length along XY waypoints in meters. */
+  horizontalM: number;
+  /** Vertical ceiling/wall conduit drops + inter-floor riser length in meters. */
+  verticalDropsM: number;
+  /** Exact calibrated base routed length (horizontalM + verticalDropsM) in meters. */
+  baseRouteM: number;
+  /** Exact calibrated base routed length in feet. */
+  baseRouteFt: number;
+  /** Termination tail allowance at both endpoints (DB / switch / load) in meters, kept separate from baseRouteM. */
+  terminationM: number;
+  /** Termination tail allowance in feet. */
+  terminationFt: number;
+  /** Installation allowance percentage applied to base route length (e.g. 10%). */
+  allowancePct: number;
+  /** Installation allowance (bends, dressing, slack) in meters, kept separate from baseRouteM. */
+  allowanceM: number;
+  /** Installation allowance in feet. */
+  allowanceFt: number;
+  /** Total procurement/installation conductor length (baseRouteM + terminationM + allowanceM) in meters. */
+  totalM: number;
+  /** Total procurement/installation conductor length in feet. */
+  totalFt: number;
+}
+
+const round2 = (val: number): number => (Number.isFinite(val) ? Number(val.toFixed(2)) : 0);
+
 /**
- * Computes exact polyline wire length in meters, including horizontal routing segments,
- * vertical ceiling/wall drops, and inter-floor vertical riser height if spanning storeys.
+ * Computes detailed calibrated conductor length breakdown from actual drawing coordinates:
+ *  - Horizontal routed path (from -> waypoints -> to)
+ *  - Vertical drops (ceiling/wall drops + inter-floor vertical riser)
+ *  - Base Route = horizontal + vertical drops
+ *  - Termination lengths (separate)
+ *  - Installation allowance (separate)
+ *  - Total Required = Base Route + Termination + Installation Allowance
+ * All values are returned in both metres and feet.
  */
-export function computeWireLengthMeters(wire: ElectricalWire, project: ProjectData): number {
+export function computeWireLengthBreakdown(
+  wire: ElectricalWire,
+  project: ProjectData,
+  installationAllowancePct: number = DEFAULT_INSTALLATION_ALLOWANCE_PCT
+): WireLengthBreakdown {
   const fromPt = project.points.find((p) => p.id === wire.fromPointId);
   const toPt = project.points.find((p) => p.id === wire.toPointId);
-  if (!fromPt || !toPt) return 0;
+  const safeAllowancePct = Math.max(
+    0,
+    Math.min(50, Number.isFinite(installationAllowancePct) ? installationAllowancePct : DEFAULT_INSTALLATION_ALLOWANCE_PCT)
+  );
+
+  if (!fromPt || !toPt) {
+    return {
+      horizontalM: 0,
+      verticalDropsM: 0,
+      baseRouteM: 0,
+      baseRouteFt: 0,
+      terminationM: 0,
+      terminationFt: 0,
+      allowancePct: safeAllowancePct,
+      allowanceM: 0,
+      allowanceFt: 0,
+      totalM: 0,
+      totalFt: 0,
+    };
+  }
 
   const nodes: { x: number; y: number }[] = [
     { x: fromPt.x, y: fromPt.y },
@@ -1794,7 +1973,21 @@ export function computeWireLengthMeters(wire: ElectricalWire, project: ProjectDa
   let planLength = 0;
   for (let i = 0; i < nodes.length - 1; i++) {
     const seg = Math.hypot(nodes[i + 1].x - nodes[i].x, nodes[i + 1].y - nodes[i].y);
-    if (!Number.isFinite(seg)) return 0;
+    if (!Number.isFinite(seg)) {
+      return {
+        horizontalM: 0,
+        verticalDropsM: 0,
+        baseRouteM: 0,
+        baseRouteFt: 0,
+        terminationM: 0,
+        terminationFt: 0,
+        allowancePct: safeAllowancePct,
+        allowanceM: 0,
+        allowanceFt: 0,
+        totalM: 0,
+        totalFt: 0,
+      };
+    }
     planLength += seg;
   }
 
@@ -1821,8 +2014,261 @@ export function computeWireLengthMeters(wire: ElectricalWire, project: ProjectDa
       ? Math.abs(routeZ - fromAbsZ) + Math.abs(routeZ - toAbsZ)
       : Math.abs(toAbsZ - fromAbsZ) + 0.6;
 
-  const total = planLength + verticalDrops;
-  return Number.isFinite(total) ? Number(total.toFixed(2)) : 0;
+  const baseRouteRaw = planLength + verticalDrops;
+  const fromTerm =
+    fromPt.itemType === 'distribution_board' || fromPt.itemType === 'earthing_point'
+      ? WIRE_TERMINATION_DB_M
+      : WIRE_TERMINATION_DEVICE_M;
+  const toTerm =
+    toPt.itemType === 'distribution_board' || toPt.itemType === 'earthing_point'
+      ? WIRE_TERMINATION_DB_M
+      : WIRE_TERMINATION_DEVICE_M;
+  const terminationRaw = fromTerm + toTerm;
+  const allowanceRaw = baseRouteRaw * (safeAllowancePct / 100);
+
+  const horizontalM = round2(planLength);
+  const verticalDropsM = round2(verticalDrops);
+  const baseRouteM = round2(baseRouteRaw);
+  const terminationM = round2(terminationRaw);
+  const allowanceM = round2(allowanceRaw);
+  const totalM = round2(baseRouteM + terminationM + allowanceM);
+
+  return {
+    horizontalM,
+    verticalDropsM,
+    baseRouteM,
+    baseRouteFt: round2(baseRouteM * M_TO_FT),
+    terminationM,
+    terminationFt: round2(terminationM * M_TO_FT),
+    allowancePct: safeAllowancePct,
+    allowanceM,
+    allowanceFt: round2(allowanceM * M_TO_FT),
+    totalM,
+    totalFt: round2(totalM * M_TO_FT),
+  };
+}
+
+/**
+ * Computes exact calibrated base polyline wire length in meters, including horizontal routing
+ * segments, vertical ceiling/wall drops, and inter-floor vertical riser height if spanning storeys.
+ */
+export function computeWireLengthMeters(wire: ElectricalWire, project: ProjectData): number {
+  return computeWireLengthBreakdown(wire, project, 0).baseRouteM;
+}
+
+export interface ConductorQuantityTotals {
+  wireCount: number;
+  horizontalM: number;
+  verticalDropsM: number;
+  baseRouteM: number;
+  baseRouteFt: number;
+  terminationM: number;
+  terminationFt: number;
+  allowanceM: number;
+  allowanceFt: number;
+  totalM: number;
+  totalFt: number;
+}
+
+export interface ConductorQuantitySummary extends ConductorQuantityTotals {
+  category: WireCategory | 'other';
+  label: string;
+  color: string;
+}
+
+export interface CircuitWireQuantitySummary {
+  circuit: string;
+  phase: ConductorQuantitySummary;
+  neutral: ConductorQuantitySummary;
+  earth: ConductorQuantitySummary;
+  other: ConductorQuantitySummary;
+  subtotal: ConductorQuantityTotals;
+  hasAllThreeConductors: boolean;
+}
+
+export interface DetailedWireQuantityReport {
+  installationAllowancePct: number;
+  circuits: CircuitWireQuantitySummary[];
+  totalsByConductor: {
+    phase: ConductorQuantitySummary;
+    neutral: ConductorQuantitySummary;
+    earth: ConductorQuantitySummary;
+    other: ConductorQuantitySummary;
+  };
+  grandTotal: ConductorQuantityTotals;
+  wireCount: number;
+  isCompleteThreeConductor: boolean;
+}
+
+const makeEmptyConductorSummary = (
+  category: WireCategory | 'other',
+  label: string,
+  color: string
+): ConductorQuantitySummary => ({
+  category,
+  label,
+  color,
+  wireCount: 0,
+  horizontalM: 0,
+  verticalDropsM: 0,
+  baseRouteM: 0,
+  baseRouteFt: 0,
+  terminationM: 0,
+  terminationFt: 0,
+  allowanceM: 0,
+  allowanceFt: 0,
+  totalM: 0,
+  totalFt: 0,
+});
+
+const accumulateBreakdown = (target: ConductorQuantityTotals, b: WireLengthBreakdown) => {
+  target.wireCount += 1;
+  target.horizontalM = round2(target.horizontalM + b.horizontalM);
+  target.verticalDropsM = round2(target.verticalDropsM + b.verticalDropsM);
+  target.baseRouteM = round2(target.baseRouteM + b.baseRouteM);
+  target.terminationM = round2(target.terminationM + b.terminationM);
+  target.allowanceM = round2(target.allowanceM + b.allowanceM);
+  target.totalM = round2(target.baseRouteM + target.terminationM + target.allowanceM);
+  target.baseRouteFt = round2(target.baseRouteM * M_TO_FT);
+  target.terminationFt = round2(target.terminationM * M_TO_FT);
+  target.allowanceFt = round2(target.allowanceM * M_TO_FT);
+  target.totalFt = round2(target.totalM * M_TO_FT);
+};
+
+/**
+ * Computes a complete real-world electrical wire quantity report grouped by circuit,
+ * separating Phase (L), Neutral (N), and Earth (E) conductors individually, with
+ * Base Route (Horizontal + Vertical), Termination, Installation Allowance, and Total
+ * quantities calculated from calibrated drawing coordinates in both metres and feet.
+ */
+export function computeDetailedWireQuantityReport(
+  project: ProjectData,
+  options?: {
+    floor?: number;
+    installationAllowancePct?: number;
+  }
+): DetailedWireQuantityReport {
+  const allowancePct = Math.max(
+    0,
+    Math.min(
+      50,
+      Number.isFinite(options?.installationAllowancePct)
+        ? (options?.installationAllowancePct as number)
+        : DEFAULT_INSTALLATION_ALLOWANCE_PCT
+    )
+  );
+
+  const wiringCfg = getWiringConfig(project);
+  const stdColors = WIRE_STANDARD_COLORS[wiringCfg.standard];
+
+  const allWires = (project.wires ?? []).filter((w) => {
+    if (options?.floor === undefined) return true;
+    const wFrom = w.fromFloor ?? w.floor ?? 1;
+    const wTo = w.toFloor ?? w.floor ?? 1;
+    return wFrom === options.floor || wTo === options.floor || (w.floor ?? 1) === options.floor;
+  });
+
+  const circuitMap = new Map<string, CircuitWireQuantitySummary>();
+  const ensureCircuit = (circuitKey: string): CircuitWireQuantitySummary => {
+    let entry = circuitMap.get(circuitKey);
+    if (!entry) {
+      entry = {
+        circuit: circuitKey,
+        phase: makeEmptyConductorSummary('phase', 'Phase (L)', stdColors.phase),
+        neutral: makeEmptyConductorSummary('neutral', 'Neutral (N)', stdColors.neutral),
+        earth: makeEmptyConductorSummary('earth', 'Earth (E)', stdColors.earth),
+        other: makeEmptyConductorSummary('other', 'Control / Data', stdColors.control),
+        subtotal: {
+          wireCount: 0,
+          horizontalM: 0,
+          verticalDropsM: 0,
+          baseRouteM: 0,
+          baseRouteFt: 0,
+          terminationM: 0,
+          terminationFt: 0,
+          allowanceM: 0,
+          allowanceFt: 0,
+          totalM: 0,
+          totalFt: 0,
+        },
+        hasAllThreeConductors: false,
+      };
+      circuitMap.set(circuitKey, entry);
+    }
+    return entry;
+  };
+
+  const totalsByConductor = {
+    phase: makeEmptyConductorSummary('phase', 'Phase (L)', stdColors.phase),
+    neutral: makeEmptyConductorSummary('neutral', 'Neutral (N)', stdColors.neutral),
+    earth: makeEmptyConductorSummary('earth', 'Earth (E)', stdColors.earth),
+    other: makeEmptyConductorSummary('other', 'Control / Data', stdColors.control),
+  };
+
+  const grandTotal: ConductorQuantityTotals = {
+    wireCount: 0,
+    horizontalM: 0,
+    verticalDropsM: 0,
+    baseRouteM: 0,
+    baseRouteFt: 0,
+    terminationM: 0,
+    terminationFt: 0,
+    allowanceM: 0,
+    allowanceFt: 0,
+    totalM: 0,
+    totalFt: 0,
+  };
+
+  allWires.forEach((wire) => {
+    const breakdown = computeWireLengthBreakdown(wire, project, allowancePct);
+    if (breakdown.baseRouteM <= 0) return;
+
+    const circuitKey = wire.circuit || 'Unassigned Circuit';
+    const cktEntry = ensureCircuit(circuitKey);
+
+    if (wire.category === 'phase') {
+      accumulateBreakdown(cktEntry.phase, breakdown);
+      accumulateBreakdown(totalsByConductor.phase, breakdown);
+    } else if (wire.category === 'neutral') {
+      accumulateBreakdown(cktEntry.neutral, breakdown);
+      accumulateBreakdown(totalsByConductor.neutral, breakdown);
+    } else if (wire.category === 'earth') {
+      accumulateBreakdown(cktEntry.earth, breakdown);
+      accumulateBreakdown(totalsByConductor.earth, breakdown);
+    } else {
+      accumulateBreakdown(cktEntry.other, breakdown);
+      accumulateBreakdown(totalsByConductor.other, breakdown);
+    }
+
+    accumulateBreakdown(cktEntry.subtotal, breakdown);
+    accumulateBreakdown(grandTotal, breakdown);
+  });
+
+  const circuits = Array.from(circuitMap.values())
+    .map((c) => ({
+      ...c,
+      hasAllThreeConductors: c.phase.wireCount > 0 && c.neutral.wireCount > 0 && c.earth.wireCount > 0,
+    }))
+    .sort((a, b) => a.circuit.localeCompare(b.circuit));
+
+  const isCompleteThreeConductor =
+    circuits.length > 0 &&
+    circuits.every((c) => {
+      // Pure earthing bond circuits (only EP->DB earth without phase/neutral loads) still count cleanly
+      if (c.phase.wireCount === 0 && c.neutral.wireCount === 0 && c.earth.wireCount > 0) {
+        return true;
+      }
+      return c.hasAllThreeConductors;
+    });
+
+  return {
+    installationAllowancePct: allowancePct,
+    circuits,
+    totalsByConductor,
+    grandTotal,
+    wireCount: grandTotal.wireCount,
+    isCompleteThreeConductor,
+  };
 }
 
 // ============================================================

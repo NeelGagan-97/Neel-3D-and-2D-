@@ -9,6 +9,7 @@ import { ImportProjectPreviewModal } from './ImportProjectPreviewModal';
 import { Navbar } from './Navbar';
 import { ProjectCreationInput, ProjectCreationModal } from './ProjectCreationModal';
 import { Viewport3D } from './Viewport3D';
+import { AiDrawingImporterModal } from './aiDrawing/AiDrawingImporterModal';
 
 interface HomePageProps {
   projects: ProjectData[];
@@ -30,6 +31,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   onDeleteProject,
 }) => {
   const [showNewModal, setShowNewModal] = useState(false);
+  const [showAiDrawingModal, setShowAiDrawingModal] = useState(false);
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -126,6 +128,17 @@ export const HomePage: React.FC<HomePageProps> = ({
                       architecture
                     </span>
                     <span>CREATE YOUR OWN SPACE</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowAiDrawingModal(true)}
+                    className="inline-flex items-center justify-center gap-gutter-sm bg-primary-container/40 text-primary border border-primary/60 px-gutter-lg py-gutter-md rounded-md font-label text-label-lg transition-colors duration-state-change hover:bg-primary hover:text-on-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary cursor-pointer whitespace-nowrap"
+                  >
+                    <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+                      auto_awesome
+                    </span>
+                    <span>AI DRAWING IMPORT</span>
                   </button>
 
                   <button
@@ -632,6 +645,20 @@ export const HomePage: React.FC<HomePageProps> = ({
         preview={importPreview}
         onCancel={() => setImportPreview(null)}
         onConfirmImport={handleConfirmSafeImport}
+      />
+
+      {/* AI Drawing to 2D Importer Modal */}
+      <AiDrawingImporterModal
+        isOpen={showAiDrawingModal}
+        onClose={() => setShowAiDrawingModal(false)}
+        onImportComplete={(result) => {
+          const res = onImportProject(projectStorage.exportNativeBluespace(result.project));
+          if (!res.ok) {
+            setImportError(res.error ?? 'Could not import generated 2D project.');
+          } else {
+            setImportError(null);
+          }
+        }}
       />
     </div>
   );

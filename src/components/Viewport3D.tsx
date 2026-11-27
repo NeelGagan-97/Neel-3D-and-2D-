@@ -4,11 +4,27 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { CATALOG_MAP, findRoomAtPoint, siteToMeters } from '../data/presets';
 import {
+  applyElectricalVisibilityToScene,
   buildArchitecturalScene,
   BuiltSceneHandles,
+  DEFAULT_ELECTRICAL_VISIBILITY,
+  ElectricalVisibilityState,
+  ElectricalVisibilityToggleGroup,
   EXPLODED_FLOOR_GAP_M,
+  isElectricalPointVisible,
   STORY_SLAB_THICKNESS,
+  toggleElectricalVisibilityGroup,
+  toggleMasterElectricalVisibility,
 } from '../three/architecturalBuilder';
+import {
+  buildFloorCollisionObstacles,
+  computeInitialFpsSpawn,
+  FPS_EYE_HEIGHT_M,
+  FPS_PLAYER_RADIUS_M,
+  FpsObstacleBox,
+  normalizeHorizontalMoveInput,
+  resolveFpsMovementWithCollisions,
+} from '../three/fpsCollision';
 import { ArchitecturalTextureSet, createArchitecturalTextures } from '../three/proceduralTextures';
 import { createSkyAtmosphere, SkyAtmosphereHandles } from '../three/skyAtmosphere';
 import {
@@ -63,6 +79,8 @@ interface Viewport3DProps {
   onRecordHistorySnapshot?: () => void;
   onCanvasContextMenu?: (pos: { x: number; y: number }) => void;
   onSwitchTo2D?: () => void;
+  onExitFpsMode?: () => void;
+  onRegisterFpsPointerLock?: (requestLockFn: (() => void) | null) => void;
 }
 
 interface Viewport3DFailure {
@@ -132,6 +150,15 @@ function isOrthographicPreset(preset: CameraPreset): boolean {
   );
 }
 
+function isObjectVisibleInScene(obj: THREE.Object3D | null): boolean {
+  let curr: THREE.Object3D | null = obj;
+  while (curr) {
+    if (!curr.visible) return false;
+    curr = curr.parent;
+  }
+  return true;
+}
+
 const Viewport3DInner: React.FC<Viewport3DProps> = ({
   project,
   activeFloor = 1,
@@ -160,11 +187,18 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
   onRecordHistorySnapshot,
   onCanvasContextMenu,
   onSwitchTo2D,
+  onExitFpsMode,
+  onRegisterFpsPointerLock,
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [viewportFailure, setViewportFailure] = useState<Viewport3DFailure | null>(null);
   const [initAttempt, setInitAttempt] = useState(0);
   const [pins, setPins] = useState<ProjectedPin[]>([]);
+  const [electricalVisibility, setElectricalVisibility] = useState<ElectricalVisibilityState>(
+    DEFAULT_ELECTRICAL_VISIBILITY
+  );
+  const [visibilityPanelOpen, setVisibilityPanelOpen] = useState(true);
+  const [isPointerLocked, setIsPointerLocked] = useState(false);
   const skipFirstRebuildRef = useRef(true);
   const skipFirstCameraRef = useRef(true);
 
@@ -186,6 +220,8 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
   const onRecordHistorySnapshotRef = useRef(onRecordHistorySnapshot);
   const onCanvasContextMenuRef = useRef(onCanvasContextMenu);
   const onCameraCaptureReadyRef = useRef(onCameraCaptureReady);
+  const onExitFpsModeRef = useRef(onExitFpsMode);
+  const onRegisterFpsPointerLockRef = useRef(onRegisterFpsPointerLock);
   const pendingPlaceRef = useRef(pendingPlaceItem);
   const projectRef = useRef(project);
   const activeFloorRef = useRef(activeFloor);
@@ -198,6 +234,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
   const cameraPresetRef = useRef<CameraPreset>(cameraPreset);
   const lightingModeRef = useRef(lightingMode);
   const showPinsRef = useRef(showPins && !previewOnly);
+  const electricalVisibilityRef = useRef<ElectricalVisibilityState>(electricalVisibility);
 
   onSelectEntityRef.current = onSelectEntity;
   onSelectRef.current = onSelectPoint;
@@ -209,6 +246,8 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
   onRecordHistorySnapshotRef.current = onRecordHistorySnapshot;
   onCanvasContextMenuRef.current = onCanvasContextMenu;
   onCameraCaptureReadyRef.current = onCameraCaptureReady;
+  onExitFpsModeRef.current = onExitFpsMode;
+  onRegisterFpsPointerLockRef.current = onRegisterFpsPointerLock;
   pendingPlaceRef.current = pendingPlaceItem;
   projectRef.current = project;
   activeFloorRef.current = activeFloor;
@@ -221,6 +260,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
   cameraPresetRef.current = cameraPreset;
   lightingModeRef.current = lightingMode;
   showPinsRef.current = showPins && !previewOnly;
+  electricalVisibilityRef.current = electricalVisibility;
 
   // Visible interactive 3D pins strictly scoped to visible floors
   const featuredPoints = useMemo<ElectricalPoint[]>(() => {
@@ -244,13 +284,22 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
       pool.filter((p) => highlightedIds.has(p.id)).forEach(addIf);
     }
     pool.filter((p) => selectedIds.has(p.id)).forEach(addIf);
-    // Include fans, ACs, switchboards, high-power outlets, and other visible fixtures
-    pool.filter((p) => p.itemType === 'ceiling_fan').forEach(addIf);
+    // Include fans, ACs, switchboards, panels, sockets, geysers, and other visible fixtures
+    pool.filter((p) => p.itemType === 'ceiling_fan' || p.itemType === 'exhaust_fan').forEach(addIf);
     pool.filter((p) => p.itemType === 'split_ac').forEach(addIf);
-    pool.filter((p) => p.itemType === 'switchboard').forEach(addIf);
-    pool.filter((p) => p.itemType === 'socket_16a' || p.itemType === 'geyser').forEach(addIf);
+    pool.filter((p) => p.itemType === 'switchboard' || p.itemType === 'switch').forEach(addIf);
+    pool
+      .filter((p) => p.itemType === 'panel_light' || p.itemType === 'distribution_board')
+      .forEach(addIf);
+    pool
+      .filter(
+        (p) =>
+          p.itemType === 'socket_5a' || p.itemType === 'socket_16a' || p.itemType === 'usb_outlet'
+      )
+      .forEach(addIf);
+    pool.filter((p) => p.itemType === 'geyser').forEach(addIf);
     pool.forEach(addIf);
-    return byPriority.slice(0, 20);
+    return byPriority.slice(0, 60);
   }, [
     project.points,
     activeFloor,
@@ -291,6 +340,9 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
     captureCurrentCameraView: () => SavedCameraView | null;
     focusOnTarget: (target: StudioFocusTarget) => void;
     rebuildScene: () => void;
+    applyElectricalVisibility: (visibility: ElectricalVisibilityState) => void;
+    requestFpsPointerLock: () => void;
+    exitFpsPointerLock: () => void;
     beginDragFromPin: (pointId: string, floorNum: number, clientX: number, clientY: number) => void;
   } | null>(null);
 
@@ -342,6 +394,8 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
     let onKeyUp: ((e: KeyboardEvent) => void) | null = null;
     let onWindowBlur: (() => void) | null = null;
     let onWindowResize: (() => void) | null = null;
+    let onDocumentMouseMove: ((e: MouseEvent) => void) | null = null;
+    let onPointerLockChange: (() => void) | null = null;
 
     const stopLoopsAndTimers = () => {
       if (spinTimer) {
@@ -365,6 +419,16 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
       if (disposed) return;
       disposed = true;
       stopLoopsAndTimers();
+      onRegisterFpsPointerLockRef.current?.(null);
+
+      try {
+        if (renderer && document.pointerLockElement === renderer.domElement) {
+          document.exitPointerLock?.();
+        }
+      } catch {
+        // Ignore pointer lock exit errors during teardown
+      }
+      setIsPointerLocked(false);
 
       if (resizeObserver) {
         try {
@@ -389,6 +453,8 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         if (onKeyDown) window.removeEventListener('keydown', onKeyDown);
         if (onKeyUp) window.removeEventListener('keyup', onKeyUp);
         if (onWindowBlur) window.removeEventListener('blur', onWindowBlur);
+        if (onDocumentMouseMove) document.removeEventListener('mousemove', onDocumentMouseMove);
+        if (onPointerLockChange) document.removeEventListener('pointerlockchange', onPointerLockChange);
         listenersAttached = false;
       }
 
@@ -679,7 +745,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
       const createdTextures = createArchitecturalTextures(maxAniso);
       textures = createdTextures;
 
-      // Camera transition & FPS walk state
+      // Camera transition & FPS eye-level walk state
       let transitionActive = false;
       const walkKeys: Record<WalkDirection, boolean> = {
         forward: false,
@@ -693,11 +759,50 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         walkKeys.left = false;
         walkKeys.right = false;
       };
-      let fpsYaw = -0.5;
-      let fpsPitch = -0.08;
+      let fpsYaw = 0;
+      let fpsPitch = 0;
+      let fpsObstacles: FpsObstacleBox[] = [];
       let isFpsDragging = false;
       let lastPointerX = 0;
       let lastPointerY = 0;
+      let wasPointerLocked = false;
+      let suppressNextUnlockExit = false;
+
+      const requestFpsPointerLock = () => {
+        if (disposed || previewOnly) return;
+        try {
+          if (document.activeElement instanceof HTMLElement) {
+            document.activeElement.blur();
+          }
+          const canvas = createdRenderer.domElement;
+          if (
+            document.pointerLockElement !== canvas &&
+            typeof canvas.requestPointerLock === 'function'
+          ) {
+            const maybePromise = canvas.requestPointerLock() as unknown as
+              | Promise<void>
+              | undefined;
+            if (maybePromise && typeof maybePromise.catch === 'function') {
+              maybePromise.catch(() => {
+                // Ignore browser rejection in restricted contexts; click-to-lock remains available
+              });
+            }
+          }
+        } catch {
+          // Ignore SecurityError / NotSupportedError
+        }
+      };
+
+      const exitFpsPointerLock = () => {
+        try {
+          if (document.pointerLockElement === createdRenderer.domElement) {
+            suppressNextUnlockExit = true;
+            document.exitPointerLock?.();
+          }
+        } catch {
+          // Ignore
+        }
+      };
 
       const afterDraw = (cb: () => void) => {
         try {
@@ -724,13 +829,19 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         frameId = window.setTimeout(cb, 80);
       };
 
-      const syncProjectedPins = () => {
+      const syncProjectedPins = (force = false) => {
         if (!showPinsRef.current || !engineRef.current?.built) {
           return;
         }
         const now = performance.now();
-        if (now - lastPinSync < 45) return;
+        if (!force && now - lastPinSync < 45) return;
         lastPinSync = now;
+
+        const vis = electricalVisibilityRef.current;
+        if (!vis.all) {
+          setPins([]);
+          return;
+        }
 
         const anchors = engineRef.current.built.pointAnchors;
         const w = createdRenderer.domElement.clientWidth;
@@ -742,7 +853,8 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           const isSel = selectedIdsRef.current.has(pt.id) || pt.id === selectedIdRef.current;
           const isHl = !!highlightedIdsRef.current?.has(pt.id);
           const isActHl = activeHighlightIdRef.current === pt.id;
-          if (!worldPos) {
+          const isVisByGroup = isElectricalPointVisible(pt.itemType, vis);
+          if (!worldPos || !isVisByGroup) {
             return {
               id: pt.id,
               code: pt.code,
@@ -819,37 +931,43 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
               }
             }
 
-            // First-person W/A/S/D (uppercase or lowercase) & Arrow movement on 1:3 enlarged active floor
+            // First-person human eye-level (1.65m) W/A/S/D movement with normalized diagonal speed & wall/obstacle collision
             if (cameraModeRef.current === 'fps' && !previewOnly) {
               const floorBaseY = getFloorElevationM(projectRef.current, activeFloorRef.current);
-              const moveSpeed = 2.6 * sceneScale * dt;
-              let moved = false;
-              _fpsForward.set(-Math.sin(fpsYaw), 0, -Math.cos(fpsYaw));
-              _fpsRight.set(Math.cos(fpsYaw), 0, -Math.sin(fpsYaw));
-              if (walkKeys.forward) {
-                createdCamera.position.addScaledVector(_fpsForward, moveSpeed);
-                moved = true;
-              }
-              if (walkKeys.backward) {
-                createdCamera.position.addScaledVector(_fpsForward, -moveSpeed);
-                moved = true;
-              }
-              if (walkKeys.left) {
-                createdCamera.position.addScaledVector(_fpsRight, -moveSpeed);
-                moved = true;
-              }
-              if (walkKeys.right) {
-                createdCamera.position.addScaledVector(_fpsRight, moveSpeed);
-                moved = true;
-              }
-              if (moved) {
+              const move = normalizeHorizontalMoveInput(walkKeys);
+              if (move.moving) {
+                const { lengthM, widthM } = siteToMeters(projectRef.current.site);
+                const safeL = Number.isFinite(lengthM) && lengthM > 0.5 ? lengthM : 10;
+                const safeW = Number.isFinite(widthM) && widthM > 0.5 ? widthM : 8;
+                const walkSpeedMps = 2.6;
+                _fpsForward.set(-Math.sin(fpsYaw), 0, -Math.cos(fpsYaw));
+                _fpsRight.set(Math.cos(fpsYaw), 0, -Math.sin(fpsYaw));
+
+                const deltaPlanX =
+                  (_fpsForward.x * move.forward + _fpsRight.x * move.right) * walkSpeedMps * dt;
+                const deltaPlanY =
+                  (_fpsForward.z * move.forward + _fpsRight.z * move.right) * walkSpeedMps * dt;
+
+                const curPlanX = createdCamera.position.x / sceneScale + safeL / 2;
+                const curPlanY = createdCamera.position.z / sceneScale + safeW / 2;
+                const nextPos = resolveFpsMovementWithCollisions(
+                  curPlanX,
+                  curPlanY,
+                  deltaPlanX,
+                  deltaPlanY,
+                  fpsObstacles,
+                  FPS_PLAYER_RADIUS_M
+                );
+                createdCamera.position.x = (nextPos.x - safeL / 2) * sceneScale;
+                createdCamera.position.z = (nextPos.y - safeW / 2) * sceneScale;
                 transitionActive = false;
                 renderDirty = true;
               }
-              createdCamera.position.y = (floorBaseY + 1.48) * sceneScale;
+              createdCamera.position.y = (floorBaseY + FPS_EYE_HEIGHT_M) * sceneScale;
               createdCamera.rotation.order = 'YXZ';
               createdCamera.rotation.y = fpsYaw;
               createdCamera.rotation.x = fpsPitch;
+              createdCamera.rotation.z = 0;
             } else {
               createdControls.update();
             }
@@ -968,19 +1086,25 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         if (mode === 'fps' && !previewOnly) {
           clearWalkKeys();
           createdControls.enabled = false;
-          _targetCamPos.set(
-            -safeLengthM * 0.25 * sceneScale,
-            (floorBaseY + 1.48) * sceneScale,
-            safeWidthM * 0.15 * sceneScale
+          fpsObstacles = buildFloorCollisionObstacles(projectRef.current, activeFloorRef.current);
+          const spawn = computeInitialFpsSpawn(
+            projectRef.current,
+            activeFloorRef.current,
+            fpsObstacles
           );
+          const eyeY = (floorBaseY + FPS_EYE_HEIGHT_M) * sceneScale;
+          const spawnWx = (spawn.x - safeLengthM / 2) * sceneScale;
+          const spawnWz = (spawn.y - safeWidthM / 2) * sceneScale;
+          fpsYaw = spawn.yaw;
+          fpsPitch = 0; // Straight ahead level gaze, never downward or bird's-eye
+          _targetCamPos.set(spawnWx, eyeY, spawnWz);
           _targetLook.set(
-            safeLengthM * 0.2 * sceneScale,
-            (floorBaseY + 1.42) * sceneScale,
-            -safeWidthM * 0.15 * sceneScale
+            spawnWx - Math.sin(fpsYaw) * 2 * sceneScale,
+            eyeY,
+            spawnWz - Math.cos(fpsYaw) * 2 * sceneScale
           );
-          fpsYaw = -0.85;
-          fpsPitch = -0.04;
         } else {
+          exitFpsPointerLock();
           clearWalkKeys();
           createdControls.enabled = true;
           const distFactor = previewOnly
@@ -1011,13 +1135,12 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           createdControls.maxDistance = Math.max(42 * sceneScale, spanWorld * 3.5);
         }
 
-        if (immediate || useOrtho) {
+        if (immediate || useOrtho || mode === 'fps') {
           activeCamera.position.copy(_targetCamPos);
           createdControls.target.copy(_targetLook);
           if (mode === 'fps' && !previewOnly) {
             createdCamera.rotation.order = 'YXZ';
-            createdCamera.rotation.y = fpsYaw;
-            createdCamera.rotation.x = fpsPitch;
+            createdCamera.rotation.set(fpsPitch, fpsYaw, 0);
           } else {
             activeCamera.lookAt(_targetLook);
             createdControls.update();
@@ -1149,12 +1272,22 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
             }
           );
           built.root.scale.setScalar(sceneScale);
+          applyElectricalVisibilityToScene(built, electricalVisibilityRef.current);
+          fpsObstacles = buildFloorCollisionObstacles(projectRef.current, activeFloorRef.current);
           createdScene.add(built.root);
           engineRef.current.built = built;
+          syncProjectedPins(true);
           requestRender();
         } catch (rebuildErr) {
           failViewport('rebuildScene() / buildArchitecturalScene()', rebuildErr);
         }
+      };
+
+      const applyElectricalVisibility = (visibility: ElectricalVisibilityState) => {
+        if (disposed || contextLost) return;
+        applyElectricalVisibilityToScene(engineRef.current?.built, visibility);
+        syncProjectedPins(true);
+        requestRender();
       };
 
       createdControls.addEventListener('start', () => {
@@ -1223,9 +1356,12 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         }
         if (cameraModeRef.current === 'fps' && !previewOnly) {
           if (e.button === 0) {
-            isFpsDragging = true;
-            lastPointerX = e.clientX;
-            lastPointerY = e.clientY;
+            if (document.pointerLockElement !== createdRenderer.domElement) {
+              requestFpsPointerLock();
+              isFpsDragging = true;
+              lastPointerX = e.clientX;
+              lastPointerY = e.clientY;
+            }
           }
           return;
         }
@@ -1239,7 +1375,9 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         raycaster.setFromCamera(_rayMouse, activeCamera);
 
         const clickables = engineRef.current?.built?.clickables ?? [];
-        const hits = raycaster.intersectObjects(clickables, true);
+        const hits = raycaster
+          .intersectObjects(clickables, true)
+          .filter((h) => isObjectVisibleInScene(h.object));
         if (hits.length === 0) return;
 
         const hitObj = hits[0].object;
@@ -1361,13 +1499,22 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
           return;
         }
 
-        if (isFpsDragging && cameraModeRef.current === 'fps' && !previewOnly) {
+        if (
+          isFpsDragging &&
+          cameraModeRef.current === 'fps' &&
+          !previewOnly &&
+          document.pointerLockElement !== createdRenderer.domElement
+        ) {
           const dx = e.clientX - lastPointerX;
           const dy = e.clientY - lastPointerY;
           lastPointerX = e.clientX;
           lastPointerY = e.clientY;
           fpsYaw -= dx * 0.004;
-          fpsPitch = THREE.MathUtils.clamp(fpsPitch - dy * 0.003, -0.65, 0.55);
+          fpsPitch = THREE.MathUtils.clamp(
+            fpsPitch - dy * 0.003,
+            -Math.PI / 2 + 0.08,
+            Math.PI / 2 - 0.08
+          );
           requestRender();
         }
       };
@@ -1423,7 +1570,9 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         }
 
         const clickables = engineRef.current?.built?.clickables ?? [];
-        const hits = raycaster.intersectObjects(clickables, true);
+        const hits = raycaster
+          .intersectObjects(clickables, true)
+          .filter((h) => isObjectVisibleInScene(h.object));
         if (hits.length > 0) {
           const pid = hits[0].object.userData?.pointId as string | undefined;
           const fid = hits[0].object.userData?.furnitureId as string | undefined;
@@ -1470,7 +1619,7 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
       onKeyDown = (e: KeyboardEvent) => {
         if (cameraModeRef.current !== 'fps' || previewOnly) return;
         if (isEditableEventTarget(e.target)) return;
-        const dir = resolve3DWalkDirection(e);
+        const dir = resolve3DWalkDirection(e) ?? resolve3DWalkDirectionFromCode(e.code);
         if (dir) {
           e.preventDefault();
           walkKeys[dir] = true;
@@ -1482,6 +1631,43 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         const dir = resolve3DWalkDirectionFromCode(e.code);
         if (dir) {
           walkKeys[dir] = false;
+        }
+      };
+
+      onDocumentMouseMove = (e: MouseEvent) => {
+        if (cameraModeRef.current !== 'fps' || previewOnly) return;
+        if (document.pointerLockElement !== createdRenderer.domElement) return;
+        const dx = e.movementX || 0;
+        const dy = e.movementY || 0;
+        if (Math.abs(dx) > 300 || Math.abs(dy) > 300) return;
+        transitionActive = false;
+        const sensitivity = 0.0022;
+        fpsYaw -= dx * sensitivity;
+        fpsPitch = THREE.MathUtils.clamp(
+          fpsPitch - dy * sensitivity,
+          -Math.PI / 2 + 0.08,
+          Math.PI / 2 - 0.08
+        );
+        requestRender();
+      };
+
+      onPointerLockChange = () => {
+        const locked = document.pointerLockElement === createdRenderer.domElement;
+        setIsPointerLocked(locked);
+        if (locked) {
+          wasPointerLocked = true;
+          suppressNextUnlockExit = false;
+          isFpsDragging = false;
+          clearWalkKeys();
+          requestRender();
+        } else {
+          const shouldExit = wasPointerLocked && !suppressNextUnlockExit;
+          wasPointerLocked = false;
+          suppressNextUnlockExit = false;
+          clearWalkKeys();
+          if (shouldExit && cameraModeRef.current === 'fps') {
+            onExitFpsModeRef.current?.();
+          }
         }
       };
 
@@ -1546,6 +1732,8 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
       window.addEventListener('keydown', onKeyDown);
       window.addEventListener('keyup', onKeyUp);
       window.addEventListener('blur', onWindowBlur);
+      document.addEventListener('mousemove', onDocumentMouseMove);
+      document.addEventListener('pointerlockchange', onPointerLockChange);
       listenersAttached = true;
 
       // ResizeObserver with zero-size & redundant-resize guards
@@ -1606,9 +1794,13 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
         captureCurrentCameraView,
         focusOnTarget,
         rebuildScene,
+        applyElectricalVisibility,
+        requestFpsPointerLock,
+        exitFpsPointerLock,
         beginDragFromPin,
       };
       onCameraCaptureReadyRef.current?.(captureCurrentCameraView);
+      onRegisterFpsPointerLockRef.current?.(requestFpsPointerLock);
 
       // 6. Initial architectural scene construction
       currentStage = 'rebuildScene() / buildArchitecturalScene()';
@@ -1705,6 +1897,19 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
     if (!focusTarget) return;
     engineRef.current?.focusOnTarget(focusTarget);
   }, [focusTarget]);
+
+  // Apply group-based electrical visibility instantaneously without rebuilding the 3D scene
+  useEffect(() => {
+    engineRef.current?.applyElectricalVisibility(electricalVisibility);
+  }, [electricalVisibility]);
+
+  const handleToggleMasterVisibility = () => {
+    setElectricalVisibility((prev) => toggleMasterElectricalVisibility(prev));
+  };
+
+  const handleToggleGroupVisibility = (group: ElectricalVisibilityToggleGroup) => {
+    setElectricalVisibility((prev) => toggleElectricalVisibilityGroup(prev, group));
+  };
 
   return (
     <div className="relative w-full h-full flex-1 min-h-0 overflow-hidden bg-surface">
@@ -1843,6 +2048,175 @@ const Viewport3DInner: React.FC<Viewport3DProps> = ({
                 <span>{pin.code}</span>
               </button>
             ) : null
+          )}
+        </div>
+      )}
+
+      {/* Group-Based Electrical Visibility Control Panel (instant overlay toggles, zero scene reload) */}
+      {!previewOnly && !viewportFailure && !(cameraMode === 'fps' && isPointerLocked) && (
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
+          className="absolute top-3 left-3 z-20 select-none"
+        >
+          {visibilityPanelOpen ? (
+            <div className="w-[244px] bg-surface-container border border-outline rounded-md shadow-xl overflow-hidden">
+              <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-outline-variant bg-surface-container-high">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span
+                    className="material-symbols-outlined text-primary text-[16px] shrink-0"
+                    aria-hidden="true"
+                  >
+                    bolt
+                  </span>
+                  <span className="font-label text-label-sm uppercase tracking-wider text-on-surface truncate">
+                    Electrical Visibility
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setVisibilityPanelOpen(false)}
+                  aria-label="Collapse Electrical Visibility panel"
+                  title="Collapse"
+                  className="inline-flex items-center justify-center w-6 h-6 rounded-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-container cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                    expand_less
+                  </span>
+                </button>
+              </div>
+
+              <div className="p-2 flex flex-col gap-1">
+                {/* Master Toggle */}
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={electricalVisibility.all}
+                  onClick={handleToggleMasterVisibility}
+                  className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-surface-container-high border border-outline-variant hover:border-primary text-left cursor-pointer transition-colors"
+                >
+                  <span className="inline-flex items-center gap-2 min-w-0">
+                    <span
+                      className={`material-symbols-outlined text-[16px] shrink-0 ${
+                        electricalVisibility.all ? 'text-primary' : 'text-on-surface-variant'
+                      }`}
+                      aria-hidden="true"
+                    >
+                      visibility
+                    </span>
+                    <span className="font-label text-label-sm text-on-surface truncate">
+                      All Electrical Symbols
+                    </span>
+                  </span>
+                  <span
+                    className={`shrink-0 inline-flex items-center w-9 h-5 rounded-full p-0.5 transition-colors ${
+                      electricalVisibility.all ? 'bg-primary justify-end' : 'bg-outline justify-start'
+                    }`}
+                  >
+                    <span className="w-4 h-4 rounded-full bg-studio-white shadow-sm" />
+                  </span>
+                </button>
+
+                <div className="my-0.5 border-t border-outline-variant" />
+
+                {(
+                  [
+                    { key: 'fans', label: 'Fan Symbols', icon: 'mode_fan' },
+                    { key: 'acs', label: 'AC Symbols', icon: 'ac_unit' },
+                    { key: 'switchboards', label: 'Switchboard Symbols', icon: 'switches' },
+                    { key: 'panels', label: 'Panel Symbols', icon: 'crop_square' },
+                    { key: 'sockets', label: 'Socket Symbols', icon: 'power' },
+                    { key: 'geysers', label: 'Geyser Symbols', icon: 'water_heater' },
+                    { key: 'other', label: 'Other Electrical Symbols', icon: 'lightbulb' },
+                    { key: 'wiring', label: 'Electrical Wiring', icon: 'cable' },
+                  ] as const
+                ).map((item) => {
+                  const groupOn = electricalVisibility[item.key];
+                  const masterOn = electricalVisibility.all;
+                  const effectivelyVisible = masterOn && groupOn;
+                  return (
+                    <button
+                      key={item.key}
+                      type="button"
+                      role="switch"
+                      aria-checked={groupOn}
+                      title={
+                        masterOn
+                          ? `Toggle ${item.label} overlay`
+                          : `Preserved state (${groupOn ? 'ON' : 'OFF'}) — Master toggle is OFF`
+                      }
+                      onClick={() => handleToggleGroupVisibility(item.key)}
+                      className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm hover:bg-surface-container-high text-left cursor-pointer transition-colors ${
+                        masterOn ? '' : 'opacity-55'
+                      }`}
+                    >
+                      <span className="inline-flex items-center gap-2 min-w-0">
+                        <span
+                          className={`material-symbols-outlined text-[16px] shrink-0 ${
+                            effectivelyVisible ? 'text-primary' : 'text-on-surface-variant'
+                          }`}
+                          aria-hidden="true"
+                        >
+                          {item.icon}
+                        </span>
+                        <span
+                          className={`font-body text-body-sm truncate ${
+                            effectivelyVisible ? 'text-on-surface' : 'text-on-surface-variant'
+                          }`}
+                        >
+                          {item.label}
+                        </span>
+                      </span>
+                      <span
+                        className={`shrink-0 inline-flex items-center w-8 h-4 rounded-full p-0.5 transition-colors ${
+                          groupOn
+                            ? masterOn
+                              ? 'bg-primary justify-end'
+                              : 'bg-primary/50 justify-end'
+                            : 'bg-outline justify-start'
+                        }`}
+                      >
+                        <span className="w-3 h-3 rounded-full bg-studio-white shadow-sm" />
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setVisibilityPanelOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-surface-container border border-outline text-on-surface hover:border-primary font-label text-label-sm uppercase tracking-wider shadow-lg cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-primary text-[16px]" aria-hidden="true">
+                bolt
+              </span>
+              <span>Electrical Visibility</span>
+              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                expand_more
+              </span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Compact First-Person Navigation HUD strip */}
+      {!previewOnly && !viewportFailure && cameraMode === 'fps' && (
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded-md bg-surface-container border border-primary text-on-surface font-mono text-[11px] shadow-xl flex items-center gap-2 whitespace-nowrap select-none"
+        >
+          <span className="material-symbols-outlined text-primary text-[15px]" aria-hidden="true">
+            directions_walk
+          </span>
+          {isPointerLocked ? (
+            <span>First-Person Active · Mouse Look · WASD Move · ESC Exit</span>
+          ) : (
+            <span>
+              First-Person Mode · Click viewport to lock mouse · WASD Move · ESC Exit
+            </span>
           )}
         </div>
       )}

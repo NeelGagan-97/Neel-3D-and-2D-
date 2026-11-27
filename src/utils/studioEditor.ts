@@ -1145,7 +1145,7 @@ export function resolve3DWalkCommand(
  * Accepts both uppercase and lowercase W/A/S/D (plus Arrow keys) without Ctrl/Meta/Alt modifiers.
  */
 export function resolve3DWalkDirection(
-  event: Pick<ShortcutKeyLike, 'key' | 'ctrlKey' | 'metaKey' | 'altKey'>
+  event: Pick<ShortcutKeyLike, 'key' | 'ctrlKey' | 'metaKey' | 'altKey'> & { code?: string }
 ): WalkDirection | null {
   if (event.ctrlKey || event.metaKey || event.altKey) {
     return null;

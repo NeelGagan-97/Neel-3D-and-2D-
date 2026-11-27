@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { siteToMeters } from '../data/presets';
 import {
+  ElectricalItemType,
   ElectricalPoint,
   FloorLevelConfig,
   FloorView3DMode,
@@ -22,6 +23,127 @@ import { extractMergedWalls, getItemFloor, sliceProjectForFloor } from '../utils
 export const STORY_SLAB_THICKNESS = DEFAULT_SLAB_THICKNESS_M;
 export const EXPLODED_FLOOR_GAP_M = 2.6;
 
+export interface ElectricalVisibilityState {
+  all: boolean;
+  fans: boolean;
+  acs: boolean;
+  switchboards: boolean;
+  panels: boolean;
+  sockets: boolean;
+  geysers: boolean;
+  other: boolean;
+  wiring: boolean;
+}
+
+export type ElectricalSymbolGroupKey =
+  | 'fans'
+  | 'acs'
+  | 'switchboards'
+  | 'panels'
+  | 'sockets'
+  | 'geysers'
+  | 'other';
+
+export type ElectricalVisibilityToggleGroup = ElectricalSymbolGroupKey | 'wiring';
+
+export const DEFAULT_ELECTRICAL_VISIBILITY: ElectricalVisibilityState = {
+  all: true,
+  fans: true,
+  acs: true,
+  switchboards: true,
+  panels: true,
+  sockets: true,
+  geysers: true,
+  other: true,
+  wiring: true,
+};
+
+/**
+ * Dedicated Three.js overlay layer strictly for electrical annotations, symbol highlight overlays,
+ * and wiring visualization lines. Physical 3D products (fans, ACs, switchboards, sockets, panels,
+ * geysers, lights, DBs, and building geometry) are NEVER placed inside these groups.
+ */
+export interface ElectricalAnnotationHandles {
+  root: THREE.Group;
+  symbols: Record<ElectricalSymbolGroupKey, THREE.Group>;
+  wiring: THREE.Group;
+}
+
+export function classifyElectricalSymbolGroup(
+  itemType: ElectricalItemType
+): ElectricalSymbolGroupKey {
+  if (itemType === 'ceiling_fan' || itemType === 'exhaust_fan') return 'fans';
+  if (itemType === 'split_ac') return 'acs';
+  if (itemType === 'switchboard' || itemType === 'switch') return 'switchboards';
+  if (itemType === 'panel_light' || itemType === 'distribution_board') return 'panels';
+  if (itemType === 'socket_5a' || itemType === 'socket_16a' || itemType === 'usb_outlet') {
+    return 'sockets';
+  }
+  if (itemType === 'geyser') return 'geysers';
+  return 'other';
+}
+
+export function isElectricalPointVisible(
+  itemType: ElectricalItemType,
+  visibility: ElectricalVisibilityState
+): boolean {
+  if (!visibility.all) return false;
+  const group = classifyElectricalSymbolGroup(itemType);
+  return visibility[group];
+}
+
+/**
+ * Master toggle hides/shows all electrical symbols, floating labels, and wiring overlays
+ * while strictly preserving every individual group's ON/OFF state.
+ */
+export function toggleMasterElectricalVisibility(
+  prev: ElectricalVisibilityState,
+  enabled?: boolean
+): ElectricalVisibilityState {
+  const nextAll = enabled ?? !prev.all;
+  return {
+    ...prev,
+    all: nextAll,
+  };
+}
+
+/**
+ * Toggles a single electrical symbol/wiring overlay group without affecting physical 3D products
+ * or other groups' visibility states.
+ */
+export function toggleElectricalVisibilityGroup(
+  prev: ElectricalVisibilityState,
+  group: ElectricalVisibilityToggleGroup,
+  enabled?: boolean
+): ElectricalVisibilityState {
+  const nextValue = enabled ?? !prev[group];
+  return {
+    ...prev,
+    [group]: nextValue,
+  };
+}
+
+/**
+ * Applies group-based electrical visibility instantaneously to the dedicated electrical annotation
+ * and wiring overlay groups ONLY — never modifying physical 3D appliance or building meshes.
+ */
+export function applyElectricalVisibilityToScene(
+  built: BuiltSceneHandles | null | undefined,
+  visibility: ElectricalVisibilityState
+): void {
+  if (!built?.electricalAnnotations) return;
+  const { root, symbols, wiring } = built.electricalAnnotations;
+  root.visible = visibility.all;
+  symbols.fans.visible = visibility.fans;
+  symbols.acs.visible = visibility.acs;
+  symbols.switchboards.visible = visibility.switchboards;
+  symbols.panels.visible = visibility.panels;
+  symbols.sockets.visible = visibility.sockets;
+  symbols.geysers.visible = visibility.geysers;
+  symbols.other.visible = visibility.other;
+  wiring.visible = visibility.wiring;
+}
+
 export interface SceneResourceStats {
   trackedGeometries: number;
   trackedMaterials: number;
@@ -35,6 +157,10 @@ export interface BuiltSceneHandles {
   clickables: THREE.Object3D[];
   fanRotors: THREE.Object3D[];
   pointAnchors: Map<string, THREE.Vector3>;
+  /** Physical 3D electrical product meshes (always visible regardless of annotation toggles) */
+  physicalProducts: THREE.Object3D[];
+  /** Dedicated electrical annotation & wiring overlay groups (controlled by visibility toggles) */
+  electricalAnnotations: ElectricalAnnotationHandles;
   dispose: () => void;
   resourceStats: SceneResourceStats;
 }
@@ -510,22 +636,6 @@ function buildElectricalFixture(
     group.add(box, accent);
   }
 
-  // Selection highlight ring + vertical pointer stem
-  if (isSelected) {
-    const ring = new THREE.Mesh(
-      trackGeo(new THREE.RingGeometry(0.26, 0.34, 24)),
-      trackMat(
-        new THREE.MeshBasicMaterial({
-          color: 0x00a8ff,
-          side: THREE.DoubleSide,
-        })
-      )
-    );
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = -0.06;
-    group.add(ring);
-  }
-
   // Invisible generous raycast proxy box so clicking small switches/sockets is effortless
   const hitBox = new THREE.Mesh(
     trackGeo(new THREE.BoxGeometry(0.65, 0.55, 0.65)),
@@ -797,6 +907,32 @@ export function buildArchitecturalScene(
   const clickables: THREE.Object3D[] = [];
   const fanRotors: THREE.Object3D[] = [];
   const pointAnchors = new Map<string, THREE.Vector3>();
+  const physicalProducts: THREE.Object3D[] = [];
+
+  // Dedicated electrical annotation & wiring overlay layer (completely separate from physical 3D products)
+  const annotationsRoot = new THREE.Group();
+  annotationsRoot.name = 'electrical-annotations-root';
+  const makeOverlayGroup = (name: string) => {
+    const g = new THREE.Group();
+    g.name = name;
+    annotationsRoot.add(g);
+    return g;
+  };
+  const electricalAnnotations: ElectricalAnnotationHandles = {
+    root: annotationsRoot,
+    symbols: {
+      fans: makeOverlayGroup('electrical-symbols-fans'),
+      acs: makeOverlayGroup('electrical-symbols-acs'),
+      switchboards: makeOverlayGroup('electrical-symbols-switchboards'),
+      panels: makeOverlayGroup('electrical-symbols-panels'),
+      sockets: makeOverlayGroup('electrical-symbols-sockets'),
+      geysers: makeOverlayGroup('electrical-symbols-geysers'),
+      other: makeOverlayGroup('electrical-symbols-other'),
+    },
+    wiring: makeOverlayGroup('electrical-wiring-overlay'),
+  };
+  root.add(annotationsRoot);
+
   const tracker = createSceneResourceTracker();
   const { trackGeo, trackMat } = tracker;
 
@@ -1039,27 +1175,56 @@ export function buildArchitecturalScene(
         });
       }
 
-      // 2. Room Floor Finishes
+      // 2. Room Floor Finishes (exact polygon ExtrudeGeometry for irregular/angled CAD rooms; BoxGeometry for rectangular rooms)
       if (floorSlice.rooms.length > 0) {
         floorSlice.rooms.forEach((room) => {
           const mat = floorMaterials[room.floorFinish] ?? floorMaterials.wood;
-          const floorMesh = new THREE.Mesh(
-            trackGeo(
-              new THREE.BoxGeometry(
-                Math.max(0.1, room.width - 0.04),
-                0.03,
-                Math.max(0.1, room.height - 0.04)
-              )
-            ),
-            mat
-          );
-          floorMesh.position.set(
-            toWorldX(room.x + room.width / 2),
-            0.015,
-            toWorldZ(room.y + room.height / 2)
-          );
-          floorMesh.receiveShadow = true;
-          floorGroup.add(floorMesh);
+          const poly = room.polygon;
+          if (Array.isArray(poly) && poly.length >= 3) {
+            const shape = new THREE.Shape();
+            // Shape lives in XY plane; after rotateX(-PI/2), shape (x, y) maps to world (x, 0, -y),
+            // so pass (toWorldX(pt.x), -toWorldZ(pt.y)) to align exactly with 2D CAD floor plan coordinates.
+            shape.moveTo(toWorldX(poly[0].x), -toWorldZ(poly[0].y));
+            for (let i = 1; i < poly.length; i++) {
+              shape.lineTo(toWorldX(poly[i].x), -toWorldZ(poly[i].y));
+            }
+            shape.closePath();
+            const extrudeGeo = new THREE.ExtrudeGeometry(shape, {
+              depth: 0.03,
+              bevelEnabled: false,
+            });
+            // Normalize planar UV scaling so tile/wood/terrazzo textures tile naturally in meters
+            const uvAttr = extrudeGeo.attributes.uv;
+            if (uvAttr) {
+              for (let i = 0; i < uvAttr.count; i++) {
+                uvAttr.setXY(i, uvAttr.getX(i) * 0.45, uvAttr.getY(i) * 0.45);
+              }
+              uvAttr.needsUpdate = true;
+            }
+            extrudeGeo.rotateX(-Math.PI / 2);
+            const floorMesh = new THREE.Mesh(trackGeo(extrudeGeo), mat);
+            floorMesh.position.y = 0.002;
+            floorMesh.receiveShadow = true;
+            floorGroup.add(floorMesh);
+          } else {
+            const floorMesh = new THREE.Mesh(
+              trackGeo(
+                new THREE.BoxGeometry(
+                  Math.max(0.1, room.width - 0.04),
+                  0.03,
+                  Math.max(0.1, room.height - 0.04)
+                )
+              ),
+              mat
+            );
+            floorMesh.position.set(
+              toWorldX(room.x + room.width / 2),
+              0.015,
+              toWorldZ(room.y + room.height / 2)
+            );
+            floorMesh.receiveShadow = true;
+            floorGroup.add(floorMesh);
+          }
         });
       } else if (floorNum !== 1 || fc.kind === 'terrace') {
         const deckMesh = new THREE.Mesh(
@@ -1075,6 +1240,35 @@ export function buildArchitecturalScene(
         deckMesh.position.set(0, 0.01, 0);
         deckMesh.receiveShadow = true;
         floorGroup.add(deckMesh);
+      }
+
+      // 2b. Imported Structural Columns from CAD/PDF Reconstruction (on this floor)
+      const importedCols = (project.aiDrawingImport?.columns ?? []).filter(
+        (col) => (col.floor ?? 1) === floorNum
+      );
+      if (importedCols.length > 0) {
+        const colH = hasFloorAbove ? clearH : wallH;
+        importedCols.forEach((col) => {
+          const cw = Math.max(0.18, Math.min(2.5, col.width || 0.3));
+          const cd = Math.max(0.18, Math.min(2.5, col.height || 0.3));
+          const colMesh = new THREE.Mesh(
+            trackGeo(new THREE.BoxGeometry(cw, colH, cd)),
+            columnMat
+          );
+          colMesh.position.set(toWorldX(col.x), colH / 2, toWorldZ(col.y));
+          colMesh.castShadow = true;
+          colMesh.receiveShadow = true;
+          colMesh.userData.columnId = col.id;
+          floorGroup.add(colMesh);
+
+          const plinth = new THREE.Mesh(
+            trackGeo(new THREE.BoxGeometry(cw + 0.06, 0.08, cd + 0.06)),
+            wallTopCapMat
+          );
+          plinth.position.set(toWorldX(col.x), 0.04, toWorldZ(col.y));
+          plinth.receiveShadow = true;
+          floorGroup.add(plinth);
+        });
       }
 
       // 3. Structural Exterior Walls & Interior Partition Walls
@@ -1112,7 +1306,8 @@ export function buildArchitecturalScene(
         const dx = seg.x2 - seg.x1;
         const dy = seg.y2 - seg.y1;
         const len = Math.hypot(dx, dy);
-        if (len < 0.08) return;
+        // Preserve short curved-wall chords & chamfer segments down to 4 cm
+        if (len < 0.04) return;
 
         const cx = toWorldX((seg.x1 + seg.x2) / 2);
         const cz = toWorldZ((seg.y1 + seg.y2) / 2);
@@ -1130,7 +1325,13 @@ export function buildArchitecturalScene(
           return;
         }
 
-        const extraLen = seg.id === 'ext-n' ? seg.thickness : 0;
+        const isAngledOrCurved = Math.abs(dx) > 0.01 && Math.abs(dy) > 0.01;
+        const extraLen =
+          seg.id === 'ext-n'
+            ? seg.thickness
+            : isAngledOrCurved
+              ? seg.thickness * 0.24
+              : seg.thickness * 0.08;
         addWallSegment(cx, cz, len + extraLen, seg.thickness, angle, seg.isExterior);
       });
 
@@ -1240,7 +1441,34 @@ export function buildArchitecturalScene(
         fx.position.set(wx, localY, wz);
         fx.rotation.y = -(pt.rotation * Math.PI) / 180;
 
+        // Physical 3D electrical product stays permanently under floorGroup (never hidden by symbol toggles)
+        floorGroup.add(fx);
+        physicalProducts.push(fx);
+        clickables.push(fx);
+
+        // Electrical selection/highlight annotation overlays live strictly in the separate annotation layer
         if (isSelected || isActiveFind || isFindMatch) {
+          const symGroup = electricalAnnotations.symbols[classifyElectricalSymbolGroup(pt.itemType)];
+          const overlayWrap = new THREE.Group();
+          overlayWrap.position.set(wx, baseY + localY, wz);
+          overlayWrap.rotation.y = -(pt.rotation * Math.PI) / 180;
+
+          if (isSelected || isActiveFind) {
+            const ring = new THREE.Mesh(
+              trackGeo(new THREE.RingGeometry(0.26, 0.34, 24)),
+              trackMat(
+                new THREE.MeshBasicMaterial({
+                  color: 0x00a8ff,
+                  side: THREE.DoubleSide,
+                })
+              )
+            );
+            ring.rotation.x = -Math.PI / 2;
+            ring.position.y = -0.06;
+            ring.userData.pointId = pt.id;
+            overlayWrap.add(ring);
+          }
+
           const haloColor = isActiveFind ? 0xff9d00 : isSelected ? 0x00a8ff : 0xfbbf24;
           const halo = new THREE.Mesh(
             trackGeo(new THREE.RingGeometry(0.34, 0.44, 28)),
@@ -1256,11 +1484,10 @@ export function buildArchitecturalScene(
           halo.rotation.x = -Math.PI / 2;
           halo.position.y = 0.02;
           halo.userData.pointId = pt.id;
-          fx.add(halo);
+          overlayWrap.add(halo);
+          symGroup.add(overlayWrap);
         }
 
-        floorGroup.add(fx);
-        clickables.push(fx);
         pointAnchors.set(pt.id, new THREE.Vector3(wx, baseY + Math.max(0.45, localY + 0.22), wz));
       });
     });
@@ -1354,12 +1581,21 @@ export function buildArchitecturalScene(
           wireGroup.add(tube);
         }
         wireGroup.userData.wireId = wire.id;
-        root.add(wireGroup);
+        electricalAnnotations.wiring.add(wireGroup);
         clickables.push(wireGroup);
       });
     }
 
-    return { root, clickables, fanRotors, pointAnchors, dispose, resourceStats: tracker.stats };
+    return {
+      root,
+      clickables,
+      fanRotors,
+      pointAnchors,
+      physicalProducts,
+      electricalAnnotations,
+      dispose,
+      resourceStats: tracker.stats,
+    };
   } catch (err) {
     // Guarantee zero leaked geometries/materials if scene construction fails partway
     dispose();

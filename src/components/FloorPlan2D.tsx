@@ -19,13 +19,23 @@ import {
 } from '../types/design';
 import {
   checkTerminalCompatibility,
+  computeDetailedWireQuantityReport,
   computeStaircaseFootprint,
-  computeWireLengthMeters,
+  computeWireLengthBreakdown,
+  CONDUCTOR_COLOR_LEGEND,
+  DEFAULT_INSTALLATION_ALLOWANCE_PCT,
   getFloorBoundaryMeters,
   getFloorLabel,
   getWiringConfig,
   WIRE_STANDARD_COLORS,
 } from '../utils/buildingWiring';
+import {
+  CANVAS_ASPECT_LABEL,
+  computeCalibrated2DCanvasMetrics,
+  CONDUCTOR_VISUAL_LANE_OFFSET_PX,
+  offsetPolylinePerpendicular,
+  screenToCalibratedMeters,
+} from '../utils/canvasScale2D';
 import {
   extractMergedWalls,
   findNearestWallAttachment,
@@ -94,8 +104,11 @@ interface FloorPlan2DProps {
     waypoints: WireWaypoint[],
     recordHistory?: boolean
   ) => void;
+  onAutoRouteWires?: () => void;
   onRecordHistorySnapshot?: () => void;
   onValidationWarning?: (message: string) => void;
+  onApprove2DFor3D?: () => void;
+  onExportDxf?: () => void;
 }
 
 const CIRCUIT_COLORS: Record<CircuitId, string> = {
@@ -187,8 +200,11 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   onMoveStaircase,
   onCreateWire,
   onUpdateWireWaypoints,
+  onAutoRouteWires,
   onRecordHistorySnapshot,
   onValidationWarning,
+  onApprove2DFor3D,
+  onExportDxf,
 }) => {
   const project = useMemo(
     () => sliceProjectForFloor(fullProject, activeFloor),
@@ -222,7 +238,85 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     [fullProject, activeFloor]
   );
 
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number } | null>(null);
+  const [wirePanelOpen, setWirePanelOpen] = useState(false);
+  const [wireScopeAllFloors, setWireScopeAllFloors] = useState(false);
+  const [allowancePct, setAllowancePct] = useState<number>(DEFAULT_INSTALLATION_ALLOWANCE_PCT);
+
+  // Aligned Reference PDF vs Reconstructed CAD comparison state (for AI/PDF imported plans)
+  const referenceOverlay = fullProject.aiDrawingImport?.referenceOverlay;
+  const [showReferencePdf, setShowReferencePdf] = useState<boolean>(
+    () => referenceOverlay?.visible ?? true
+  );
+  const [referencePdfOpacity, setReferencePdfOpacity] = useState<number>(
+    () => referenceOverlay?.opacity ?? 0.45
+  );
+  const [showReconstructedCad, setShowReconstructedCad] = useState<boolean>(true);
+  const [cadLayersOpen, setCadLayersOpen] = useState<boolean>(false);
+  const [cadLayers, setCadLayers] = useState<{
+    walls: boolean;
+    rooms: boolean;
+    openings: boolean;
+    columns: boolean;
+    symbols: boolean;
+    dimensions: boolean;
+    labels: boolean;
+  }>(() => {
+    const getLayerVis = (id: string) =>
+      fullProject.aiDrawingImport?.layers?.find((l) => l.id === id)?.visible ?? true;
+    return {
+      walls: getLayerVis('walls'),
+      rooms: getLayerVis('rooms'),
+      openings: getLayerVis('openings'),
+      columns: getLayerVis('columns'),
+      symbols: getLayerVis('symbols'),
+      dimensions: getLayerVis('dimensions'),
+      labels: getLayerVis('labels'),
+    };
+  });
+
+  useEffect(() => {
+    if (referenceOverlay) {
+      setShowReferencePdf(referenceOverlay.visible);
+      setReferencePdfOpacity(referenceOverlay.opacity);
+      setShowReconstructedCad(true);
+    }
+    const getLayerVis = (id: string) =>
+      fullProject.aiDrawingImport?.layers?.find((l) => l.id === id)?.visible ?? true;
+    setCadLayers({
+      walls: getLayerVis('walls'),
+      rooms: getLayerVis('rooms'),
+      openings: getLayerVis('openings'),
+      columns: getLayerVis('columns'),
+      symbols: getLayerVis('symbols'),
+      dimensions: getLayerVis('dimensions'),
+      labels: getLayerVis('labels'),
+    });
+  }, [fullProject.id, referenceOverlay?.dataUrl]);
+
+  useEffect(() => {
+    if (previewOnly) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setViewportSize((prev) =>
+          prev && Math.abs(prev.width - rect.width) < 1 && Math.abs(prev.height - rect.height) < 1
+            ? prev
+            : { width: rect.width, height: rect.height }
+        );
+      }
+    };
+    updateSize();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [previewOnly]);
+
   const [draggingPoint, setDraggingPoint] = useState<{
     id: string;
     startX: number;
@@ -319,25 +413,61 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
   const mergedWalls = useMemo(() => extractMergedWalls(project), [project]);
   const units = project.site.units;
 
-  // Dynamic scale so very large plots (e.g., 100ft) and compact plots (20ft) both look crisp
-  const maxDim = Math.max(lengthM, widthM, 4);
-  const SCALE = Math.max(18, Math.min(52, 540 / maxDim));
-  const PAD = previewOnly ? 22 : 64;
-  const planW = lengthM * SCALE;
-  const planH = widthM * SCALE;
-  const vbW = planW + PAD * 2;
-  const vbH = planH + PAD * 2;
+  // Calibrated 1:4 (width:height) CAD sheet with viewport-matched isotropic scaling (scaleX === scaleY)
+  const canvasMetrics = useMemo(
+    () =>
+      computeCalibrated2DCanvasMetrics(lengthM, widthM, {
+        previewOnly,
+        viewport: viewportSize,
+      }),
+    [lengthM, widthM, previewOnly, viewportSize]
+  );
+  const SCALE = canvasMetrics.scalePxPerMeter;
+  const PAD = canvasMetrics.pad;
+  const planW = canvasMetrics.planW;
+  const planH = canvasMetrics.planH;
+  const sheetW = canvasMetrics.sheetW;
+  const sheetH = canvasMetrics.sheetH;
+  const originX = canvasMetrics.originX;
+  const originY = canvasMetrics.originY;
+  const planCenterX = canvasMetrics.planCenterX;
+  const planCenterY = canvasMetrics.planCenterY;
+  const viewX = canvasMetrics.viewX;
+  const viewY = canvasMetrics.viewY;
+  const vbW = canvasMetrics.vbW;
+  const vbH = canvasMetrics.vbH;
+
+  // Live auto-recalculating real-world wire quantity report (L / N / E separately in m & ft)
+  const activeWireReport = useMemo(
+    () =>
+      computeDetailedWireQuantityReport(fullProject, {
+        floor: wireScopeAllFloors ? undefined : activeFloor,
+        installationAllowancePct: allowancePct,
+      }),
+    [fullProject, activeFloor, wireScopeAllFloors, allowancePct]
+  );
+
+  // Count sibling conductors sharing each undirected corridor for parallel visual separation
+  const corridorConductorCount = useMemo(() => {
+    const counts = new Map<string, number>();
+    visibleWires.forEach((w) => {
+      const key =
+        w.fromPointId < w.toPointId
+          ? `${w.fromPointId}::${w.toPointId}`
+          : `${w.toPointId}::${w.fromPointId}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+    return counts;
+  }, [visibleWires]);
 
   // Auto-center viewport pan when Find Component navigates to a component in 2D
   useEffect(() => {
     if (previewOnly || !focusTarget || !onPanChange) return;
     const zoomFactor = zoom / 100;
-    const targetSvgX = PAD + focusTarget.x * SCALE;
-    const targetSvgY = PAD + focusTarget.y * SCALE;
-    const cx = vbW / 2;
-    const cy = vbH / 2;
-    const nextPanX = Math.round((cx - targetSvgX) * zoomFactor);
-    const nextPanY = Math.round((cy - targetSvgY) * zoomFactor);
+    const targetSheetX = originX + focusTarget.x * SCALE;
+    const targetSheetY = originY + focusTarget.y * SCALE;
+    const nextPanX = Math.round((planCenterX - targetSheetX) * zoomFactor);
+    const nextPanY = Math.round((planCenterY - targetSheetY) * zoomFactor);
     onPanChange({ x: nextPanX, y: nextPanY });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusTarget?.nonce]);
@@ -366,30 +496,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     const svg = svgRef.current;
     if (!svg) return { x: 0, y: 0, inside: false };
     const rect = svg.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0, inside: false };
-
-    // Account for preserveAspectRatio="xMidYMid meet"
-    const scaleX = rect.width / vbW;
-    const scaleY = rect.height / vbH;
-    const fitScale = Math.min(scaleX, scaleY);
-    const renderedW = vbW * fitScale;
-    const renderedH = vbH * fitScale;
-    const offsetX = rect.left + (rect.width - renderedW) / 2;
-    const offsetY = rect.top + (rect.height - renderedH) / 2;
-
-    const svgX = (clientX - offsetX) / fitScale;
-    const svgY = (clientY - offsetY) / fitScale;
-
-    const zoomFactor = zoom / 100;
-    const cx = vbW / 2;
-    const cy = vbH / 2;
-    const unscaledX = (svgX - cx - panOffset.x) / zoomFactor + cx;
-    const unscaledY = (svgY - cy - panOffset.y) / zoomFactor + cy;
-
-    const mx = (unscaledX - PAD) / SCALE;
-    const my = (unscaledY - PAD) / SCALE;
-    const inside = mx >= 0 && mx <= lengthM && my >= 0 && my <= widthM;
-    return { x: mx, y: my, inside };
+    return screenToCalibratedMeters(clientX, clientY, rect, canvasMetrics, zoom, panOffset);
   };
 
   // Group electrical points by circuit for dashed schematic overlay
@@ -425,7 +532,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
     if (previewOnly || !onZoomChange) return;
     e.preventDefault();
     const delta = e.deltaY > 0 ? -10 : 10;
-    onZoomChange(Math.max(40, Math.min(250, zoom + delta)));
+    onZoomChange(Math.max(15, Math.min(300, zoom + delta)));
   };
 
   const handleSvgPointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -1095,14 +1202,17 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
 
   return (
     <div
-      className={`w-full h-full flex-1 min-h-0 flex items-center justify-center bg-surface select-none overflow-hidden ${
+      ref={containerRef}
+      data-canvas-aspect={previewOnly ? 'compact' : CANVAS_ASPECT_LABEL}
+      className={`relative w-full h-full flex-1 min-h-0 flex items-center justify-center bg-surface select-none overflow-hidden ${
         previewOnly ? 'p-1.5' : 'p-gutter-sm'
       }`}
     >
       <svg
         ref={svgRef}
         tabIndex={previewOnly ? undefined : 0}
-        viewBox={`0 0 ${vbW} ${vbH}`}
+        viewBox={`${viewX} ${viewY} ${vbW} ${vbH}`}
+        preserveAspectRatio="xMidYMid meet"
         className={`w-full h-full max-h-full overflow-visible touch-none outline-none ${cursorClass}`}
         onWheel={handleWheel}
         onPointerDown={handleSvgPointerDown}
@@ -1145,11 +1255,63 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
               strokeWidth="1.05"
             />
           </pattern>
+          <pattern
+            id={`sheet-grid-${project.id}`}
+            width={majorStepPx}
+            height={majorStepPx}
+            patternUnits="userSpaceOnUse"
+            x={originX}
+            y={originY}
+          >
+            <path
+              d={`M ${majorStepPx} 0 L 0 0 0 ${majorStepPx}`}
+              fill="none"
+              stroke="#132038"
+              strokeWidth="0.7"
+            />
+          </pattern>
         </defs>
 
         <g
-          transform={`translate(${vbW / 2 + panOffset.x} ${vbH / 2 + panOffset.y}) scale(${zoom / 100}) translate(${-vbW / 2} ${-vbH / 2})`}
+          transform={`translate(${planCenterX + panOffset.x} ${planCenterY + panOffset.y}) scale(${zoom / 100}) translate(${-planCenterX} ${-planCenterY})`}
         >
+          {/* Calibrated 1:4 (width:height) CAD Drawing Sheet */}
+          {!previewOnly && (
+            <g pointerEvents="none" data-cad-sheet="1:4">
+              <rect
+                x={0}
+                y={0}
+                width={sheetW}
+                height={sheetH}
+                fill={showGrid ? `url(#sheet-grid-${project.id})` : '#070E1D'}
+                stroke="#1E3558"
+                strokeWidth="1.5"
+              />
+              <rect
+                x={8}
+                y={8}
+                width={sheetW - 16}
+                height={sheetH - 16}
+                fill="none"
+                stroke="#162844"
+                strokeWidth="0.8"
+                strokeDasharray="6,6"
+              />
+              <text
+                x={18}
+                y={26}
+                fill="#4E6B94"
+                fontFamily="Red Hat Mono, monospace"
+                fontSize="10"
+                fontWeight="600"
+              >
+                {`1:4 CALIBRATED CAD SHEET · ${siteLenLabel} × ${siteWidLabel} · 1m = ${SCALE.toFixed(1)}u`}
+              </text>
+            </g>
+          )}
+
+          {/* Building Floor Plan Layer positioned at calibrated (originX, originY) inside the 1:4 sheet */}
+          <g transform={`translate(${originX - PAD} ${originY - PAD})`}>
           {/* Site Interior Floor Slab */}
           <rect
             x={PAD}
@@ -1158,6 +1320,30 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             height={planH}
             fill={showGrid ? `url(#major-grid-${project.id})` : '#0B1325'}
           />
+
+          {/* Aligned Reference PDF / Source Drawing Underlay (Locked Reference Layer) */}
+          {!previewOnly &&
+            referenceOverlay?.dataUrl &&
+            showReferencePdf && (
+              <image
+                href={referenceOverlay.dataUrl}
+                x={PAD}
+                y={PAD}
+                width={(fullProject.aiDrawingImport?.drawingWidthMeters ?? lengthM) * SCALE}
+                height={(fullProject.aiDrawingImport?.drawingHeightMeters ?? widthM) * SCALE}
+                opacity={referencePdfOpacity}
+                preserveAspectRatio="xMinYMin meet"
+                pointerEvents="none"
+                data-reference-pdf-overlay="true"
+              />
+            )}
+
+          {/* Reconstructed Editable 2D CAD Layer (toggleable for instant PDF-vs-CAD alignment comparison) */}
+          <g
+            opacity={showReconstructedCad ? 1 : 0}
+            pointerEvents={showReconstructedCad ? 'auto' : 'none'}
+            data-reconstructed-cad-layer="true"
+          >
 
           {/* Faint ghost underlay of the floor directly below so upper floors align cleanly */}
           {!previewOnly && activeFloor > 1 && underlayRooms.length > 0 && (
@@ -1195,8 +1381,8 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             </g>
           )}
 
-          {/* Blank Site Guidance Prompt when no rooms exist yet on this floor */}
-          {!previewOnly && project.rooms.length === 0 && (
+          {/* Blank Site Guidance Prompt when no rooms or walls exist yet on this floor */}
+          {!previewOnly && project.rooms.length === 0 && project.customWalls.length === 0 && (
             <g pointerEvents="none">
               <text
                 x={PAD + planW / 2}
@@ -1299,7 +1485,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
           )}
 
           {/* Room Zones */}
-          {project.rooms.map((room) => {
+          {cadLayers.rooms && project.rooms.map((room) => {
             const isBeingDragged = roomDrag?.roomId === room.id;
             const gdx = groupDrag ? groupDrag.dx : 0;
             const gdy = groupDrag ? groupDrag.dy : 0;
@@ -1342,34 +1528,68 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                             : ''
                 }
               >
-                <rect
-                  x={rx}
-                  y={ry}
-                  width={rw}
-                  height={rh}
-                  fill={
-                    isInvalidDraft
-                      ? 'rgba(255, 157, 0, 0.18)'
-                      : isActiveFind
-                        ? 'rgba(255, 157, 0, 0.22)'
+                {Array.isArray(room.polygon) && room.polygon.length >= 3 ? (
+                  <polygon
+                    points={room.polygon
+                      .map((pt) => {
+                        const dxOff = isBeingDragged ? roomDrag.draftX - room.x : gdx;
+                        const dyOff = isBeingDragged ? roomDrag.draftY - room.y : gdy;
+                        return `${PAD + (pt.x + dxOff) * SCALE},${PAD + (pt.y + dyOff) * SCALE}`;
+                      })
+                      .join(' ')}
+                    fill={
+                      isInvalidDraft
+                        ? 'rgba(255, 157, 0, 0.18)'
+                        : isActiveFind
+                          ? 'rgba(255, 157, 0, 0.22)'
+                          : isSelected
+                            ? 'rgba(0, 168, 255, 0.16)'
+                            : isFindMatch
+                              ? 'rgba(251, 191, 36, 0.12)'
+                              : ROOM_FILLS[room.floorFinish] ?? 'rgba(0,168,255,0.06)'
+                    }
+                    stroke={
+                      isInvalidDraft || isActiveFind
+                        ? '#FF9D00'
                         : isSelected
-                          ? 'rgba(0, 168, 255, 0.16)'
+                          ? '#00A8FF'
                           : isFindMatch
-                            ? 'rgba(251, 191, 36, 0.12)'
-                            : ROOM_FILLS[room.floorFinish] ?? 'rgba(0,168,255,0.06)'
-                  }
-                  stroke={
-                    isInvalidDraft || isActiveFind
-                      ? '#FF9D00'
-                      : isSelected
-                        ? '#00A8FF'
-                        : isFindMatch
-                          ? '#FBBF24'
-                          : '#334C73'
-                  }
-                  strokeWidth={isActiveFind ? 3 : isSelected || isInvalidDraft || isFindMatch ? 2.5 : 1.5}
-                  strokeDasharray={isInvalidDraft || isFindMatch ? '6,4' : undefined}
-                />
+                            ? '#FBBF24'
+                            : '#334C73'
+                    }
+                    strokeWidth={isActiveFind ? 3 : isSelected || isInvalidDraft || isFindMatch ? 2.5 : 1.5}
+                    strokeDasharray={isInvalidDraft || isFindMatch ? '6,4' : undefined}
+                  />
+                ) : (
+                  <rect
+                    x={rx}
+                    y={ry}
+                    width={rw}
+                    height={rh}
+                    fill={
+                      isInvalidDraft
+                        ? 'rgba(255, 157, 0, 0.18)'
+                        : isActiveFind
+                          ? 'rgba(255, 157, 0, 0.22)'
+                          : isSelected
+                            ? 'rgba(0, 168, 255, 0.16)'
+                            : isFindMatch
+                              ? 'rgba(251, 191, 36, 0.12)'
+                              : ROOM_FILLS[room.floorFinish] ?? 'rgba(0,168,255,0.06)'
+                    }
+                    stroke={
+                      isInvalidDraft || isActiveFind
+                        ? '#FF9D00'
+                        : isSelected
+                          ? '#00A8FF'
+                          : isFindMatch
+                            ? '#FBBF24'
+                            : '#334C73'
+                    }
+                    strokeWidth={isActiveFind ? 3 : isSelected || isInvalidDraft || isFindMatch ? 2.5 : 1.5}
+                    strokeDasharray={isInvalidDraft || isFindMatch ? '6,4' : undefined}
+                  />
+                )}
 
                 {/* Room Name + Dimensions + Area */}
                 <text
@@ -1574,7 +1794,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
           })}
 
           {/* Canonical Merged Architectural Walls (Perimeter + Deduplicated Shared Room Walls + Custom Walls) */}
-          {mergedWalls.map((seg) => {
+          {cadLayers.walls && mergedWalls.map((seg) => {
             const isInteriorSeg = seg.source !== 'perimeter';
             const gdx = isInteriorSeg && groupDrag ? groupDrag.dx : 0;
             const gdy = isInteriorSeg && groupDrag ? groupDrag.dy : 0;
@@ -1706,7 +1926,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
           )}
 
           {/* Doors & Windows */}
-          {project.openings.map((op) => {
+          {cadLayers.openings && project.openings.map((op) => {
             const ox = PAD + (op.x + (groupDrag ? groupDrag.dx : 0)) * SCALE;
             const oy = PAD + (op.y + (groupDrag ? groupDrag.dy : 0)) * SCALE;
             const ow = op.width * SCALE;
@@ -1830,7 +2050,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
           )}
 
           {/* Custom User-Placed Dimension Annotations */}
-          {!previewOnly &&
+          {!previewOnly && cadLayers.dimensions &&
             customDims.map((dim) => {
               const x1 = PAD + dim.x1 * SCALE;
               const y1 = PAD + dim.y1 * SCALE;
@@ -2046,16 +2266,48 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
               ...(wire.waypoints ?? []),
               { x: toPt.x, y: toPt.y },
             ];
-            const pathD = nodes
-              .map(
-                (n, idx) =>
-                  `${idx === 0 ? 'M' : 'L'} ${(PAD + n.x * SCALE).toFixed(1)} ${(PAD + n.y * SCALE).toFixed(1)}`
-              )
+            const corridorKey =
+              wire.fromPointId < wire.toPointId
+                ? `${wire.fromPointId}::${wire.toPointId}`
+                : `${wire.toPointId}::${wire.fromPointId}`;
+            const hasParallelConductors = (corridorConductorCount.get(corridorKey) ?? 1) > 1;
+            const rawSvgPts = nodes.map((n) => ({
+              x: PAD + n.x * SCALE,
+              y: PAD + n.y * SCALE,
+            }));
+            const dirSign = wire.fromPointId < wire.toPointId ? 1 : -1;
+            const visualOffsetPx =
+              hasParallelConductors && !previewOnly
+                ? (CONDUCTOR_VISUAL_LANE_OFFSET_PX[wire.category] ?? 0) * dirSign
+                : 0;
+            const displayPts =
+              visualOffsetPx !== 0
+                ? offsetPolylinePerpendicular(rawSvgPts, visualOffsetPx)
+                : rawSvgPts;
+            const pathD = displayPts
+              .map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
               .join(' ');
-            const wireLenM = computeWireLengthMeters(wire, fullProject);
-            const midNodeIdx = Math.floor((nodes.length - 1) / 2);
-            const labelX = PAD + ((nodes[midNodeIdx].x + nodes[midNodeIdx + 1].x) / 2) * SCALE;
-            const labelY = PAD + ((nodes[midNodeIdx].y + nodes[midNodeIdx + 1].y) / 2) * SCALE;
+            const wireBreakdown = computeWireLengthBreakdown(wire, fullProject, allowancePct);
+            const conductorTag =
+              wire.category === 'phase'
+                ? 'L'
+                : wire.category === 'neutral'
+                  ? 'N'
+                  : wire.category === 'earth'
+                    ? 'E'
+                    : wire.code;
+            const midNodeIdx = Math.min(
+              Math.max(0, Math.floor((displayPts.length - 1) / 2)),
+              Math.max(0, displayPts.length - 2)
+            );
+            const labelX =
+              displayPts.length >= 2
+                ? (displayPts[midNodeIdx].x + displayPts[midNodeIdx + 1].x) / 2
+                : rawSvgPts[0].x;
+            const labelY =
+              displayPts.length >= 2
+                ? (displayPts[midNodeIdx].y + displayPts[midNodeIdx + 1].y) / 2
+                : rawSvgPts[0].y;
 
             return (
               <g key={wire.id}>
@@ -2163,13 +2415,13 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                   </>
                 )}
 
-                {/* Wire Label & Live Length Readout */}
+                {/* Wire Label & Live Length Readout (m & ft) */}
                 {!previewOnly && (wiringConfig.showWireLabels || isSelWire) && (
                   <g transform={`translate(${labelX} ${labelY - 12})`} pointerEvents="none">
                     <rect
-                      x={isSelWire ? -44 : -26}
+                      x={isSelWire ? -68 : -34}
                       y="-9"
-                      width={isSelWire ? 88 : 52}
+                      width={isSelWire ? 136 : 68}
                       height="16"
                       rx="2"
                       fill="#080F20"
@@ -2182,14 +2434,11 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
                       textAnchor="middle"
                       fill="#E0F4FF"
                       fontFamily="Red Hat Mono, monospace"
-                      fontSize="8.5"
+                      fontSize="8.2"
                     >
-                      {wire.code}
                       {isSelWire
-                        ? ` · ${wireLenM.toFixed(1)}m${wire.cableSizeSqMm ? ` (${wire.cableSizeSqMm}mm²)` : ''}`
-                        : wire.isInterFloor
-                          ? ' ↕'
-                          : ''}
+                        ? `${conductorTag} · ${wireBreakdown.baseRouteM.toFixed(1)}m / ${wireBreakdown.baseRouteFt.toFixed(1)}ft`
+                        : `${wire.code} (${conductorTag})${wire.isInterFloor ? ' ↕' : ''}`}
                     </text>
                   </g>
                 )}
@@ -2356,7 +2605,7 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
           })()}
 
           {/* Electrical Points */}
-          {project.points.map((pt) => {
+          {cadLayers.symbols && project.points.map((pt) => {
             const px = PAD + (pt.x + (groupDrag ? groupDrag.dx : 0)) * SCALE;
             const py = PAD + (pt.y + (groupDrag ? groupDrag.dy : 0)) * SCALE;
             const isSelected = isEntitySelected('point', pt.id);
@@ -2568,6 +2817,103 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
             );
           })}
 
+          {/* Optional AI Drawing Imported Columns & Collision-Decluttered Text Annotations (Single Canonical Pass) */}
+          {fullProject.aiDrawingImport && (
+            <g pointerEvents="none">
+              {cadLayers.columns &&
+                (fullProject.aiDrawingImport.columns ?? [])
+                  .filter((col) => (col.floor ?? 1) === activeFloor)
+                  .map((col) => {
+                    const cx = PAD + (col.x + (groupDrag ? groupDrag.dx : 0)) * SCALE;
+                    const cy = PAD + (col.y + (groupDrag ? groupDrag.dy : 0)) * SCALE;
+                    const wPx = Math.max(6, col.width * SCALE);
+                    const hPx = Math.max(6, col.height * SCALE);
+                    return (
+                      <g key={col.id}>
+                        <rect
+                          x={cx - wPx / 2}
+                          y={cy - hPx / 2}
+                          width={wPx}
+                          height={hPx}
+                          fill="rgba(148, 163, 184, 0.38)"
+                          stroke="#94A3B8"
+                          strokeWidth="1.4"
+                        />
+                        {!previewOnly && wPx >= 14 && (
+                          <text
+                            x={cx}
+                            y={cy + 3}
+                            textAnchor="middle"
+                            fill="#E2E8F0"
+                            fontFamily="Red Hat Mono, monospace"
+                            fontSize="7.5"
+                          >
+                            {col.label}
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })}
+              {!previewOnly &&
+                cadLayers.labels &&
+                (() => {
+                  const placedBoxes: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+                  // Reserve existing room label centers so imported annotations never overlap room names
+                  project.rooms.forEach((rm) => {
+                    const rcx = PAD + (rm.x + rm.width / 2) * SCALE;
+                    const rcy = PAD + (rm.y + rm.height / 2) * SCALE;
+                    placedBoxes.push({ x1: rcx - 38, y1: rcy - 14, x2: rcx + 38, y2: rcy + 14 });
+                  });
+                  const candidates = (fullProject.aiDrawingImport?.textAnnotations ?? [])
+                    .filter(
+                      (lbl) =>
+                        (lbl.floor ?? 1) === activeFloor &&
+                        lbl.kind !== 'title-block' &&
+                        lbl.kind !== 'legend-text' &&
+                        lbl.text.trim().length > 0
+                    )
+                    .slice(0, 120);
+
+                  return candidates.map((lbl) => {
+                    const lx = PAD + (lbl.x + (groupDrag ? groupDrag.dx : 0)) * SCALE;
+                    const ly = PAD + (lbl.y + (groupDrag ? groupDrag.dy : 0)) * SCALE;
+                    const display = lbl.text.trim().slice(0, 36);
+                    const estW = Math.max(24, display.length * 5.2);
+                    const estH = 12;
+                    const box = {
+                      x1: lx - estW / 2 - 2,
+                      y1: ly - estH,
+                      x2: lx + estW / 2 + 2,
+                      y2: ly + 3,
+                    };
+                    const collides = placedBoxes.some(
+                      (b) =>
+                        box.x1 < b.x2 &&
+                        box.x2 > b.x1 &&
+                        box.y1 < b.y2 &&
+                        box.y2 > b.y1
+                    );
+                    if (collides) return null;
+                    placedBoxes.push(box);
+                    return (
+                      <text
+                        key={lbl.id}
+                        x={lx}
+                        y={ly}
+                        textAnchor="middle"
+                        fill={lbl.kind === 'room-label' ? '#E2E8F0' : '#94A3B8'}
+                        fontFamily="Red Hat Mono, monospace"
+                        fontSize={lbl.kind === 'room-label' ? '8.5' : '7.5'}
+                        fontWeight={lbl.kind === 'room-label' ? '600' : '400'}
+                      >
+                        {display}
+                      </text>
+                    );
+                  });
+                })()}
+            </g>
+          )}
+
           {/* Ctrl+A Select All Visual Bounding Frame */}
           {allSelected && !previewOnly && (
             <g pointerEvents="none">
@@ -2605,8 +2951,431 @@ export const FloorPlan2D: React.FC<FloorPlan2DProps> = ({
               </text>
             </g>
           )}
+          </g>
+          </g>
         </g>
       </svg>
+
+      {/* Top-Left PDF-vs-CAD Alignment, Layer Visibility & 2D Approval Controls */}
+      {!previewOnly && (referenceOverlay?.dataUrl || fullProject.aiDrawingImport) && (
+        <div
+          data-pdf-compare-controls="true"
+          className="absolute top-3 left-3 z-20 flex flex-col gap-1.5"
+        >
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-outline bg-surface-container px-2.5 py-1.5 text-[11px] font-mono text-on-surface shadow-md">
+            <span className="font-semibold text-primary">
+              {referenceOverlay?.dataUrl ? 'Locked Ref PDF' : 'CAD Import'}
+            </span>
+            {referenceOverlay?.dataUrl && (
+              <button
+                type="button"
+                onClick={() => setShowReferencePdf((v) => !v)}
+                className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                  showReferencePdf
+                    ? 'border-primary bg-primary/15 text-primary'
+                    : 'border-outline bg-surface text-on-surface-variant'
+                }`}
+              >
+                {showReferencePdf ? 'Hide PDF' : 'Show PDF'}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowReconstructedCad((v) => !v)}
+              className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                showReconstructedCad
+                  ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-300'
+                  : 'border-outline bg-surface text-on-surface-variant'
+              }`}
+            >
+              {showReconstructedCad ? 'Hide CAD' : 'Show CAD'}
+            </button>
+            {referenceOverlay?.dataUrl && showReferencePdf && (
+              <label className="flex items-center gap-1.5 text-[10px] text-on-surface-variant">
+                <span>Opacity</span>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  value={referencePdfOpacity}
+                  onChange={(e) => setReferencePdfOpacity(Number(e.target.value))}
+                  className="w-16 accent-primary"
+                />
+                <span className="w-7 text-right text-on-surface">
+                  {Math.round(referencePdfOpacity * 100)}%
+                </span>
+              </label>
+            )}
+            <button
+              type="button"
+              onClick={() => setCadLayersOpen((v) => !v)}
+              className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                cadLayersOpen
+                  ? 'border-primary bg-primary/15 text-primary'
+                  : 'border-outline bg-surface text-on-surface-variant hover:text-on-surface'
+              }`}
+            >
+              CAD Layers
+            </button>
+            {onExportDxf && (
+              <button
+                type="button"
+                onClick={onExportDxf}
+                className="rounded border border-outline bg-surface px-2 py-0.5 text-[10px] font-semibold text-on-surface hover:border-primary hover:text-primary transition-colors"
+                title="Export validated editable AutoCAD DXF"
+              >
+                Export DXF
+              </button>
+            )}
+            {fullProject.aiDrawingImport &&
+              fullProject.aiDrawingImport.approvedFor3D === false &&
+              onApprove2DFor3D && (
+                <button
+                  type="button"
+                  onClick={onApprove2DFor3D}
+                  className="rounded border border-emerald-500 bg-emerald-600 px-2.5 py-0.5 text-[10px] font-semibold text-white hover:bg-emerald-500 transition-colors"
+                  title="Approve the reconstructed 2D CAD geometry and generate the 3D scene"
+                >
+                  Approve 2D & Open 3D
+                </button>
+              )}
+          </div>
+
+          {cadLayersOpen && (
+            <div className="w-60 rounded-md border border-outline bg-surface-container p-2.5 text-[11px] font-mono text-on-surface shadow-xl space-y-1.5">
+              <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-on-surface-variant pb-1 border-b border-outline-variant">
+                <span>Editable CAD Layers</span>
+                <span className="text-primary">PDF Locked</span>
+              </div>
+              {(
+                [
+                  ['walls', 'Walls & Boundaries'],
+                  ['rooms', 'Rooms & Spaces'],
+                  ['openings', 'Doors & Windows'],
+                  ['columns', 'Columns & Structure'],
+                  ['symbols', 'Electrical & Lighting'],
+                  ['dimensions', 'Dimensions'],
+                  ['labels', 'Annotations & Labels'],
+                ] as const
+              ).map(([key, label]) => (
+                <label
+                  key={key}
+                  className="flex items-center justify-between gap-2 cursor-pointer py-0.5 hover:text-primary"
+                >
+                  <span>{label}</span>
+                  <input
+                    type="checkbox"
+                    checked={cadLayers[key]}
+                    onChange={() =>
+                      setCadLayers((prev) => ({ ...prev, [key]: !prev[key] }))
+                    }
+                    className="accent-primary"
+                  />
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Bottom-Left Calibrated 1:4 Canvas Ratio & Scale HUD */}
+      {!previewOnly && (
+        <div className="absolute bottom-3 left-3 z-20 flex items-center gap-2 rounded-md border border-outline bg-surface-container px-2.5 py-1.5 text-[11px] font-mono text-on-surface shadow-md">
+          <span className="font-semibold text-primary">1:4 Canvas</span>
+          <span className="text-on-surface-variant">·</span>
+          <span className="text-on-surface-variant">
+            {siteLenLabel} × {siteWidLabel}
+          </span>
+          <span className="text-on-surface-variant">·</span>
+          <span className="text-on-surface">{zoom}%</span>
+          {onZoomChange && onPanChange && (
+            <div className="ml-1 flex items-center gap-1 border-l border-outline pl-2">
+              <button
+                type="button"
+                onClick={() => {
+                  onZoomChange(100);
+                  onPanChange({ x: 0, y: 0 });
+                }}
+                className="rounded border border-outline bg-surface px-1.5 py-0.5 text-[10px] text-on-surface hover:border-primary hover:text-primary transition-colors"
+                title="Fit building plan at calibrated 100% scale"
+              >
+                Fit Plan
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onZoomChange(canvasMetrics.fitSheetZoomPct);
+                  onPanChange({ x: 0, y: 0 });
+                }}
+                className="rounded border border-outline bg-surface px-1.5 py-0.5 text-[10px] text-on-surface-variant hover:border-primary hover:text-primary transition-colors"
+                title="View entire 1:4 calibrated drawing sheet"
+              >
+                1:4 Sheet
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Bottom-Right Live 3-Conductor (L/N/E) Wire Routing & Quantity Schedule HUD */}
+      {!previewOnly && (
+        <div className="absolute bottom-3 right-3 z-20 flex flex-col items-end">
+          {wirePanelOpen && (
+            <div className="mb-2 w-[560px] max-w-[calc(100vw-2rem)] max-h-[380px] flex flex-col rounded-lg border border-outline bg-surface-container shadow-xl overflow-hidden text-xs">
+              {/* Panel Header */}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline bg-surface px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-on-surface tracking-tight">
+                    Wire Routing & Quantities
+                  </span>
+                  <span className="font-mono text-[10px] text-on-surface-variant">
+                    ({activeWireReport.wireCount} runs)
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setWireScopeAllFloors((v) => !v)}
+                    className="rounded border border-outline bg-surface-container px-2 py-0.5 font-mono text-[10px] text-on-surface hover:border-primary transition-colors"
+                  >
+                    {wireScopeAllFloors ? 'All Floors' : getFloorLabel(fullProject, activeFloor)}
+                  </button>
+                  <label className="flex items-center gap-1 font-mono text-[10px] text-on-surface-variant">
+                    <span>Allow:</span>
+                    <select
+                      value={allowancePct}
+                      onChange={(e) => setAllowancePct(Number(e.target.value))}
+                      className="rounded border border-outline bg-surface-container px-1 py-0.5 font-mono text-[10px] text-on-surface outline-none focus:border-primary"
+                    >
+                      <option value={0}>0%</option>
+                      <option value={5}>5%</option>
+                      <option value={10}>10%</option>
+                      <option value={15}>15%</option>
+                    </select>
+                  </label>
+                  {onAutoRouteWires && (
+                    <button
+                      type="button"
+                      onClick={onAutoRouteWires}
+                      className="rounded bg-primary px-2 py-0.5 font-mono text-[10px] font-semibold text-on-primary hover:opacity-90 transition-opacity"
+                    >
+                      Route L/N/E
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Conductor Legend Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline/60 bg-surface-container px-3 py-1.5 text-[10px] font-mono">
+                <div className="flex items-center gap-3">
+                  {(['phase', 'neutral', 'earth'] as const).map((cat) => (
+                    <span key={cat} className="inline-flex items-center gap-1.5 text-on-surface">
+                      <span
+                        className="inline-block h-2 w-4 rounded-sm"
+                        style={{ backgroundColor: CONDUCTOR_COLOR_LEGEND[cat].color }}
+                      />
+                      {CONDUCTOR_COLOR_LEGEND[cat].label}
+                    </span>
+                  ))}
+                </div>
+                <span className="text-on-surface-variant">
+                  Base (H+V) · Term. · Allow ({allowancePct}%) · Total
+                </span>
+              </div>
+
+              {/* Per-Circuit Table */}
+              <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2.5">
+                {activeWireReport.circuits.length === 0 ? (
+                  <div className="py-5 text-center text-on-surface-variant">
+                    <p className="mb-2">No routed electrical conductors on this view yet.</p>
+                    {onAutoRouteWires && (
+                      <button
+                        type="button"
+                        onClick={onAutoRouteWires}
+                        className="rounded bg-primary px-3 py-1 font-mono text-[11px] font-semibold text-on-primary hover:opacity-90"
+                      >
+                        Auto-Route Phase (L), Neutral (N) & Earth (E)
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  activeWireReport.circuits.map((ckt) => {
+                    const rows = [ckt.phase, ckt.neutral, ckt.earth].filter(
+                      (r) => r.wireCount > 0 || ckt.phase.wireCount > 0 || ckt.neutral.wireCount > 0
+                    );
+                    if (ckt.other.wireCount > 0) rows.push(ckt.other);
+                    return (
+                      <div
+                        key={ckt.circuit}
+                        className="rounded border border-outline/70 bg-surface overflow-hidden"
+                      >
+                        <div className="flex items-center justify-between border-b border-outline/60 px-2.5 py-1 bg-surface-container/60">
+                          <span className="font-mono text-[11px] font-semibold text-on-surface">
+                            {ckt.circuit}
+                          </span>
+                          <span className="font-mono text-[10px] text-on-surface-variant">
+                            Subtotal: {ckt.subtotal.totalM.toFixed(2)} m /{' '}
+                            {ckt.subtotal.totalFt.toFixed(2)} ft
+                          </span>
+                        </div>
+                        <table className="w-full text-left font-mono text-[10px]">
+                          <thead>
+                            <tr className="border-b border-outline/40 text-on-surface-variant">
+                              <th className="py-1 pl-2.5 pr-1 font-medium">Conductor</th>
+                              <th className="py-1 px-1 text-right font-medium">Base (H+V)</th>
+                              <th className="py-1 px-1 text-right font-medium">Term.</th>
+                              <th className="py-1 px-1 text-right font-medium">Allow.</th>
+                              <th className="py-1 pl-1 pr-2.5 text-right font-medium text-on-surface">
+                                Total (m / ft)
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.map((row) => (
+                              <tr
+                                key={`${ckt.circuit}-${row.category}`}
+                                className="border-b border-outline/20 last:border-b-0"
+                              >
+                                <td className="py-1 pl-2.5 pr-1">
+                                  <span className="inline-flex items-center gap-1.5 text-on-surface">
+                                    <span
+                                      className="inline-block h-2 w-2 rounded-full"
+                                      style={{ backgroundColor: row.color }}
+                                    />
+                                    {row.label}
+                                  </span>
+                                </td>
+                                <td className="py-1 px-1 text-right text-on-surface-variant">
+                                  {row.baseRouteM.toFixed(2)}m
+                                  <span className="block text-[9px] opacity-75">
+                                    {row.baseRouteFt.toFixed(1)}ft
+                                  </span>
+                                </td>
+                                <td className="py-1 px-1 text-right text-on-surface-variant">
+                                  {row.terminationM.toFixed(2)}m
+                                  <span className="block text-[9px] opacity-75">
+                                    {row.terminationFt.toFixed(1)}ft
+                                  </span>
+                                </td>
+                                <td className="py-1 px-1 text-right text-on-surface-variant">
+                                  {row.allowanceM.toFixed(2)}m
+                                  <span className="block text-[9px] opacity-75">
+                                    {row.allowanceFt.toFixed(1)}ft
+                                  </span>
+                                </td>
+                                <td className="py-1 pl-1 pr-2.5 text-right font-semibold text-on-surface">
+                                  {row.totalM.toFixed(2)} m
+                                  <span className="block text-[9px] font-normal text-primary">
+                                    {row.totalFt.toFixed(2)} ft
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Grand Total Summary Footer */}
+              {activeWireReport.wireCount > 0 && (
+                <div className="border-t border-outline bg-surface px-3 py-2 font-mono text-[10px]">
+                  <div className="grid grid-cols-3 gap-2 mb-1.5">
+                    {(['phase', 'neutral', 'earth'] as const).map((cat) => {
+                      const t = activeWireReport.totalsByConductor[cat];
+                      return (
+                        <div
+                          key={cat}
+                          className="rounded border border-outline/60 bg-surface-container px-2 py-1"
+                        >
+                          <div className="flex items-center gap-1 text-on-surface-variant">
+                            <span
+                              className="inline-block h-2 w-2 rounded-full"
+                              style={{ backgroundColor: CONDUCTOR_COLOR_LEGEND[cat].color }}
+                            />
+                            <span>{CONDUCTOR_COLOR_LEGEND[cat].label}</span>
+                          </div>
+                          <div className="font-semibold text-on-surface">
+                            {t.totalM.toFixed(2)} m · {t.totalFt.toFixed(1)} ft
+                          </div>
+                          <div className="text-[9px] text-on-surface-variant">
+                            Base {t.baseRouteM.toFixed(1)}m + Term {t.terminationM.toFixed(1)}m + Allow{' '}
+                            {t.allowanceM.toFixed(1)}m
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center justify-between pt-1 border-t border-outline/50 text-[11px]">
+                    <span className="font-semibold text-on-surface">
+                      Total All Conductors (Base {activeWireReport.grandTotal.baseRouteM.toFixed(1)}m ·
+                      Term {activeWireReport.grandTotal.terminationM.toFixed(1)}m · Allow{' '}
+                      {activeWireReport.grandTotal.allowanceM.toFixed(1)}m)
+                    </span>
+                    <span className="font-bold text-primary">
+                      {activeWireReport.grandTotal.totalM.toFixed(2)} m /{' '}
+                      {activeWireReport.grandTotal.totalFt.toFixed(2)} ft
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Compact Always-Visible Bottom-Right Wire Totals Bar */}
+          <div className="flex items-center gap-2 rounded-md border border-outline bg-surface-container px-2.5 py-1.5 font-mono text-[11px] shadow-md">
+            <span className="inline-flex items-center gap-1 text-on-surface" title="Phase (L) Total">
+              <span className="inline-block h-2 w-2 rounded-full bg-[#EF4444]" />
+              <span>L:</span>
+              <span className="font-semibold">
+                {activeWireReport.totalsByConductor.phase.totalM.toFixed(1)}m
+              </span>
+              <span className="text-on-surface-variant text-[10px]">
+                ({activeWireReport.totalsByConductor.phase.totalFt.toFixed(0)}ft)
+              </span>
+            </span>
+            <span className="inline-flex items-center gap-1 text-on-surface" title="Neutral (N) Total">
+              <span className="inline-block h-2 w-2 rounded-full bg-[#3B82F6]" />
+              <span>N:</span>
+              <span className="font-semibold">
+                {activeWireReport.totalsByConductor.neutral.totalM.toFixed(1)}m
+              </span>
+              <span className="text-on-surface-variant text-[10px]">
+                ({activeWireReport.totalsByConductor.neutral.totalFt.toFixed(0)}ft)
+              </span>
+            </span>
+            <span className="inline-flex items-center gap-1 text-on-surface" title="Earth (E) Total">
+              <span className="inline-block h-2 w-2 rounded-full bg-[#22C55E]" />
+              <span>E:</span>
+              <span className="font-semibold">
+                {activeWireReport.totalsByConductor.earth.totalM.toFixed(1)}m
+              </span>
+              <span className="text-on-surface-variant text-[10px]">
+                ({activeWireReport.totalsByConductor.earth.totalFt.toFixed(0)}ft)
+              </span>
+            </span>
+            {onAutoRouteWires && activeWireReport.wireCount === 0 && (
+              <button
+                type="button"
+                onClick={onAutoRouteWires}
+                className="ml-1 rounded bg-primary px-2 py-0.5 text-[10px] font-semibold text-on-primary hover:opacity-90"
+              >
+                Route L/N/E
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setWirePanelOpen((v) => !v)}
+              className="ml-1 rounded border border-outline bg-surface px-2 py-0.5 text-[10px] font-semibold text-primary hover:border-primary transition-colors"
+            >
+              {wirePanelOpen ? 'Hide Schedule' : 'Wire Schedule'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,3 +1,5 @@
+import type { AiDrawingImportMeta } from './aiDrawing';
+
 export type ScreenId = 'home' | 'studio' | 'summary';
 export type UnitSystem = 'ft' | 'm';
 export type ProjectType = 'Residential' | 'Commercial' | 'Custom';
@@ -248,6 +250,10 @@ export interface RoomZone {
   wallThickness?: number; // in meters (defaults to site wall thickness)
   rotation?: number; // 0 or 90
   floorFinish: 'wood' | 'tile' | 'stone' | 'terrazzo';
+  /** When true, room boundaries are defined by explicit customWalls rather than auto-generated bounding rectangles */
+  noAutoWalls?: boolean;
+  /** Optional exact polygonal room outline in floor-plan meters for non-rectangular / angled / curved rooms */
+  polygon?: Array<{ x: number; y: number }>;
 }
 
 export interface CustomWall {
@@ -259,6 +265,9 @@ export interface CustomWall {
   y2: number;
   thickness?: number; // meters
   wallKind?: 'internal' | 'external';
+  /** True when this segment is part of a tessellated curved wall reconstructed from a CAD/PDF arc or Bézier */
+  isCurvedSegment?: boolean;
+  curveGroupId?: string;
 }
 
 export interface ArchitecturalOpening {
@@ -397,6 +406,8 @@ export interface ProjectData {
   savedCameraViews?: SavedCameraView[];
   /** Live-reconciled user edits, deletions, and manual rows for Project Summary tables */
   summaryOverrides?: ProjectSummaryOverrides;
+  /** Optional provenance & 2D reference layers from AI Drawing to 2D importer */
+  aiDrawingImport?: AiDrawingImportMeta;
   /** Legacy fields kept optional for backward compatibility */
   customRoomBreakdown?: RoomBreakdownRow[];
   customBoqRows?: BoqRow[];

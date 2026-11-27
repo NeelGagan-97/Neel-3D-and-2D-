@@ -281,19 +281,23 @@ export function extractMergedWalls(project: ProjectData): MergedWallSegment[] {
   const { lengthM, widthM, wallThickM } = siteToMeters(project.site);
   const result: MergedWallSegment[] = [];
 
-  // 1. Exterior site perimeter walls
-  result.push(
-    { id: 'ext-n', x1: 0, y1: 0, x2: lengthM, y2: 0, thickness: wallThickM, isExterior: true, source: 'perimeter' },
-    { id: 'ext-s', x1: 0, y1: widthM, x2: lengthM, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' },
-    { id: 'ext-w', x1: 0, y1: 0, x2: 0, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' },
-    { id: 'ext-e', x1: lengthM, y1: 0, x2: lengthM, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' }
-  );
+  // 1. Exterior site perimeter walls (omitted when an imported CAD/PDF supplies its own reconstructed building outline)
+  const suppressPerimeter = Boolean(project.aiDrawingImport?.suppressAutoSitePerimeter && project.customWalls.length > 0);
+  if (!suppressPerimeter) {
+    result.push(
+      { id: 'ext-n', x1: 0, y1: 0, x2: lengthM, y2: 0, thickness: wallThickM, isExterior: true, source: 'perimeter' },
+      { id: 'ext-s', x1: 0, y1: widthM, x2: lengthM, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' },
+      { id: 'ext-w', x1: 0, y1: 0, x2: 0, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' },
+      { id: 'ext-e', x1: lengthM, y1: 0, x2: lengthM, y2: widthM, thickness: wallThickM, isExterior: true, source: 'perimeter' }
+    );
+  }
 
-  // 2. Collect interior room boundary edges (skipping edges lying directly on exterior perimeter)
+  // 2. Collect interior room boundary edges (skipping rooms whose walls are explicitly reconstructed as customWalls)
   const hSegs: { fixed: number; start: number; end: number; thickness: number; isExterior: boolean }[] = [];
   const vSegs: { fixed: number; start: number; end: number; thickness: number; isExterior: boolean }[] = [];
 
   project.rooms.forEach((r) => {
+    if (r.noAutoWalls) return;
     const thick = r.wallThickness ?? Math.max(0.11, wallThickM * 0.72);
     const x1 = r.x;
     const x2 = r.x + r.width;
@@ -303,10 +307,10 @@ export function extractMergedWalls(project: ProjectData): MergedWallSegment[] {
     const withinX = x1 >= -0.08 && x2 <= lengthM + 0.08;
     const withinY = y1 >= -0.08 && y2 <= widthM + 0.08;
 
-    const onNorthPerim = Math.abs(y1) < 0.08 && withinX;
-    const onSouthPerim = Math.abs(y2 - widthM) < 0.08 && withinX;
-    const onWestPerim = Math.abs(x1) < 0.08 && withinY;
-    const onEastPerim = Math.abs(x2 - lengthM) < 0.08 && withinY;
+    const onNorthPerim = !suppressPerimeter && Math.abs(y1) < 0.08 && withinX;
+    const onSouthPerim = !suppressPerimeter && Math.abs(y2 - widthM) < 0.08 && withinX;
+    const onWestPerim = !suppressPerimeter && Math.abs(x1) < 0.08 && withinY;
+    const onEastPerim = !suppressPerimeter && Math.abs(x2 - lengthM) < 0.08 && withinY;
 
     if (!onNorthPerim) {
       hSegs.push({ fixed: y1, start: x1, end: x2, thickness: thick, isExterior: false });
