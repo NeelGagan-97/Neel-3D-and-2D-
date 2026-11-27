@@ -756,9 +756,16 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
   const boqMap = new Map<ElectricalItemType, BoqRow>();
 
   project.points.forEach((pt) => {
+    const effectivePtCost =
+      typeof pt.manualPriceOverride === 'number' &&
+      Number.isFinite(pt.manualPriceOverride) &&
+      pt.manualPriceOverride >= 0
+        ? pt.manualPriceOverride
+        : pt.unitCost;
+
     categoryCounts[pt.category] = (categoryCounts[pt.category] || 0) + 1;
     totalWatts += pt.wattage;
-    totalCost += pt.unitCost;
+    totalCost += effectivePtCost;
 
     const ptFloor = Math.max(1, Math.round(pt.floor ?? 1));
     let rRow = roomMap.get(pt.roomId);
@@ -803,16 +810,22 @@ export function computeProjectMetrics(project: ProjectData): ProjectMetrics {
     if (existingBoq) {
       existingBoq.quantity += 1;
       existingBoq.totalWattage += pt.wattage;
-      existingBoq.estimatedCost += pt.unitCost;
+      existingBoq.estimatedCost = Number((existingBoq.estimatedCost + effectivePtCost).toFixed(2));
+      existingBoq.unitPrice =
+        existingBoq.quantity > 0
+          ? Number((existingBoq.estimatedCost / existingBoq.quantity).toFixed(2))
+          : 0;
     } else {
+      const unitPrice = Number(effectivePtCost.toFixed(2));
       boqMap.set(pt.itemType, {
         id: pt.itemType,
         itemType: pt.itemType,
         productName: cat ? cat.productName : pt.name,
         category: cat ? cat.boqCategory : pt.category,
         quantity: 1,
+        unitPrice,
         totalWattage: pt.wattage,
-        estimatedCost: pt.unitCost,
+        estimatedCost: unitPrice,
       });
     }
   });

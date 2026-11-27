@@ -138,7 +138,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                     <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
                       auto_awesome
                     </span>
-                    <span>AI DRAWING IMPORT</span>
+                    <span>Upload File</span>
                   </button>
 
                   <button

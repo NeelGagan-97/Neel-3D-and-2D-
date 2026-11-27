@@ -18,6 +18,10 @@ import {
 } from '../types/design';
 import {
   computeBuildingElectricalSummary,
+  computeReconciledBoq,
+  computeWireConsumptionSummary,
+  DEFAULT_INSTALLATION_ALLOWANCE_PCT,
+  getFloorLabel,
   WIRE_CATEGORY_LABELS,
 } from '../utils/buildingWiring';
 import { formatSafeCsvRow } from '../utils/csvSecurity';
@@ -42,6 +46,7 @@ interface MergedRoomRow extends RoomBreakdownRow {
 
 interface MergedBoqRow extends BoqRow {
   key: string;
+  unitPrice: number;
   isCustom?: boolean;
   live?: BoqRow;
 }
@@ -56,6 +61,17 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
   const buildingSummary = useMemo(
     () => computeBuildingElectricalSummary(project),
     [project]
+  );
+  const reconciledBoq = useMemo(() => computeReconciledBoq(project), [project]);
+  const [wireAllowancePct, setWireAllowancePct] = useState<number>(
+    DEFAULT_INSTALLATION_ALLOWANCE_PCT
+  );
+  const wireConsumption = useMemo(
+    () =>
+      computeWireConsumptionSummary(project, {
+        procurementAllowancePct: wireAllowancePct,
+      }),
+    [project, wireAllowancePct]
   );
   const [feedback, setFeedback] = useState<string | null>(null);
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
@@ -103,24 +119,54 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
       .map((live) => {
         const key = live.id ?? live.itemType;
         const ed = edits[key];
+        const quantity = Math.max(0, live.quantity + (ed?.quantityDelta ?? 0));
+        const liveUnitPrice =
+          typeof live.unitPrice === 'number' && Number.isFinite(live.unitPrice)
+            ? live.unitPrice
+            : live.quantity > 0
+              ? Number((live.estimatedCost / live.quantity).toFixed(2))
+              : 0;
+        const unitPrice =
+          ed?.unitPrice !== undefined && Number.isFinite(ed.unitPrice)
+            ? Math.max(0, Number(ed.unitPrice.toFixed(2)))
+            : ed?.costDelta !== undefined
+              ? quantity > 0
+                ? Number((Math.max(0, live.estimatedCost + ed.costDelta) / quantity).toFixed(2))
+                : liveUnitPrice
+              : liveUnitPrice;
+        const estimatedCost = Number((quantity * unitPrice).toFixed(2));
         return {
           ...live,
           id: key,
           key,
           productName: ed?.productName ?? live.productName,
           category: ed?.category ?? live.category,
-          quantity: Math.max(0, live.quantity + (ed?.quantityDelta ?? 0)),
+          quantity,
+          unitPrice,
           totalWattage: Math.max(0, live.totalWattage + (ed?.wattageDelta ?? 0)),
-          estimatedCost: Math.max(0, live.estimatedCost + (ed?.costDelta ?? 0)),
+          estimatedCost,
           live,
         };
       });
-    const added: MergedBoqRow[] = (overrides.addedBoqRows ?? []).map((b, idx) => ({
-      ...b,
-      id: b.id ?? `custom-boq-${idx}`,
-      key: b.id ?? `custom-boq-${idx}`,
-      isCustom: true,
-    }));
+    const added: MergedBoqRow[] = (overrides.addedBoqRows ?? []).map((b, idx) => {
+      const quantity = Math.max(0, Number(b.quantity) || 0);
+      const unitPrice =
+        typeof b.unitPrice === 'number' && Number.isFinite(b.unitPrice)
+          ? Math.max(0, Number(b.unitPrice.toFixed(2)))
+          : quantity > 0
+            ? Number((Math.max(0, Number(b.estimatedCost) || 0) / quantity).toFixed(2))
+            : 0;
+      const estimatedCost = Number((quantity * unitPrice).toFixed(2));
+      return {
+        ...b,
+        id: b.id ?? `custom-boq-${idx}`,
+        key: b.id ?? `custom-boq-${idx}`,
+        quantity,
+        unitPrice,
+        estimatedCost,
+        isCustom: true,
+      };
+    });
     return [...liveMerged, ...added];
   }, [metrics.boqRows, overrides.deletedBoqKeys, overrides.boqEdits, overrides.addedBoqRows]);
 
@@ -310,7 +356,7 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
   // --- Bill of Quantities (BOQ) Row Handlers (live delta-synced with 2D/3D) ---
   const handleUpdateBoqRow = (
     row: MergedBoqRow,
-    field: 'productName' | 'category' | 'quantity' | 'totalWattage' | 'estimatedCost',
+    field: 'productName' | 'category' | 'quantity' | 'unitPrice' | 'totalWattage',
     value: string | number
   ) => {
     const safeNum = Math.max(0, Number.isFinite(Number(value)) ? Number(value) : 0);
@@ -322,15 +368,31 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
             ...prev,
             summaryOverrides: {
               ...cur,
-              addedBoqRows: (cur.addedBoqRows ?? []).map((b) =>
-                (b.id ?? b.itemType) === row.key
-                  ? {
-                      ...b,
-                      [field]:
-                        field === 'productName' || field === 'category' ? String(value) : safeNum,
-                    }
-                  : b
-              ),
+              addedBoqRows: (cur.addedBoqRows ?? []).map((b) => {
+                if ((b.id ?? b.itemType) !== row.key) return b;
+                if (field === 'productName' || field === 'category') {
+                  return { ...b, [field]: String(value) };
+                }
+                if (field === 'quantity') {
+                  const nextQty = safeNum;
+                  const unitPrice = row.unitPrice;
+                  return {
+                    ...b,
+                    quantity: nextQty,
+                    unitPrice,
+                    estimatedCost: Number((nextQty * unitPrice).toFixed(2)),
+                  };
+                }
+                if (field === 'unitPrice') {
+                  const nextUnitPrice = Number(safeNum.toFixed(2));
+                  return {
+                    ...b,
+                    unitPrice: nextUnitPrice,
+                    estimatedCost: Number((row.quantity * nextUnitPrice).toFixed(2)),
+                  };
+                }
+                return { ...b, totalWattage: safeNum };
+              }),
             },
           };
         }
@@ -344,10 +406,15 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
           nextEdit.category = String(value);
         } else if (field === 'quantity') {
           nextEdit.quantityDelta = safeNum - live.quantity;
+          if (nextEdit.costDelta !== undefined && nextEdit.unitPrice === undefined) {
+            nextEdit.unitPrice = row.unitPrice;
+            delete nextEdit.costDelta;
+          }
+        } else if (field === 'unitPrice') {
+          nextEdit.unitPrice = Number(safeNum.toFixed(2));
+          delete nextEdit.costDelta;
         } else if (field === 'totalWattage') {
           nextEdit.wattageDelta = safeNum - live.totalWattage;
-        } else if (field === 'estimatedCost') {
-          nextEdit.costDelta = safeNum - live.estimatedCost;
         }
         return {
           ...prev,
@@ -395,14 +462,16 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
     onUpdateProject(
       (prev) => {
         const cur: ProjectSummaryOverrides = prev.summaryOverrides ?? {};
+        const initialUnitPrice = cat ? cat.unitCost : 0;
         const newRow: BoqRow = {
           id: `custom-boq-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
           itemType: cat ? cat.itemType : 'custom',
           productName: cat ? cat.productName : 'New Electrical Item',
           category: cat ? cat.boqCategory : 'Lighting',
           quantity: 1,
+          unitPrice: initialUnitPrice,
           totalWattage: cat ? cat.defaultWattage : 0,
-          estimatedCost: cat ? cat.unitCost : 0,
+          estimatedCost: initialUnitPrice,
         };
         return {
           ...prev,
@@ -491,6 +560,7 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
         'Product Name',
         'Category',
         'Quantity',
+        'Price/Unit (INR)',
         'Total Wattage (W)',
         'Estimated Cost (INR)',
       ])
@@ -501,6 +571,7 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
           b.productName,
           b.category,
           b.quantity,
+          b.unitPrice,
           b.totalWattage,
           b.estimatedCost,
         ])
@@ -511,8 +582,87 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
         'TOTAL CONNECTED SYSTEM SUMMARY',
         '',
         effectiveTotalPoints,
+        '',
         effectiveTotalWatts,
         effectiveTotalCost,
+      ])
+    );
+    if (reconciledBoq.totalGstConfigured > 0) {
+      lines.push(
+        formatSafeCsvRow([
+          'CONFIGURED GST TOTAL',
+          '',
+          '',
+          '',
+          '',
+          reconciledBoq.totalGstConfigured,
+        ])
+      );
+      lines.push(
+        formatSafeCsvRow([
+          'GRAND TOTAL (INCL. CONFIGURED GST)',
+          '',
+          '',
+          '',
+          '',
+          Number((effectiveTotalCost + reconciledBoq.totalGstConfigured).toFixed(2)),
+        ])
+      );
+    }
+    lines.push('');
+    lines.push(formatSafeCsvRow(['WIRE CONSUMPTION SUMMARY (ALL FLOORS, UNIQUE ROUTES)']));
+    lines.push(
+      formatSafeCsvRow([
+        'Wire Type',
+        'Cable Size',
+        'Unique Routes',
+        'Installed Length (m)',
+        `Procurement Allowance (${wireConsumption.procurementAllowancePct}% — Separate, m)`,
+      ])
+    );
+    if (wireConsumption.rows.length === 0) {
+      lines.push(
+        formatSafeCsvRow([
+          'No saved wiring routes',
+          '—',
+          0,
+          'Not calculated',
+          'Not calculated',
+        ])
+      );
+    } else {
+      wireConsumption.rows.forEach((wr) => {
+        lines.push(
+          formatSafeCsvRow([
+            wr.wireType,
+            wr.cableSizeLabel,
+            wr.routeCount,
+            wr.installedLengthM !== null ? wr.installedLengthM : 'Not calculated',
+            wr.procurementAllowanceM !== null ? wr.procurementAllowanceM : 'Not calculated',
+          ])
+        );
+      });
+    }
+    lines.push(
+      formatSafeCsvRow([
+        'OVERALL TOTAL WIRE LENGTH (INSTALLED)',
+        '',
+        wireConsumption.uniqueRouteCount,
+        wireConsumption.overallInstalledLengthM !== null
+          ? wireConsumption.overallInstalledLengthM
+          : 'Not calculated',
+        '',
+      ])
+    );
+    lines.push(
+      formatSafeCsvRow([
+        `PROCUREMENT ALLOWANCE (${wireConsumption.procurementAllowancePct}% — SEPARATE)`,
+        '',
+        '',
+        '',
+        wireConsumption.overallProcurementAllowanceM !== null
+          ? wireConsumption.overallProcurementAllowanceM
+          : 'Not calculated',
       ])
     );
 
@@ -632,7 +782,9 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
             <button
               type="button"
               onClick={() => {
-                void downloadExcelBoq(project)
+                void downloadExcelBoq(project, {
+                  wireProcurementAllowancePct: wireAllowancePct,
+                })
                   .then(() => {
                     notify(`Exported multi-sheet Excel BOQ workbook (.xlsx) for "${project.name}".`);
                   })
@@ -1127,6 +1279,7 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
                   <th scope="col" className="px-gutter-md py-gutter-md font-label text-label-md text-on-surface-variant">Product Name</th>
                   <th scope="col" className="px-gutter-md py-gutter-md font-label text-label-md text-on-surface-variant">Category</th>
                   <th scope="col" className="px-gutter-sm py-gutter-md font-label text-label-md text-on-surface-variant text-right">Quantity</th>
+                  <th scope="col" className="px-gutter-sm py-gutter-md font-label text-label-md text-on-surface-variant text-right">Price/Unit (₹)</th>
                   <th scope="col" className="px-gutter-sm py-gutter-md font-label text-label-md text-on-surface-variant text-right">Wattage (W)</th>
                   <th scope="col" className="px-gutter-md py-gutter-md font-label text-label-md text-on-surface-variant text-right">Estimated Cost (₹)</th>
                   <th scope="col" className="px-gutter-sm py-gutter-md font-label text-label-md text-on-surface-variant text-center w-12 no-print">
@@ -1137,7 +1290,7 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
               <tbody className="divide-y divide-outline-variant">
                 {boqRows.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-gutter-lg py-gutter-xl text-center font-body text-body-md text-on-surface-variant">
+                    <td colSpan={7} className="px-gutter-lg py-gutter-xl text-center font-body text-body-md text-on-surface-variant">
                       No electrical library items placed in 2D/3D yet. Place items from D. Electrical Library in Design Studio or pick from <span className="text-primary font-label">+ From Electrical Library</span> above.
                     </td>
                   </tr>
@@ -1180,6 +1333,23 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
                       </td>
                       <td className="px-gutter-sm py-2">
                         <div className="flex items-center justify-end gap-1">
+                          <span className="font-mono text-mono-sm text-on-surface-variant">₹</span>
+                          <input
+                            type="number"
+                            min={0}
+                            step={50}
+                            aria-label={`Price per unit for ${row.productName}`}
+                            value={row.unitPrice}
+                            onFocus={(e) => e.currentTarget.select()}
+                            onChange={(e) =>
+                              handleUpdateBoqRow(row, 'unitPrice', e.target.value === '' ? 0 : Number(e.target.value))
+                            }
+                            className="w-24 bg-surface/70 border border-outline-variant/60 hover:border-outline focus:border-primary focus:outline-none rounded-sm px-2 py-1 font-mono text-mono-md text-on-surface text-right tabular-nums"
+                          />
+                        </div>
+                      </td>
+                      <td className="px-gutter-sm py-2">
+                        <div className="flex items-center justify-end gap-1">
                           <input
                             type="number"
                             min={0}
@@ -1197,22 +1367,11 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
                           <span className="font-mono text-mono-sm text-on-surface-variant">W</span>
                         </div>
                       </td>
-                      <td className="px-gutter-md py-2">
-                        <div className="flex items-center justify-end gap-1">
-                          <span className="font-mono text-mono-sm text-on-surface-variant">₹</span>
-                          <input
-                            type="number"
-                            min={0}
-                            step={50}
-                            aria-label={`Estimated cost for ${row.productName}`}
-                            value={row.estimatedCost}
-                            onFocus={(e) => e.currentTarget.select()}
-                            onChange={(e) =>
-                              handleUpdateBoqRow(row, 'estimatedCost', e.target.value === '' ? 0 : Number(e.target.value))
-                            }
-                            className="w-28 bg-surface/70 border border-outline-variant/60 hover:border-outline focus:border-primary focus:outline-none rounded-sm px-2 py-1 font-mono text-mono-md text-on-surface text-right tabular-nums"
-                          />
-                        </div>
+                      <td
+                        className="px-gutter-md py-2 font-mono text-mono-md text-on-surface text-right tabular-nums whitespace-nowrap"
+                        title={`${row.quantity} × ${formatINR(row.unitPrice)}`}
+                      >
+                        {formatINR(row.estimatedCost)}
                       </td>
                       <td className="px-gutter-sm py-2 text-center no-print">
                         <button
@@ -1239,6 +1398,9 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
                   <td className="px-gutter-sm py-gutter-md font-mono text-mono-md text-primary text-right tabular-nums">
                     {effectiveTotalPoints}
                   </td>
+                  <td className="px-gutter-sm py-gutter-md font-mono text-mono-sm text-on-surface-variant text-right">
+                    —
+                  </td>
                   <td className="px-gutter-sm py-gutter-md font-mono text-mono-md text-secondary text-right tabular-nums">
                     {effectiveTotalKw.toFixed(2)} kW
                   </td>
@@ -1246,6 +1408,165 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
                     {formatINR(effectiveTotalCost)}
                   </td>
                   <td className="no-print" />
+                </tr>
+                {reconciledBoq.totalGstConfigured > 0 && (
+                  <>
+                    <tr className="border-t border-outline-variant bg-surface-container-low">
+                      <td colSpan={5} className="px-gutter-md py-gutter-sm font-label text-label-sm text-on-surface-variant">
+                        Configured GST Total
+                      </td>
+                      <td className="px-gutter-md py-gutter-sm font-mono text-mono-md text-on-surface-variant text-right tabular-nums">
+                        {formatINR(reconciledBoq.totalGstConfigured)}
+                      </td>
+                      <td className="no-print" />
+                    </tr>
+                    <tr className="border-t border-outline bg-surface-container-high">
+                      <td colSpan={5} className="px-gutter-md py-gutter-sm font-label text-label-md text-on-surface">
+                        Grand Total (Incl. Configured GST)
+                      </td>
+                      <td className="px-gutter-md py-gutter-sm font-mono text-mono-md text-primary text-right tabular-nums">
+                        {formatINR(effectiveTotalCost + reconciledBoq.totalGstConfigured)}
+                      </td>
+                      <td className="no-print" />
+                    </tr>
+                  </>
+                )}
+              </tfoot>
+            </table>
+          </div>
+
+          {/* Wire Consumption Summary (at the end of the BOQ — all floors, deduplicated routes) */}
+          <div className="w-full overflow-x-auto bg-surface-container border border-outline-variant rounded-lg">
+            <div className="px-gutter-md py-gutter-sm border-b border-outline-variant bg-surface-container-high flex flex-wrap items-center justify-between gap-gutter-sm">
+              <div className="flex flex-col gap-0.5">
+                <h3 className="font-headline text-headline-sm text-on-surface">
+                  Wire Consumption Summary
+                </h3>
+                <p className="font-mono text-mono-sm text-on-surface-variant">
+                  Actual saved wiring routes across all floors
+                  {wireConsumption.uniqueRouteCount > 0
+                    ? ` · ${wireConsumption.uniqueRouteCount} unique route${wireConsumption.uniqueRouteCount === 1 ? '' : 's'} (${wireConsumption.floorsCovered.length} floor${wireConsumption.floorsCovered.length === 1 ? '' : 's'})`
+                    : ''}
+                  {wireConsumption.duplicateRoutesExcluded > 0
+                    ? ` · ${wireConsumption.duplicateRoutesExcluded} duplicate${wireConsumption.duplicateRoutesExcluded === 1 ? '' : 's'} excluded`
+                    : ''}
+                </p>
+              </div>
+              <label className="inline-flex items-center gap-gutter-xs font-label text-label-sm text-on-surface-variant no-print">
+                <span>Procurement Allowance (Separate):</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={50}
+                  step={1}
+                  aria-label="Wire procurement allowance percentage"
+                  value={wireAllowancePct}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    setWireAllowancePct(
+                      Number.isFinite(next) ? Math.max(0, Math.min(50, next)) : 0
+                    );
+                  }}
+                  className="w-16 bg-surface/70 border border-outline-variant/60 hover:border-outline focus:border-primary focus:outline-none rounded-sm px-2 py-0.5 font-mono text-mono-sm text-on-surface text-right tabular-nums"
+                />
+                <span className="font-mono text-mono-sm">%</span>
+              </label>
+            </div>
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-outline bg-surface-container-low">
+                  <th scope="col" className="px-gutter-md py-gutter-sm font-label text-label-sm text-on-surface-variant">
+                    Wire Type
+                  </th>
+                  <th scope="col" className="px-gutter-md py-gutter-sm font-label text-label-sm text-on-surface-variant">
+                    Cable Size
+                  </th>
+                  <th scope="col" className="px-gutter-sm py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">
+                    Routes
+                  </th>
+                  <th scope="col" className="px-gutter-md py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">
+                    Installed Length (m)
+                  </th>
+                  <th scope="col" className="px-gutter-md py-gutter-sm font-label text-label-sm text-on-surface-variant text-right">
+                    Procurement Allowance (+{wireConsumption.procurementAllowancePct}%)
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-outline-variant">
+                {wireConsumption.rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="px-gutter-md py-gutter-md font-body text-body-sm text-on-surface-variant">
+                      No saved wiring routes found across project floors. Route cables in Design Studio to calculate wire lengths.
+                    </td>
+                    <td className="px-gutter-md py-gutter-md font-mono text-mono-sm text-on-surface-variant text-right">
+                      Not calculated
+                    </td>
+                    <td className="px-gutter-md py-gutter-md font-mono text-mono-sm text-on-surface-variant text-right">
+                      Not calculated
+                    </td>
+                  </tr>
+                ) : (
+                  wireConsumption.rows.map((wr) => (
+                    <tr key={wr.key} className="hover:bg-surface-container-high/70 transition-colors duration-state-change">
+                      <td className="px-gutter-md py-2">
+                        <div className="font-body text-body-sm text-on-surface">{wr.wireType}</div>
+                        <div className="font-mono text-[11px] text-on-surface-variant">
+                          {wr.cableMaterial}
+                          {wr.floors.length > 0
+                            ? ` · ${wr.floors.map((f) => getFloorLabel(project, f)).join(', ')}`
+                            : ''}
+                          {wr.uncalculatedRouteCount > 0
+                            ? ` · ${wr.uncalculatedRouteCount} route${wr.uncalculatedRouteCount === 1 ? '' : 's'} not calculated`
+                            : ''}
+                        </div>
+                      </td>
+                      <td className="px-gutter-md py-2 font-mono text-mono-sm text-on-surface-variant whitespace-nowrap">
+                        {wr.cableSizeLabel}
+                      </td>
+                      <td className="px-gutter-sm py-2 font-mono text-mono-sm text-on-surface text-right tabular-nums">
+                        {wr.routeCount}
+                      </td>
+                      <td className="px-gutter-md py-2 font-mono text-mono-md text-primary text-right tabular-nums whitespace-nowrap">
+                        {wr.installedLengthM !== null
+                          ? `${wr.installedLengthM.toFixed(2)} m`
+                          : 'Not calculated'}
+                      </td>
+                      <td className="px-gutter-md py-2 font-mono text-mono-sm text-on-surface-variant text-right tabular-nums whitespace-nowrap">
+                        {wr.procurementAllowanceM !== null
+                          ? `+${wr.procurementAllowanceM.toFixed(2)} m`
+                          : 'Not calculated'}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+              <tfoot>
+                <tr className="border-t border-outline bg-surface-container-high">
+                  <td colSpan={2} className="px-gutter-md py-gutter-sm font-label text-label-md text-on-surface">
+                    Overall Total Wire Length (Installed)
+                  </td>
+                  <td className="px-gutter-sm py-gutter-sm font-mono text-mono-sm text-on-surface text-right tabular-nums">
+                    {wireConsumption.uniqueRouteCount}
+                  </td>
+                  <td className="px-gutter-md py-gutter-sm font-mono text-mono-md text-primary text-right tabular-nums whitespace-nowrap">
+                    {wireConsumption.overallInstalledLengthM !== null
+                      ? `${wireConsumption.overallInstalledLengthM.toFixed(2)} m`
+                      : 'Not calculated'}
+                  </td>
+                  <td className="px-gutter-md py-gutter-sm font-mono text-mono-sm text-on-surface-variant text-right">
+                    —
+                  </td>
+                </tr>
+                <tr className="border-t border-outline-variant bg-surface-container-low">
+                  <td colSpan={4} className="px-gutter-md py-gutter-sm font-label text-label-sm text-on-surface-variant">
+                    Procurement Allowance ({wireConsumption.procurementAllowancePct}% — kept separate from installed length)
+                  </td>
+                  <td className="px-gutter-md py-gutter-sm font-mono text-mono-md text-secondary text-right tabular-nums whitespace-nowrap">
+                    {wireConsumption.overallProcurementAllowanceM !== null
+                      ? `+${wireConsumption.overallProcurementAllowanceM.toFixed(2)} m`
+                      : 'Not calculated'}
+                  </td>
                 </tr>
               </tfoot>
             </table>
@@ -1496,6 +1817,7 @@ export const ProjectSummaryPage: React.FC<ProjectSummaryPageProps> = ({
       <PdfExportModal
         open={pdfModalOpen}
         project={project}
+        wireProcurementAllowancePct={wireAllowancePct}
         onClose={() => setPdfModalOpen(false)}
         onExported={(count) =>
           notify(`Exported ${count}-page Architectural & Electrical PDF Drawing Package.`)

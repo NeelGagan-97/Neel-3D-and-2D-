@@ -12,6 +12,7 @@ import {
 interface PdfExportModalProps {
   open: boolean;
   project: ProjectData;
+  wireProcurementAllowancePct?: number;
   onClose: () => void;
   onExported?: (pageCount: number) => void;
 }
@@ -19,6 +20,7 @@ interface PdfExportModalProps {
 export const PdfExportModal: React.FC<PdfExportModalProps> = ({
   open,
   project,
+  wireProcurementAllowancePct,
   onClose,
   onExported,
 }) => {
@@ -33,7 +35,12 @@ export const PdfExportModal: React.FC<PdfExportModalProps> = ({
     setExporting(true);
     window.setTimeout(() => {
       try {
-        const count = downloadProjectPdfPackage(project, opts);
+        const count = downloadProjectPdfPackage(project, {
+          ...opts,
+          ...(wireProcurementAllowancePct !== undefined
+            ? { wireProcurementAllowancePct }
+            : {}),
+        });
         onExported?.(count);
         onClose();
       } catch (err) {

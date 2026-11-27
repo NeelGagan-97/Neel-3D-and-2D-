@@ -361,6 +361,7 @@ export interface BoqRowOverride {
   productName?: string;
   category?: string;
   quantityDelta?: number;
+  unitPrice?: number;
   wattageDelta?: number;
   costDelta?: number;
 }
@@ -465,6 +466,7 @@ export interface BoqRow {
   productName: string;
   category: string;
   quantity: number;
+  unitPrice?: number;
   totalWattage: number;
   estimatedCost: number;
 }

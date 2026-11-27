@@ -5,7 +5,9 @@ import {
   BUILDING_TYPE_LABELS,
   computeReconciledBoq,
   computeReconciledElectricalSchedule,
+  computeWireConsumptionSummary,
   computeWireLengthMeters,
+  DEFAULT_INSTALLATION_ALLOWANCE_PCT,
   getFloorLabel,
   getProjectFloors,
   inferBuildingType,
@@ -18,6 +20,8 @@ import { formatArea, formatLength, getItemFloor } from './geometry';
 export interface ExcelBoqOptions {
   /** Optional configurable wastage / procurement allowance % for cables (0 by default so raw geometry length is unambiguous) */
   cableAllowancePercent?: number;
+  /** Separate procurement allowance % shown in the Wire Consumption Summary (default 10%, never mixed into actual installed length) */
+  wireProcurementAllowancePct?: number;
 }
 
 export interface ExcelBoqSheetDefinition {
@@ -68,6 +72,10 @@ export function buildExcelBoqSheets(
 ): ExcelBoqSheetDefinition[] {
   const reconciled = computeReconciledElectricalSchedule(project);
   const boq = computeReconciledBoq(project, options);
+  const wireSummary = computeWireConsumptionSummary(project, {
+    procurementAllowancePct:
+      options.wireProcurementAllowancePct ?? DEFAULT_INSTALLATION_ALLOWANCE_PCT,
+  });
   const floors = getProjectFloors(project);
   const wires = project.wires ?? [];
   const units = project.site.units;
@@ -85,7 +93,11 @@ export function buildExcelBoqSheets(
       `Total Built-Up Area: ${formatArea(reconciled.totalBuiltUpAreaSqM, units)}`,
       `Electrical Items: ${reconciled.totalElectricalItems} (${reconciled.branchLoadPointsCount} Branch + ${reconciled.distributionEquipmentCount} DB/EP)`,
       `Connected Load: ${reconciled.totalConnectedLoadWatts} W (${reconciled.totalConnectedLoadKw} kW)`,
-      `Routed Cables: ${reconciled.totalWireLengthM.toFixed(2)} m (${reconciled.totalWires} runs)`,
+      `Routed Cables: ${
+        wireSummary.overallInstalledLengthM !== null
+          ? `${wireSummary.overallInstalledLengthM.toFixed(2)} m (${wireSummary.uniqueRouteCount} runs)`
+          : 'Not calculated'
+      }`,
       `Generated: ${new Date().toLocaleDateString('en-IN')}`,
     ],
     [],
@@ -102,7 +114,8 @@ export function buildExcelBoqSheets(
       'Cable Size',
       'Unit',
       'Quantity',
-      'Unit Price (INR)',
+      'Price/Unit (₹)',
+      'Estimated Cost (₹)',
       'Price Source',
       'GST %',
       'GST Amount (INR)',
@@ -125,12 +138,84 @@ export function buildExcelBoqSheets(
     r.unit,
     r.quantity,
     r.unitPrice !== null ? r.unitPrice : 'Not configured',
+    r.subtotal !== null ? r.subtotal : 'Pending rate',
     PRICE_SOURCE_LABEL[r.priceSource],
     r.gstPercent !== null ? r.gstPercent : 'Not configured',
     r.gstAmount !== null ? r.gstAmount : '—',
     r.total !== null ? r.total : 'Pending rate',
     r.notes,
   ]);
+
+  const wireFloorsLabel =
+    wireSummary.floorsCovered.length > 0
+      ? wireSummary.floorsCovered.map((f) => getFloorLabel(project, f)).join(', ')
+      : '—';
+
+  const wireSummaryBlock: (string | number)[][] = [
+    [],
+    ['WIRE CONSUMPTION SUMMARY (ACTUAL SAVED ROUTES — ALL FLOORS, DUPLICATES EXCLUDED)'],
+    [
+      'Wire Type',
+      'Cable Size',
+      'Material',
+      'Unique Routes',
+      'Floors Covered',
+      'Installed Length (m)',
+      `Procurement Allowance (${wireSummary.procurementAllowancePct}% — Separate, m)`,
+      'Notes',
+    ],
+    ...(wireSummary.rows.length > 0
+      ? wireSummary.rows.map((wr) => [
+          wr.wireType,
+          wr.cableSizeLabel,
+          wr.cableMaterial,
+          wr.routeCount,
+          wr.floors.map((f) => getFloorLabel(project, f)).join(', '),
+          wr.installedLengthM !== null ? wr.installedLengthM : 'Not calculated',
+          wr.procurementAllowanceM !== null ? wr.procurementAllowanceM : 'Not calculated',
+          wr.uncalculatedRouteCount > 0
+            ? `${wr.uncalculatedRouteCount} route(s) not calculated (missing/invalid geometry)`
+            : 'Calculated from saved wiring route geometry',
+        ])
+      : [
+          [
+            'No saved wiring routes',
+            '—',
+            '—',
+            0,
+            '—',
+            'Not calculated',
+            'Not calculated',
+            'Wire length unavailable — route wires in Design Studio',
+          ],
+        ]),
+    [
+      'OVERALL TOTAL WIRE LENGTH (INSTALLED)',
+      '',
+      '',
+      wireSummary.uniqueRouteCount,
+      wireFloorsLabel,
+      wireSummary.overallInstalledLengthM !== null
+        ? wireSummary.overallInstalledLengthM
+        : 'Not calculated',
+      '',
+      wireSummary.duplicateRoutesExcluded > 0
+        ? `${wireSummary.duplicateRoutesExcluded} duplicate route(s) excluded across all floors`
+        : 'Actual installed wire length across all floors (excludes procurement allowance)',
+    ],
+    [
+      `PROCUREMENT ALLOWANCE (${wireSummary.procurementAllowancePct}% — SEPARATE)`,
+      '',
+      '',
+      '',
+      '',
+      '',
+      wireSummary.overallProcurementAllowanceM !== null
+        ? wireSummary.overallProcurementAllowanceM
+        : 'Not calculated',
+      'Kept strictly separate from actual installed wire length',
+    ],
+  ];
 
   const sheet1Footer: (string | number)[][] = [
     [],
@@ -148,6 +233,7 @@ export function buildExcelBoqSheets(
       '',
       boq.totalComponentQty,
       '',
+      boq.subtotalConfigured,
       '',
       '',
       '',
@@ -158,6 +244,7 @@ export function buildExcelBoqSheets(
     ],
     [
       'CONFIGURED GST TOTAL',
+      '',
       '',
       '',
       '',
@@ -190,6 +277,7 @@ export function buildExcelBoqSheets(
       '',
       '',
       '',
+      boq.subtotalConfigured,
       '',
       '',
       boq.totalGstConfigured,
@@ -202,8 +290,8 @@ export function buildExcelBoqSheets(
 
   const sheet1: ExcelBoqSheetDefinition = {
     name: 'Consolidated BOQ',
-    rows: [...sheet1Header, ...sheet1Rows, ...sheet1Footer],
-    columnWidths: [22, 18, 16, 32, 18, 36, 22, 13, 13, 14, 8, 10, 16, 16, 12, 16, 16, 40],
+    rows: [...sheet1Header, ...sheet1Rows, ...sheet1Footer, ...wireSummaryBlock],
+    columnWidths: [24, 18, 16, 32, 18, 36, 22, 13, 13, 14, 8, 10, 16, 18, 16, 12, 16, 16, 42],
   };
 
   // SHEET 2: Category Subtotals (100% reconciled with Consolidated BOQ)
@@ -262,8 +350,9 @@ export function buildExcelBoqSheets(
       'Cable Size',
       'Unit',
       'Quantity',
+      'Price/Unit (₹)',
       'Total Load (W)',
-      'Unit Price (INR)',
+      'Estimated Cost (₹)',
       'Price Source',
       'GST %',
       'GST Amount (INR)',
@@ -294,8 +383,9 @@ export function buildExcelBoqSheets(
         r.cableSize,
         r.unit,
         r.quantity,
-        r.totalLoadW,
         r.unitPrice !== null ? r.unitPrice : 'Not configured',
+        r.totalLoadW,
+        r.subtotal !== null ? r.subtotal : 'Pending rate',
         PRICE_SOURCE_LABEL[r.priceSource],
         r.gstPercent !== null ? r.gstPercent : 'Not configured',
         r.gstAmount !== null ? r.gstAmount : '—',
@@ -320,6 +410,7 @@ export function buildExcelBoqSheets(
       '',
       '—',
       fb.componentQty,
+      '',
       fb.loadWatts,
       fb.subtotalConfigured,
       'Excl. GST',
@@ -341,6 +432,7 @@ export function buildExcelBoqSheets(
     '',
     '—',
     floorWiseCompQty,
+    '',
     floorWiseLoadSum,
     Number(floorWiseSubSum.toFixed(2)),
     'Excl. GST',
@@ -352,7 +444,7 @@ export function buildExcelBoqSheets(
   const sheet3: ExcelBoqSheetDefinition = {
     name: 'Floor-Wise BOQ',
     rows: floorSheetRows,
-    columnWidths: [24, 13, 24, 18, 32, 18, 20, 14, 8, 10, 14, 16, 16, 12, 16, 16],
+    columnWidths: [24, 13, 24, 18, 32, 18, 20, 14, 8, 10, 16, 14, 18, 16, 12, 16, 16],
   };
 
   // SHEET 4: Cable & Wiring Schedule
@@ -417,7 +509,7 @@ export function buildExcelBoqSheets(
       w.cableMaterial,
       w.cores,
       mfr ? `${mfr} ${mdl ?? ''}`.trim() : 'Not linked',
-      lenM,
+      lenM > 0 ? lenM : 'Not calculated',
       effectiveRate !== null ? effectiveRate : 'Not configured',
       effectiveGst !== null ? effectiveGst : 'Not configured',
       sizeCheck.status === 'ok' ? 'Within configured range' : sizeCheck.warning || 'Check sizing',

@@ -14,7 +14,9 @@ import {
   computeReconciledBoq,
   computeReconciledElectricalSchedule,
   computeStaircaseFootprint,
+  computeWireConsumptionSummary,
   computeWireLengthMeters,
+  DEFAULT_INSTALLATION_ALLOWANCE_PCT,
   getFloorBoundaryMeters,
   getFloorLabel,
   getProjectFloors,
@@ -50,6 +52,8 @@ export interface PdfPackageOptions {
   includeSummaryAndBoq: boolean;
   includeAnnotations: boolean;
   selectedFloors?: number[];
+  /** Separate procurement allowance % shown in Wire Consumption Summary (default 10%). */
+  wireProcurementAllowancePct?: number;
 }
 
 export const DEFAULT_PDF_PACKAGE_OPTIONS: PdfPackageOptions = {
@@ -2322,9 +2326,13 @@ function drawSummaryAndDiagnosticsSheets(
     units: string;
     buildingTypeLabel: string;
     dateStr: string;
-  }
+  },
+  wireProcurementAllowancePct: number = DEFAULT_INSTALLATION_ALLOWANCE_PCT
 ): Array<{ sheetNo: string; title: string; draw: (ctx: CanvasRenderingContext2D, pageIndex: number, pageTotal: number) => void }> {
   const boq = computeReconciledBoq(project);
+  const wireSummary = computeWireConsumptionSummary(project, {
+    procurementAllowancePct: wireProcurementAllowancePct,
+  });
   const ui = getUiScale(widthPx, heightPx);
   const pages: Array<{
     sheetNo: string;
@@ -2400,14 +2408,16 @@ function drawSummaryAndDiagnosticsSheets(
               row.unitPrice !== null
                 ? `${formatINR(row.unitPrice)}${row.priceSource === 'override' ? '*' : ''}`
                 : 'Not cfg';
+            const estCostStr = row.subtotal !== null ? formatINR(row.subtotal) : 'Pending';
             const totalStr = row.total !== null ? formatINR(row.total) : 'Pending';
             return {
               cells: [
                 nameTag,
                 row.kind === 'cable' ? row.cableSize : row.productCategory,
                 `${row.quantity} ${row.unit}`,
-                row.totalLoadW > 0 ? `${row.totalLoadW} W` : '—',
                 rateStr,
+                row.totalLoadW > 0 ? `${row.totalLoadW} W` : '—',
+                estCostStr,
                 row.gstPercent !== null ? `${row.gstPercent}%` : '—',
                 totalStr,
               ],
@@ -2421,11 +2431,16 @@ function drawSummaryAndDiagnosticsSheets(
 
         boqTableRows.push({
           cells: [
-            `SUBTOTAL (EXCL. GST) · ${boq.totalComponentQty} Items + ${boq.totalCableLengthM.toFixed(1)}m Cable`,
+            `SUBTOTAL (EXCL. GST) · ${boq.totalComponentQty} Items + ${
+              wireSummary.overallInstalledLengthM !== null
+                ? `${wireSummary.overallInstalledLengthM.toFixed(1)}m Wire`
+                : 'Wire: Not calc.'
+            }`,
             boq.unpricedRowCount > 0 ? `${boq.unpricedRowCount} Pending` : 'All Priced',
             String(boq.totalComponentQty),
-            `${boq.totalLoadWatts} W`,
             '—',
+            `${boq.totalLoadWatts} W`,
+            formatINR(boq.subtotalConfigured),
             '—',
             formatINR(boq.subtotalConfigured),
           ],
@@ -2436,8 +2451,9 @@ function drawSummaryAndDiagnosticsSheets(
             `GRAND TOTAL (INCL. CONFIGURED GST: ${formatINR(boq.totalGstConfigured)})`,
             boq.overrideRowCount > 0 ? `*${boq.overrideRowCount} Override` : 'Reconciled',
             String(reconciled.totalElectricalItems),
-            `${reconciled.totalConnectedLoadKw} kW`,
             '—',
+            `${reconciled.totalConnectedLoadKw} kW`,
+            formatINR(boq.subtotalConfigured),
             formatINR(boq.totalGstConfigured),
             formatINR(boq.grandTotalConfigured),
           ],
@@ -2451,12 +2467,13 @@ function drawSummaryAndDiagnosticsSheets(
           ctx,
           { x: leftRect.x, y: leftRect.y + Math.round(23 * ui), w: leftRect.w, h: mainBoqH },
           [
-            { label: 'ITEM / DESCRIPTION', widthFrac: 0.34 },
-            { label: 'CAT / SIZE', widthFrac: 0.14 },
-            { label: 'QTY', widthFrac: 0.1, align: 'right' },
-            { label: 'LOAD', widthFrac: 0.1, align: 'right' },
-            { label: 'RATE', widthFrac: 0.11, align: 'right' },
-            { label: 'GST', widthFrac: 0.08, align: 'right' },
+            { label: 'ITEM / DESCRIPTION', widthFrac: 0.27 },
+            { label: 'CAT / SIZE', widthFrac: 0.11 },
+            { label: 'QTY', widthFrac: 0.08, align: 'right' },
+            { label: 'PRICE/UNIT (₹)', widthFrac: 0.11, align: 'right' },
+            { label: 'LOAD', widthFrac: 0.09, align: 'right' },
+            { label: 'EST. COST (₹)', widthFrac: 0.12, align: 'right' },
+            { label: 'GST', widthFrac: 0.09, align: 'right' },
             { label: 'TOTAL', widthFrac: 0.13, align: 'right' },
           ],
           boqTableRows,
@@ -2508,33 +2525,79 @@ function drawSummaryAndDiagnosticsSheets(
           );
         }
 
-        // Right: Cable Summary + Severity-Separated Validation Diagnostics
+        // Right: Wire Consumption Summary (All Floors, Deduplicated) + Validation Diagnostics
         ctx.fillStyle = '#0F172A';
         ctx.font = hdrFont;
-        ctx.fillText('ROUTED CABLE TOTALS & ENGINEERING DIAGNOSTICS', rightRect.x, rightRect.y + Math.round(15 * ui));
+        ctx.fillText(
+          'WIRE CONSUMPTION SUMMARY (ALL FLOORS, UNIQUE ROUTES)',
+          rightRect.x,
+          rightRect.y + Math.round(15 * ui)
+        );
 
         const stripY = rightRect.y + Math.round(23 * ui);
-        const cats = Object.keys(WIRE_CATEGORY_LABELS) as WireCategory[];
-        const cableRows: Array<{ cells: string[]; style?: TableRowStyle }> = cats.map((cat) => ({
-          cells: [WIRE_CATEGORY_LABELS[cat], `${reconciled.wireLengthByCategory[cat].toFixed(2)} m`],
-        }));
-        cableRows.push({
+        const wireTableRows: Array<{ cells: string[]; style?: TableRowStyle }> =
+          wireSummary.rows.length > 0
+            ? wireSummary.rows.map((wr) => ({
+                cells: [
+                  wr.wireType,
+                  wr.cableSizeLabel,
+                  wr.installedLengthM !== null ? `${wr.installedLengthM.toFixed(2)} m` : 'Not calculated',
+                  wr.procurementAllowanceM !== null
+                    ? `+${wr.procurementAllowanceM.toFixed(2)} m`
+                    : 'Not calculated',
+                ],
+                style:
+                  wr.installedLengthM === null
+                    ? { fill: '#FFFBEB', textColor: '#92400E' }
+                    : undefined,
+              }))
+            : [
+                {
+                  cells: ['No saved wiring routes', '—', 'Not calculated', 'Not calculated'],
+                  style: { fill: '#FFFBEB', textColor: '#92400E' },
+                },
+              ];
+
+        wireTableRows.push({
           cells: [
-            `TOTAL ROUTED CABLES (${reconciled.totalWires} runs, ${reconciled.interFloorWireCount} inter-floor)`,
-            `${reconciled.totalWireLengthM.toFixed(2)} m`,
+            `OVERALL TOTAL WIRE LENGTH (INSTALLED · ${wireSummary.uniqueRouteCount} runs)`,
+            wireSummary.duplicateRoutesExcluded > 0
+              ? `-${wireSummary.duplicateRoutesExcluded} dup`
+              : `${wireSummary.floorsCovered.length || 0} flr`,
+            wireSummary.overallInstalledLengthM !== null
+              ? `${wireSummary.overallInstalledLengthM.toFixed(2)} m`
+              : 'Not calculated',
+            '—',
           ],
           style: { fill: '#F0FDF4', textColor: '#166534', bold: true },
         });
+        wireTableRows.push({
+          cells: [
+            `PROCUREMENT ALLOWANCE (+${wireSummary.procurementAllowancePct}% — SEPARATE)`,
+            'Separate',
+            '—',
+            wireSummary.overallProcurementAllowanceM !== null
+              ? `+${wireSummary.overallProcurementAllowanceM.toFixed(2)} m`
+              : 'Not calculated',
+          ],
+          style: { fill: '#F8FAFC', textColor: '#334155', bold: true },
+        });
 
+        const wireTblH = Math.min(
+          Math.round(255 * ui),
+          Math.round((wireTableRows.length + 1) * Math.round(23 * ui) + Math.round(28 * ui))
+        );
         const afterCablesY = drawAlignedTable(
           ctx,
-          { x: rightRect.x, y: stripY, w: rightRect.w, h: Math.round(210 * ui) },
+          { x: rightRect.x, y: stripY, w: rightRect.w, h: wireTblH },
           [
-            { label: 'CONDUCTOR CATEGORY', widthFrac: 0.72 },
-            { label: 'ROUTED LENGTH', widthFrac: 0.28, align: 'right' },
+            { label: 'WIRE TYPE', widthFrac: 0.42 },
+            { label: 'CABLE SIZE', widthFrac: 0.18 },
+            { label: 'INSTALLED (m)', widthFrac: 0.2, align: 'right' },
+            { label: `ALLOW. (${wireSummary.procurementAllowancePct}%)`, widthFrac: 0.2, align: 'right' },
           ],
-          cableRows,
-          { rowHeight: Math.round(24 * ui), headerHeight: Math.round(27 * ui), fontSize: tblFont }
+          wireTableRows,
+          { rowHeight: Math.round(23 * ui), headerHeight: Math.round(27 * ui), fontSize: Math.round(10.2 * ui) }
         );
 
         // Severity Summary Badges
@@ -2861,13 +2924,20 @@ export function downloadProjectPdfPackage(
   }
 
   const summaryPages = options.includeSummaryAndBoq
-    ? drawSummaryAndDiagnosticsSheets(project, reconciled, widthPx, heightPx, {
-        projectName: project.name,
-        refCode: project.refCode,
-        units: unitsLabel,
-        buildingTypeLabel,
-        dateStr,
-      })
+    ? drawSummaryAndDiagnosticsSheets(
+        project,
+        reconciled,
+        widthPx,
+        heightPx,
+        {
+          projectName: project.name,
+          refCode: project.refCode,
+          units: unitsLabel,
+          buildingTypeLabel,
+          dateStr,
+        },
+        options.wireProcurementAllowancePct ?? DEFAULT_INSTALLATION_ALLOWANCE_PCT
+      )
     : [];
 
   summaryPages.forEach((sp) => sheetIndex.push({ sheetNo: sp.sheetNo, title: sp.title }));

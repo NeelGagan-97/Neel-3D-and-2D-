@@ -3324,11 +3324,25 @@ export interface ReconciledBoqResult {
   overrideRowCount: number;
 }
 
-function resolveBoqPointRate(pt: ElectricalPoint): {
+function resolveBoqPointRate(
+  pt: ElectricalPoint,
+  boqUnitPriceOverride?: number
+): {
   price: number | null;
   source: BoqPriceSource;
   note: string;
 } {
+  if (
+    typeof boqUnitPriceOverride === 'number' &&
+    Number.isFinite(boqUnitPriceOverride) &&
+    boqUnitPriceOverride >= 0
+  ) {
+    return {
+      price: Number(boqUnitPriceOverride.toFixed(2)),
+      source: 'override',
+      note: 'BOQ Price/Unit override',
+    };
+  }
   if (typeof pt.manualPriceOverride === 'number' && Number.isFinite(pt.manualPriceOverride) && pt.manualPriceOverride >= 0) {
     return {
       price: Number(pt.manualPriceOverride.toFixed(2)),
@@ -3368,9 +3382,11 @@ function buildBoqRowsForSubset(
   allowancePct: number
 ): ReconciledBoqRow[] {
   const grouped = new Map<string, ReconciledBoqRow & { circuitSet: Set<string> }>();
+  const boqEdits = project.summaryOverrides?.boqEdits;
 
   points.forEach((pt) => {
-    const { price, source, note } = resolveBoqPointRate(pt);
+    const boqEdit = boqEdits?.[pt.itemType];
+    const { price, source, note } = resolveBoqPointRate(pt, boqEdit?.unitPrice);
     const catMeta = CATALOG_MAP[pt.itemType];
     const category = catMeta ? catMeta.boqCategory : pt.category;
     const manufacturer = pt.manufacturer?.trim() || 'Not specified';
@@ -3592,10 +3608,17 @@ export function computeReconciledBoq(
   // Include explicit user-added custom BOQ rows from Project Summary if present
   (project.summaryOverrides?.addedBoqRows ?? []).forEach((row) => {
     const unitRate =
-      row.quantity > 0 && row.estimatedCost > 0
-        ? Number((row.estimatedCost / row.quantity).toFixed(2))
-        : null;
-    const sub = row.estimatedCost > 0 ? Number(row.estimatedCost.toFixed(2)) : null;
+      typeof row.unitPrice === 'number' && Number.isFinite(row.unitPrice) && row.unitPrice >= 0
+        ? Number(row.unitPrice.toFixed(2))
+        : row.quantity > 0 && row.estimatedCost > 0
+          ? Number((row.estimatedCost / row.quantity).toFixed(2))
+          : null;
+    const computedCost =
+      unitRate !== null
+        ? Number((row.quantity * unitRate).toFixed(2))
+        : row.estimatedCost > 0
+          ? Number(row.estimatedCost.toFixed(2))
+          : null;
     rows.push({
       kind: 'manual',
       productCategory: row.category || 'Custom',
@@ -3613,9 +3636,9 @@ export function computeReconciledBoq(
       unitPrice: unitRate,
       priceSource: unitRate !== null ? 'override' : 'missing',
       gstPercent: null,
-      subtotal: sub,
+      subtotal: computedCost,
       gstAmount: null,
-      total: sub,
+      total: computedCost,
       notes: 'Manual override row',
     });
   });
@@ -3743,3 +3766,236 @@ export function computeReconciledBoq(
     overrideRowCount,
   };
 }
+
+// ============================================================
+// BOQ WIRE CONSUMPTION SUMMARY (ALL FLOORS, DEDUPLICATED)
+// ============================================================
+
+export interface WireConsumptionRow {
+  key: string;
+  wireType: string;
+  category: WireCategory;
+  cableSizeSqMm: number | null;
+  cableSizeLabel: string;
+  cableMaterial: CableMaterial;
+  routeCount: number;
+  calculatedRouteCount: number;
+  uncalculatedRouteCount: number;
+  floors: number[];
+  /** Actual installed wire length strictly from saved wiring route geometry (null if unavailable). */
+  installedLengthM: number | null;
+  /** Procurement allowance kept strictly separate from installedLengthM (null if unavailable). */
+  procurementAllowanceM: number | null;
+}
+
+export interface WireConsumptionSummary {
+  procurementAllowancePct: number;
+  rows: WireConsumptionRow[];
+  totalSavedRoutes: number;
+  uniqueRouteCount: number;
+  calculatedRouteCount: number;
+  uncalculatedRouteCount: number;
+  duplicateRoutesExcluded: number;
+  floorsCovered: number[];
+  /** Overall installed wire length across all floors (null if unavailable — display "Not calculated"). */
+  overallInstalledLengthM: number | null;
+  /** Overall procurement allowance kept strictly separate from installed length (null if unavailable). */
+  overallProcurementAllowanceM: number | null;
+}
+
+/**
+ * Computes the authoritative BOQ Wire Consumption Summary from actual saved wiring routes
+ * and calibrated drawing geometry across ALL project floors.
+ * - Deduplicates repeated wire IDs and duplicate undirected (fromPointId, toPointId, category) routes.
+ * - Groups strictly by wire type, cable size, and cable material.
+ * - Keeps procurement allowance strictly separate from actual installed wire length.
+ * - Returns null lengths (never invented values) when wiring geometry is unavailable.
+ */
+export function computeWireConsumptionSummary(
+  project: ProjectData,
+  options?: { procurementAllowancePct?: number }
+): WireConsumptionSummary {
+  const allowancePct = Math.max(
+    0,
+    Math.min(
+      50,
+      Number.isFinite(options?.procurementAllowancePct)
+        ? (options!.procurementAllowancePct as number)
+        : DEFAULT_INSTALLATION_ALLOWANCE_PCT
+    )
+  );
+
+  const rawWires = project.wires ?? [];
+  const pointById = new Map((project.points ?? []).map((p) => [p.id, p]));
+
+  const seenWireIds = new Set<string>();
+  const seenRouteKeys = new Set<string>();
+  const floorsSet = new Set<number>();
+
+  let duplicateRoutesExcluded = 0;
+  let uniqueRouteCount = 0;
+  let calculatedRouteCount = 0;
+  let uncalculatedRouteCount = 0;
+
+  interface MutableGroup {
+    key: string;
+    wireType: string;
+    category: WireCategory;
+    cableSizeSqMm: number | null;
+    cableSizeLabel: string;
+    cableMaterial: CableMaterial;
+    routeCount: number;
+    calculatedRouteCount: number;
+    uncalculatedRouteCount: number;
+    floors: Set<number>;
+    installedSumM: number;
+  }
+
+  const groups = new Map<string, MutableGroup>();
+
+  rawWires.forEach((w) => {
+    if (!w) return;
+
+    // Deduplicate identical wire IDs
+    if (w.id && seenWireIds.has(w.id)) {
+      duplicateRoutesExcluded += 1;
+      return;
+    }
+    if (w.id) {
+      seenWireIds.add(w.id);
+    }
+
+    // Deduplicate identical undirected endpoint routes for the same conductor category
+    const hasEndpoints = Boolean(w.fromPointId && w.toPointId);
+    if (hasEndpoints) {
+      const pairKey = [w.fromPointId, w.toPointId].sort().join('<->');
+      const routeKey = `${pairKey}||${w.category}`;
+      if (seenRouteKeys.has(routeKey)) {
+        duplicateRoutesExcluded += 1;
+        return;
+      }
+      seenRouteKeys.add(routeKey);
+    }
+
+    uniqueRouteCount += 1;
+
+    const fromPt = pointById.get(w.fromPointId);
+    const toPt = pointById.get(w.toPointId);
+    const wFromFloor = Number.isFinite(w.fromFloor) ? w.fromFloor : Number.isFinite(w.floor) ? w.floor : 1;
+    const wToFloor = Number.isFinite(w.toFloor) ? w.toFloor : wFromFloor;
+    floorsSet.add(wFromFloor);
+    floorsSet.add(wToFloor);
+
+    const cktCfg = w.circuit ? project.circuitCableConfigs?.[w.circuit] : undefined;
+    const rawSize = w.cableSizeSqMm ?? cktCfg?.cableSizeSqMm ?? null;
+    const cableSizeSqMm =
+      typeof rawSize === 'number' && Number.isFinite(rawSize) && rawSize > 0 ? rawSize : null;
+    const cableSizeLabel = cableSizeSqMm !== null ? `${cableSizeSqMm} sq.mm` : 'Not specified';
+
+    const linkedName = w.productName?.trim() || cktCfg?.productName?.trim();
+    const wireTypeLabel = linkedName
+      ? `${linkedName} (${WIRE_CATEGORY_LABELS[w.category]})`
+      : `${WIRE_CATEGORY_LABELS[w.category]} — ${w.wireType || WIRE_CATEGORY_DEFAULTS[w.category].wireType}`;
+
+    const material: CableMaterial = w.cableMaterial || cktCfg?.cableMaterial || 'Unspecified';
+    const groupKey = `${wireTypeLabel}||${cableSizeLabel}||${material}`;
+
+    let group = groups.get(groupKey);
+    if (!group) {
+      group = {
+        key: groupKey,
+        wireType: wireTypeLabel,
+        category: w.category,
+        cableSizeSqMm,
+        cableSizeLabel,
+        cableMaterial: material,
+        routeCount: 0,
+        calculatedRouteCount: 0,
+        uncalculatedRouteCount: 0,
+        floors: new Set<number>(),
+        installedSumM: 0,
+      };
+      groups.set(groupKey, group);
+    }
+
+    group.routeCount += 1;
+    group.floors.add(wFromFloor);
+    group.floors.add(wToFloor);
+
+    const hasValidGeometry =
+      Boolean(fromPt && toPt) &&
+      Number.isFinite(fromPt!.x) &&
+      Number.isFinite(fromPt!.y) &&
+      Number.isFinite(toPt!.x) &&
+      Number.isFinite(toPt!.y) &&
+      (w.waypoints ?? []).every((wp) => Number.isFinite(wp.x) && Number.isFinite(wp.y));
+
+    if (!hasValidGeometry) {
+      group.uncalculatedRouteCount += 1;
+      uncalculatedRouteCount += 1;
+      return;
+    }
+
+    const breakdown = computeWireLengthBreakdown(w, project, allowancePct);
+    if (!Number.isFinite(breakdown.baseRouteM) || breakdown.baseRouteM <= 0) {
+      group.uncalculatedRouteCount += 1;
+      uncalculatedRouteCount += 1;
+      return;
+    }
+
+    group.calculatedRouteCount += 1;
+    calculatedRouteCount += 1;
+    group.installedSumM += breakdown.baseRouteM;
+  });
+
+  const rows: WireConsumptionRow[] = Array.from(groups.values())
+    .sort((a, b) => {
+      const sa = a.cableSizeSqMm ?? Number.POSITIVE_INFINITY;
+      const sb = b.cableSizeSqMm ?? Number.POSITIVE_INFINITY;
+      if (sa !== sb) return sa - sb;
+      return a.wireType.localeCompare(b.wireType);
+    })
+    .map((g) => {
+      const installedLengthM =
+        g.calculatedRouteCount > 0 ? round2(g.installedSumM) : null;
+      const procurementAllowanceM =
+        installedLengthM !== null ? round2(installedLengthM * (allowancePct / 100)) : null;
+      return {
+        key: g.key,
+        wireType: g.wireType,
+        category: g.category,
+        cableSizeSqMm: g.cableSizeSqMm,
+        cableSizeLabel: g.cableSizeLabel,
+        cableMaterial: g.cableMaterial,
+        routeCount: g.routeCount,
+        calculatedRouteCount: g.calculatedRouteCount,
+        uncalculatedRouteCount: g.uncalculatedRouteCount,
+        floors: Array.from(g.floors).sort((a, b) => a - b),
+        installedLengthM,
+        procurementAllowanceM,
+      };
+    });
+
+  const overallInstalledLengthM =
+    calculatedRouteCount > 0
+      ? round2(rows.reduce((sum, r) => sum + (r.installedLengthM ?? 0), 0))
+      : null;
+  const overallProcurementAllowanceM =
+    overallInstalledLengthM !== null
+      ? round2(overallInstalledLengthM * (allowancePct / 100))
+      : null;
+
+  return {
+    procurementAllowancePct: allowancePct,
+    rows,
+    totalSavedRoutes: rawWires.length,
+    uniqueRouteCount,
+    calculatedRouteCount,
+    uncalculatedRouteCount,
+    duplicateRoutesExcluded,
+    floorsCovered: Array.from(floorsSet).sort((a, b) => a - b),
+    overallInstalledLengthM,
+    overallProcurementAllowanceM,
+  };
+}
+
