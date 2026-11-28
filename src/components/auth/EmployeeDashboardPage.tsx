@@ -11,6 +11,7 @@ import { AiDrawingImporterModal } from '../aiDrawing/AiDrawingImporterModal';
 
 interface EmployeeDashboardPageProps {
   projects: ProjectData[];
+  deletedProjects?: ProjectData[];
   activeProjectId: string;
   notice?: string | null;
   onClearNotice?: () => void;
@@ -18,6 +19,12 @@ interface EmployeeDashboardPageProps {
   onNavigateRoute: (route: AppRoute) => void;
   onOpenProject: (projectId: string, targetScreen: ScreenId, initialView?: ViewMode) => void;
   onCreateProject: (input: ProjectCreationInput) => void;
+  onRenameProject?: (projectId: string, newName: string) => void;
+  onDuplicateProject?: (projectId: string) => void;
+  onDeleteProject?: (projectId: string) => void;
+  onRestoreProject?: (projectId: string) => void;
+  onPermanentlyDeleteProject?: (projectId: string) => void;
+  onOpenCloudFiles?: (projectId: string) => void;
   onAiDrawingImport?: (project: ProjectData) => void;
 }
 
@@ -34,6 +41,7 @@ function formatDate(iso: string | null | undefined): string {
 
 export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
   projects,
+  deletedProjects = [],
   activeProjectId,
   notice,
   onClearNotice,
@@ -41,6 +49,12 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
   onNavigateRoute,
   onOpenProject,
   onCreateProject,
+  onRenameProject,
+  onDuplicateProject,
+  onDeleteProject,
+  onRestoreProject,
+  onPermanentlyDeleteProject,
+  onOpenCloudFiles,
   onAiDrawingImport,
 }) => {
   const { isAuthenticated, authLoading, profileLoading, user, profile, signOut } = useAuth();
@@ -52,6 +66,9 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
   });
   const [showNewModal, setShowNewModal] = useState(false);
   const [showAiDrawingModal, setShowAiDrawingModal] = useState(false);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const handleSignOut = async () => {
     await signOut();
@@ -315,6 +332,129 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
                                 download
                               </span>
                             </button>
+                            {onRenameProject && (
+                              renamingId === proj.id ? (
+                                <form
+                                  onSubmit={(e) => {
+                                    e.preventDefault();
+                                    const trimmed = renameDraft.trim();
+                                    if (trimmed) onRenameProject(proj.id, trimmed);
+                                    setRenamingId(null);
+                                  }}
+                                  className="inline-flex items-center gap-1"
+                                >
+                                  <input
+                                    type="text"
+                                    value={renameDraft}
+                                    onChange={(e) => setRenameDraft(e.target.value)}
+                                    autoFocus
+                                    aria-label="Rename project"
+                                    className="w-36 px-2 py-1 rounded-sm bg-surface-container-low border border-primary text-on-surface text-label-sm"
+                                  />
+                                  <button
+                                    type="submit"
+                                    title="Save Name"
+                                    className="p-1 rounded-sm bg-primary text-on-primary cursor-pointer"
+                                  >
+                                    <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                                      check
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setRenamingId(null)}
+                                    title="Cancel"
+                                    className="p-1 rounded-sm border border-outline-variant text-on-surface-variant cursor-pointer"
+                                  >
+                                    <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                                      close
+                                    </span>
+                                  </button>
+                                </form>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRenamingId(proj.id);
+                                    setRenameDraft(proj.name);
+                                  }}
+                                  title="Rename Project"
+                                  aria-label={`Rename ${proj.name}`}
+                                  className="p-1.5 rounded-sm border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary cursor-pointer"
+                                >
+                                  <span className="material-symbols-outlined text-[17px]" aria-hidden="true">
+                                    drive_file_rename_outline
+                                  </span>
+                                </button>
+                              )
+                            )}
+                            {onDuplicateProject && (
+                              <button
+                                type="button"
+                                onClick={() => onDuplicateProject(proj.id)}
+                                title="Duplicate Project"
+                                aria-label={`Duplicate ${proj.name}`}
+                                className="p-1.5 rounded-sm border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary cursor-pointer"
+                              >
+                                <span className="material-symbols-outlined text-[17px]" aria-hidden="true">
+                                  content_copy
+                                </span>
+                              </button>
+                            )}
+                            {onOpenCloudFiles && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenCloudFiles(proj.id)}
+                                title="Cloud Attachments & Versions"
+                                aria-label={`Cloud files for ${proj.name}`}
+                                className="p-1.5 rounded-sm border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary cursor-pointer"
+                              >
+                                <span className="material-symbols-outlined text-[17px]" aria-hidden="true">
+                                  cloud_queue
+                                </span>
+                              </button>
+                            )}
+                            {onDeleteProject && (
+                              confirmDeleteId === proj.id ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setConfirmDeleteId(null);
+                                      onDeleteProject(proj.id);
+                                    }}
+                                    title="Confirm Delete"
+                                    className="p-1 rounded-sm bg-error text-on-primary cursor-pointer"
+                                  >
+                                    <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                                      check
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteId(null)}
+                                    title="Cancel"
+                                    className="p-1 rounded-sm border border-outline-variant text-on-surface-variant cursor-pointer"
+                                  >
+                                    <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                                      close
+                                    </span>
+                                  </button>
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteId(proj.id)}
+                                  title="Delete Project"
+                                  aria-label={`Delete ${proj.name}`}
+                                  className="p-1.5 rounded-sm border border-outline-variant text-error hover:border-error cursor-pointer"
+                                >
+                                  <span className="material-symbols-outlined text-[17px]" aria-hidden="true">
+                                    delete
+                                  </span>
+                                </button>
+                              )
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -324,6 +464,49 @@ export const EmployeeDashboardPage: React.FC<EmployeeDashboardPageProps> = ({
               </tbody>
             </table>
           </div>
+
+          {deletedProjects.length > 0 && (
+            <div className="p-gutter-md border-t border-outline-variant bg-surface-container-low flex flex-col gap-gutter-sm">
+              <div className="font-title text-title-sm text-on-surface">
+                Recently Deleted Projects ({deletedProjects.length})
+              </div>
+              <div className="flex flex-col gap-gutter-xs">
+                {deletedProjects.map((delProj) => (
+                  <div
+                    key={delProj.id}
+                    className="px-gutter-md py-gutter-sm rounded-sm bg-surface-container border border-outline-variant flex flex-wrap items-center justify-between gap-gutter-sm"
+                  >
+                    <div>
+                      <span className="font-title text-title-sm text-on-surface">{delProj.name}</span>
+                      <span className="ml-2 font-mono text-mono-sm text-on-surface-variant">
+                        {delProj.refCode}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-gutter-xs">
+                      {onRestoreProject && (
+                        <button
+                          type="button"
+                          onClick={() => onRestoreProject(delProj.id)}
+                          className="px-gutter-sm py-1 rounded-sm bg-primary-container border border-primary text-primary hover:bg-primary hover:text-on-primary font-label text-label-sm cursor-pointer"
+                        >
+                          Restore
+                        </button>
+                      )}
+                      {onPermanentlyDeleteProject && (
+                        <button
+                          type="button"
+                          onClick={() => onPermanentlyDeleteProject(delProj.id)}
+                          className="px-gutter-sm py-1 rounded-sm border border-outline-variant text-error hover:border-error font-label text-label-sm cursor-pointer"
+                        >
+                          Delete Permanently
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
       </main>
 

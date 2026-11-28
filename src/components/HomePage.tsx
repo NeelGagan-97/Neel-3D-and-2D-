@@ -13,27 +13,42 @@ import { AiDrawingImporterModal } from './aiDrawing/AiDrawingImporterModal';
 
 interface HomePageProps {
   projects: ProjectData[];
+  deletedProjects?: ProjectData[];
   activeProjectId: string;
   onNavigate: (screen: ScreenId, initialView?: ViewMode) => void;
   onOpenProject: (projectId: string, targetScreen: ScreenId, initialView?: ViewMode) => void;
   onCreateProject: (input: ProjectCreationInput) => void;
   onImportProject: (rawJson: string) => { ok: boolean; error?: string };
+  onRenameProject?: (projectId: string, newName: string) => void;
+  onDuplicateProject?: (projectId: string) => void;
   onDeleteProject: (projectId: string) => void;
+  onRestoreProject?: (projectId: string) => void;
+  onPermanentlyDeleteProject?: (projectId: string) => void;
+  onOpenCloudFiles?: (projectId: string) => void;
 }
 
 export const HomePage: React.FC<HomePageProps> = ({
   projects,
+  deletedProjects = [],
   activeProjectId,
   onNavigate,
   onOpenProject,
   onCreateProject,
   onImportProject,
+  onRenameProject,
+  onDuplicateProject,
   onDeleteProject,
+  onRestoreProject,
+  onPermanentlyDeleteProject,
+  onOpenCloudFiles,
 }) => {
   const [showNewModal, setShowNewModal] = useState(false);
   const [showAiDrawingModal, setShowAiDrawingModal] = useState(false);
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [showDeletedDrawer, setShowDeletedDrawer] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importPreview, setImportPreview] = useState<ParsedImportPreview | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -400,8 +415,77 @@ export const HomePage: React.FC<HomePageProps> = ({
                 </span>
                 <span>New Project</span>
               </button>
+              {deletedProjects.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowDeletedDrawer((v) => !v)}
+                  className="inline-flex items-center gap-gutter-xs px-gutter-md py-gutter-sm rounded-md bg-surface-container border border-outline-variant text-on-surface-variant hover:text-on-surface hover:border-outline font-label text-label-md transition-colors cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+                    restore_from_trash
+                  </span>
+                  <span>Deleted ({deletedProjects.length})</span>
+                </button>
+              )}
             </div>
           </div>
+
+          {showDeletedDrawer && deletedProjects.length > 0 && (
+            <div className="mb-gutter-lg p-gutter-md rounded-md bg-surface-container border border-outline-variant flex flex-col gap-gutter-sm">
+              <div className="flex items-center justify-between">
+                <h3 className="font-title text-title-sm text-on-surface">
+                  Recently Deleted Projects
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowDeletedDrawer(false)}
+                  className="font-label text-label-sm text-on-surface-variant hover:text-on-surface cursor-pointer"
+                >
+                  Hide
+                </button>
+              </div>
+              <div className="flex flex-col gap-gutter-xs">
+                {deletedProjects.map((delProj) => (
+                  <div
+                    key={delProj.id}
+                    className="px-gutter-md py-gutter-sm rounded-sm bg-surface-container-low border border-outline-variant flex flex-wrap items-center justify-between gap-gutter-sm"
+                  >
+                    <div>
+                      <div className="font-title text-title-sm text-on-surface">{delProj.name}</div>
+                      <div className="font-mono text-mono-sm text-on-surface-variant">
+                        {delProj.refCode} • Deleted{' '}
+                        {delProj.deletedAt ? new Date(delProj.deletedAt).toLocaleString() : 'recently'}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-gutter-xs">
+                      {onRestoreProject && (
+                        <button
+                          type="button"
+                          onClick={() => onRestoreProject(delProj.id)}
+                          className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-primary-container border border-primary text-primary hover:bg-primary hover:text-on-primary font-label text-label-sm cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                            restore
+                          </span>
+                          <span>Restore</span>
+                        </button>
+                      )}
+                      {onPermanentlyDeleteProject && (
+                        <button
+                          type="button"
+                          onClick={() => onPermanentlyDeleteProject(delProj.id)}
+                          title="Delete permanently"
+                          className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-surface-container border border-outline-variant text-error hover:border-error font-label text-label-sm cursor-pointer"
+                        >
+                          <span>Delete Permanently</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {importError && (
             <div className="mb-gutter-lg px-gutter-md py-gutter-sm rounded-sm bg-error/15 border border-error text-error font-mono text-mono-sm flex items-center justify-between">
@@ -462,10 +546,52 @@ export const HomePage: React.FC<HomePageProps> = ({
                     </div>
                     <div className="p-gutter-lg flex flex-col gap-gutter-sm flex-1">
                       <header className="flex items-start justify-between gap-gutter-sm">
-                        <div>
-                          <h3 className="font-headline text-headline-sm text-on-surface">
-                            {proj.name}
-                          </h3>
+                        <div className="min-w-0 flex-1">
+                          {renamingId === proj.id ? (
+                            <form
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                const trimmed = renameDraft.trim();
+                                if (trimmed && onRenameProject) {
+                                  onRenameProject(proj.id, trimmed);
+                                }
+                                setRenamingId(null);
+                              }}
+                              className="flex items-center gap-1"
+                            >
+                              <input
+                                type="text"
+                                value={renameDraft}
+                                onChange={(e) => setRenameDraft(e.target.value)}
+                                autoFocus
+                                aria-label="Rename project"
+                                className="w-full px-2 py-1 rounded-sm bg-surface-container-low border border-primary text-on-surface font-title text-title-sm focus:outline-none"
+                              />
+                              <button
+                                type="submit"
+                                title="Save Name"
+                                className="w-7 h-7 inline-flex items-center justify-center rounded-sm bg-primary text-on-primary cursor-pointer shrink-0"
+                              >
+                                <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                                  check
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setRenamingId(null)}
+                                title="Cancel Rename"
+                                className="w-7 h-7 inline-flex items-center justify-center rounded-sm bg-surface-container-low border border-outline-variant text-on-surface-variant cursor-pointer shrink-0"
+                              >
+                                <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                                  close
+                                </span>
+                              </button>
+                            </form>
+                          ) : (
+                            <h3 className="font-headline text-headline-sm text-on-surface truncate">
+                              {proj.name}
+                            </h3>
+                          )}
                           <p className="font-mono text-mono-sm text-on-surface-variant tabular-nums">
                             {metrics.dimensionsDisplay} • {metrics.totalKw.toFixed(2)} kW
                           </p>
@@ -495,6 +621,39 @@ export const HomePage: React.FC<HomePageProps> = ({
                             edit
                           </span>
                         </button>
+
+                        {/* Rename Symbol */}
+                        {onRenameProject && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRenamingId(proj.id);
+                              setRenameDraft(proj.name);
+                            }}
+                            title="Rename Project"
+                            aria-label={`Rename ${proj.name}`}
+                            className="w-9 h-9 inline-flex items-center justify-center rounded-sm bg-surface-container border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary transition-colors cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
+                              drive_file_rename_outline
+                            </span>
+                          </button>
+                        )}
+
+                        {/* Duplicate Symbol */}
+                        {onDuplicateProject && (
+                          <button
+                            type="button"
+                            onClick={() => onDuplicateProject(proj.id)}
+                            title="Duplicate Project"
+                            aria-label={`Duplicate ${proj.name}`}
+                            className="w-9 h-9 inline-flex items-center justify-center rounded-sm bg-surface-container border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary transition-colors cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
+                              content_copy
+                            </span>
+                          </button>
+                        )}
 
                         {/* Download Symbol */}
                         <button
@@ -553,18 +712,34 @@ export const HomePage: React.FC<HomePageProps> = ({
                         )}
                       </div>
 
-                      {/* Project Summary Symbol */}
-                      <button
-                        type="button"
-                        onClick={() => onOpenProject(proj.id, 'summary')}
-                        title="View Project Summary & BOQ"
-                        aria-label={`View summary for ${proj.name}`}
-                        className="w-9 h-9 inline-flex items-center justify-center rounded-sm bg-surface-container border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary transition-colors cursor-pointer"
-                      >
-                        <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
-                          summarize
-                        </span>
-                      </button>
+                      <div className="flex items-center gap-gutter-xs">
+                        {onOpenCloudFiles && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenCloudFiles(proj.id)}
+                            title="Cloud Attachments & Version History"
+                            aria-label={`Cloud files for ${proj.name}`}
+                            className="w-9 h-9 inline-flex items-center justify-center rounded-sm bg-surface-container border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary transition-colors cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
+                              cloud_queue
+                            </span>
+                          </button>
+                        )}
+
+                        {/* Project Summary Symbol */}
+                        <button
+                          type="button"
+                          onClick={() => onOpenProject(proj.id, 'summary')}
+                          title="View Project Summary & BOQ"
+                          aria-label={`View summary for ${proj.name}`}
+                          className="w-9 h-9 inline-flex items-center justify-center rounded-sm bg-surface-container border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary transition-colors cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[19px]" aria-hidden="true">
+                            summarize
+                          </span>
+                        </button>
+                      </div>
                     </footer>
                   </article>
                 );

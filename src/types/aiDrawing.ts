@@ -494,6 +494,9 @@ export interface ImportedTextAnnotation2D {
  */
 export interface ReferenceOverlayConfig {
   dataUrl: string;
+  /** Optional Supabase Storage object path in bucket `project-assets` when offloaded to cloud */
+  storagePath?: string;
+  storageBucket?: string;
   widthPx: number;
   heightPx: number;
   opacity: number; // 0..1

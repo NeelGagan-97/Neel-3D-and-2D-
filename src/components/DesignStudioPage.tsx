@@ -187,6 +187,8 @@ interface DesignStudioPageProps {
   onUndo: () => void;
   onRedo: () => void;
   onSaveProject: () => void;
+  onOpenCloudFiles?: () => void;
+  onOpenVersionHistory?: () => void;
 }
 
 const DRAWING_TOOLS: { id: CanvasTool; label: string; icon: string; hint: string }[] = [
@@ -221,6 +223,8 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
   onUndo,
   onRedo,
   onSaveProject,
+  onOpenCloudFiles,
+  onOpenVersionHistory,
 }) => {
   const { profile, isAdmin: authIsAdmin } = useAuth();
   const isAdmin = authIsAdmin || profile?.role === 'ADMIN';
@@ -2673,6 +2677,30 @@ export const DesignStudioPage: React.FC<DesignStudioPageProps> = ({
             <span className="material-symbols-outlined text-[15px]" aria-hidden="true">save_as</span>
             <span>Save As</span>
           </button>
+
+          {onOpenCloudFiles && (
+            <button
+              type="button"
+              onClick={onOpenCloudFiles}
+              title="Project Cloud Attachments & Version History"
+              className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-surface-container border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary font-label text-label-sm cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[15px]" aria-hidden="true">cloud_queue</span>
+              <span>Files</span>
+            </button>
+          )}
+
+          {onOpenVersionHistory && (
+            <button
+              type="button"
+              onClick={onOpenVersionHistory}
+              title="View & Restore Cloud Project Versions"
+              className="inline-flex items-center gap-1 px-gutter-sm py-1 rounded-sm bg-surface-container border border-outline-variant text-on-surface-variant hover:text-primary hover:border-primary font-label text-label-sm cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[15px]" aria-hidden="true">history</span>
+              <span>Versions</span>
+            </button>
+          )}
 
           {/* AI Drawing Import Direct Entry Point */}
           <button

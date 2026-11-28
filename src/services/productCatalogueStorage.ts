@@ -350,7 +350,32 @@ let centralManufacturersCache: ManufacturerReference[] | null = null;
 let centralStorageBackend: 'supabase' | 'local-store' = 'local-store';
 let centralHydrationPromise: Promise<void> | null = null;
 let centralHydratedOnce = false;
+let authRehydrationWired = false;
 const catalogueListeners = new Set<() => void>();
+
+function ensureAuthRehydrationListener(): void {
+  if (authRehydrationWired || !supabase || !isSupabaseConfigured || typeof window === 'undefined') {
+    return;
+  }
+  authRehydrationWired = true;
+  supabase.auth.onAuthStateChange((event, session) => {
+    if (event === 'SIGNED_OUT') {
+      centralHydratedOnce = false;
+      return;
+    }
+    if (
+      session?.access_token &&
+      (event === 'SIGNED_IN' || event === 'INITIAL_SESSION' || event === 'TOKEN_REFRESHED')
+    ) {
+      if (!centralProductsCache || centralProductsCache.length === 0 || centralStorageBackend !== 'supabase') {
+        // Defer off the onAuthStateChange callback tick to prevent Supabase Auth Web Lock deadlocks
+        window.setTimeout(() => {
+          void hydrateCentralCatalogue(true);
+        }, 0);
+      }
+    }
+  });
+}
 
 function notifyCatalogueListeners(): void {
   catalogueListeners.forEach((fn) => {
@@ -525,6 +550,8 @@ export async function hydrateCentralCatalogue(force = false): Promise<{
   manufacturers: ManufacturerReference[];
   storageBackend: 'supabase' | 'local-store';
 }> {
+  ensureAuthRehydrationListener();
+
   if (centralHydrationPromise && !force) {
     await centralHydrationPromise;
     return {
@@ -534,7 +561,12 @@ export async function hydrateCentralCatalogue(force = false): Promise<{
     };
   }
 
-  if (centralHydratedOnce && !force && centralProductsCache) {
+  if (
+    centralHydratedOnce &&
+    !force &&
+    centralProductsCache &&
+    (centralProductsCache.length > 0 || centralStorageBackend === 'supabase')
+  ) {
     return {
       products: centralProductsCache,
       manufacturers: centralManufacturersCache ?? loadCatalogueManufacturers(),
@@ -548,7 +580,7 @@ export async function hydrateCentralCatalogue(force = false): Promise<{
     let remoteManufacturers: ManufacturerReference[] = [];
     let backend: 'supabase' | 'local-store' = 'local-store';
 
-    // 1. Try direct Supabase read when browser Supabase is configured & user is signed in
+    // 1. Primary source across dev & production (Cloudflare Worker): direct Supabase PostgreSQL read
     if (supabase && isSupabaseConfigured) {
       try {
         const { data: sessionData } = await supabase.auth.getSession();
@@ -556,6 +588,7 @@ export async function hydrateCentralCatalogue(force = false): Promise<{
           const collected: ProductCatalogueItem[] = [];
           const pageSize = 1000;
           let offset = 0;
+          let supabaseQueryErrored = false;
           while (true) {
             const { data, error } = await supabase
               .from('catalogue_products')
@@ -563,7 +596,11 @@ export async function hydrateCentralCatalogue(force = false): Promise<{
               .eq('is_active', true)
               .order('updated_at', { ascending: false })
               .range(offset, offset + pageSize - 1);
-            if (error) break;
+            if (error) {
+              supabaseQueryErrored = true;
+              console.warn('[Catalogue] Supabase catalogue_products query error:', error.message);
+              break;
+            }
             const rows = data ?? [];
             for (const row of rows) {
               collected.push(
@@ -634,42 +671,58 @@ export async function hydrateCentralCatalogue(force = false): Promise<{
             offset += pageSize;
           }
 
-          const { data: mfrRows } = await supabase
-            .from('catalogue_manufacturers')
-            .select('*')
-            .eq('is_active', true);
+          const collectedMfrs: ManufacturerReference[] = [];
+          let mfrOffset = 0;
+          while (true) {
+            const { data: mfrRows, error: mfrErr } = await supabase
+              .from('catalogue_manufacturers')
+              .select('*')
+              .eq('is_active', true)
+              .range(mfrOffset, mfrOffset + pageSize - 1);
+            if (mfrErr) {
+              console.warn('[Catalogue] Supabase catalogue_manufacturers query error:', mfrErr.message);
+              break;
+            }
+            const rows = mfrRows ?? [];
+            for (const m of rows) {
+              collectedMfrs.push({
+                id: String(m.id),
+                slug: String(m.slug),
+                name: String(m.name),
+                websiteUrl: String(m.website_url || ''),
+                logoStoragePath: typeof m.logo_storage_path === 'string' ? m.logo_storage_path : null,
+                logoUrl: typeof m.logo_url === 'string' ? m.logo_url : null,
+                primaryCategories: Array.isArray(m.primary_categories)
+                  ? (m.primary_categories as CatalogueCategory[])
+                  : [],
+                notes: String(m.notes || ''),
+                source: (m.source as ManufacturerReference['source']) || 'admin-entry',
+                isActive: m.is_active !== false,
+              });
+            }
+            if (rows.length < pageSize) break;
+            mfrOffset += pageSize;
+          }
 
-          if (collected.length > 0 || (mfrRows && mfrRows.length > 0)) {
+          if (!supabaseQueryErrored && (collected.length > 0 || collectedMfrs.length > 0)) {
             remoteProducts = collected;
-            remoteManufacturers = (mfrRows ?? []).map((m) => ({
-              id: String(m.id),
-              slug: String(m.slug),
-              name: String(m.name),
-              websiteUrl: String(m.website_url || ''),
-              logoStoragePath: typeof m.logo_storage_path === 'string' ? m.logo_storage_path : null,
-              logoUrl: typeof m.logo_url === 'string' ? m.logo_url : null,
-              primaryCategories: Array.isArray(m.primary_categories)
-                ? (m.primary_categories as CatalogueCategory[])
-                : [],
-              notes: String(m.notes || ''),
-              source: (m.source as ManufacturerReference['source']) || 'admin-entry',
-              isActive: m.is_active !== false,
-            }));
+            remoteManufacturers = collectedMfrs;
             backend = 'supabase';
           }
         }
-      } catch {
-        // Fall through to central API
+      } catch (err) {
+        console.warn('[Catalogue] Direct Supabase hydration fell back to API:', err);
       }
     }
 
-    // 2. Fallback / primary preview source: Blue Space server central catalogue API
+    // 2. Fallback: Blue Space server central catalogue API (only when JSON response is returned)
     if (remoteProducts.length === 0 && typeof fetch === 'function') {
       try {
         const resp = await fetch('/api/catalogue/central', {
           headers: { Accept: 'application/json' },
         });
-        if (resp.ok) {
+        const ct = resp.headers.get('content-type') || '';
+        if (resp.ok && ct.includes('application/json')) {
           const json = (await resp.json()) as {
             ok?: boolean;
             products?: ProductCatalogueItem[];
@@ -683,7 +736,7 @@ export async function hydrateCentralCatalogue(force = false): Promise<{
           }
         }
       } catch {
-        // Offline or unit test environment without server
+        // Static Worker deployment or offline environment without Express /api/catalogue/central
       }
     }
 
@@ -696,7 +749,10 @@ export async function hydrateCentralCatalogue(force = false): Promise<{
     centralProductsCache = mergedProducts;
     centralManufacturersCache = mergedManufacturers;
     centralStorageBackend = backend;
-    centralHydratedOnce = true;
+    // Only lock hydration once we have loaded real records or confirmed Supabase connection
+    if (mergedProducts.length > 0 || backend === 'supabase') {
+      centralHydratedOnce = true;
+    }
     saveLocalBrowserManufacturers(mergedManufacturers);
     notifyCatalogueListeners();
   };
@@ -792,6 +848,100 @@ export function deleteCatalogueProduct(id: string): ProductCatalogueItem[] {
 export async function saveCentralCatalogueProduct(
   payload: Omit<ProductCatalogueItem, 'id' | 'updatedAt'> & { id?: string }
 ): Promise<{ ok: boolean; product?: ProductCatalogueItem; products: ProductCatalogueItem[]; error?: string }> {
+  // 1. Direct Supabase upsert when configured & signed in (works identically on Cloudflare Workers & dev)
+  if (supabase && isSupabaseConfigured) {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData?.session?.access_token) {
+        const sourceKey =
+          payload.sourceKey?.trim() ||
+          (payload.id ? `admin:${payload.id}` : `admin:cat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+        const mSlug =
+          payload.manufacturer
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '') || 'unspecified';
+
+        const { data: mfrRow } = await supabase
+          .from('catalogue_manufacturers')
+          .upsert(
+            {
+              slug: mSlug,
+              name: payload.manufacturer.trim() || 'Unspecified',
+              website_url: payload.manufacturerUrl ?? null,
+              primary_categories: [payload.category],
+              source: payload.source === 'cauvery-import' ? 'cauvery-import' : 'admin-entry',
+              is_active: true,
+            },
+            { onConflict: 'slug' }
+          )
+          .select('id')
+          .maybeSingle();
+
+        const { data: savedRow, error: upsertErr } = await supabase
+          .from('catalogue_products')
+          .upsert(
+            {
+              source_key: sourceKey,
+              source: payload.source || 'admin-entry',
+              source_url: payload.sourceUrl ?? null,
+              source_category: payload.sourceCategory ?? null,
+              category: payload.category,
+              subcategory: payload.subcategory ?? null,
+              manufacturer_id: mfrRow?.id ?? payload.manufacturerId ?? null,
+              manufacturer: payload.manufacturer,
+              brand: payload.brand || payload.manufacturer,
+              product_name: payload.productName,
+              model_number: payload.modelNumber || 'Not specified',
+              sku: payload.sku ?? null,
+              specification: payload.specification || '',
+              technical_specs: payload.technicalSpecs ?? {},
+              variants: payload.variants ?? [],
+              rating: payload.rating || '',
+              wattage_w: payload.wattageW,
+              cable_size_sq_mm: payload.cableSizeSqMm,
+              dimensions: payload.dimensions || '',
+              unit: payload.unit || 'Nos',
+              mrp: payload.mrp ?? null,
+              unit_price: payload.unitPrice,
+              discount_percent: payload.discountPercent ?? null,
+              gst_percent: payload.gstPercent,
+              gst_details: payload.gstDetails ?? null,
+              image_storage_path: payload.imageStoragePath ?? null,
+              image_url: payload.imageUrl ?? null,
+              gallery_images: payload.galleryImages ?? [],
+              datasheet_url: payload.datasheetUrl ?? null,
+              manufacturer_url: payload.manufacturerUrl ?? null,
+              mapped_item_type: payload.mappedItemType ?? null,
+              is_active: payload.isActive !== false,
+            },
+            { onConflict: 'source_key' }
+          )
+          .select('*')
+          .single();
+
+        if (!upsertErr && savedRow) {
+          const saved = sanitizeStoredProductUrls({
+            ...payload,
+            id: String(savedRow.id),
+            sourceKey,
+            manufacturerId: typeof savedRow.manufacturer_id === 'string' ? savedRow.manufacturer_id : null,
+            updatedAt: String(savedRow.updated_at || new Date().toISOString()),
+          });
+          const existing = loadCatalogueProducts();
+          const idx = existing.findIndex((p) => p.id === saved.id || (p.sourceKey && p.sourceKey === sourceKey));
+          const next =
+            idx >= 0 ? existing.map((p, i) => (i === idx ? saved : p)) : [saved, ...existing];
+          saveCatalogueProducts(next);
+          return { ok: true, product: saved, products: next };
+        }
+      }
+    } catch {
+      // Fall through to Express API when available
+    }
+  }
+
   try {
     const headers = await buildAdminHeaders();
     const resp = await fetch('/api/catalogue/products', {
@@ -799,6 +949,10 @@ export async function saveCentralCatalogueProduct(
       headers,
       body: JSON.stringify(payload),
     });
+    const ct = resp.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      throw new Error('Server API route is not available on this host.');
+    }
     const json = (await resp.json()) as { ok?: boolean; product?: ProductCatalogueItem; error?: string };
     if (!resp.ok || !json.ok || !json.product) {
       throw new Error(json?.error || `HTTP ${resp.status}`);
@@ -813,7 +967,6 @@ export async function saveCentralCatalogueProduct(
     saveCatalogueProducts(next);
     return { ok: true, product: saved, products: next };
   } catch (err) {
-    // Fallback to local state if server route unavailable
     const next = payload.id
       ? updateCatalogueProduct(payload.id, payload)
       : addCatalogueProduct(payload);
@@ -828,13 +981,33 @@ export async function saveCentralCatalogueProduct(
 export async function removeCentralCatalogueProduct(
   id: string
 ): Promise<{ ok: boolean; products: ProductCatalogueItem[]; error?: string }> {
+  if (supabase && isSupabaseConfigured) {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData?.session?.access_token) {
+        const target = loadCatalogueProducts().find((p) => p.id === id);
+        const query = target?.sourceKey
+          ? supabase.from('catalogue_products').delete().eq('source_key', target.sourceKey)
+          : supabase.from('catalogue_products').delete().eq('id', id);
+        const { error } = await query;
+        if (!error) {
+          const next = deleteCatalogueProduct(id);
+          return { ok: true, products: next };
+        }
+      }
+    } catch {
+      // Fall through to Express API
+    }
+  }
+
   try {
     const headers = await buildAdminHeaders();
     const resp = await fetch(`/api/catalogue/products/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers,
     });
-    if (!resp.ok) {
+    const ct = resp.headers.get('content-type') || '';
+    if (!resp.ok && ct.includes('application/json')) {
       const json = (await resp.json().catch(() => null)) as { error?: string } | null;
       return { ok: false, products: loadCatalogueProducts(), error: json?.error || `HTTP ${resp.status}` };
     }
@@ -848,6 +1021,67 @@ export async function removeCentralCatalogueProduct(
 export async function saveCentralManufacturer(
   mfr: Omit<ManufacturerReference, 'slug'> & { slug?: string }
 ): Promise<{ ok: boolean; manufacturers: ManufacturerReference[]; error?: string }> {
+  if (supabase && isSupabaseConfigured) {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData?.session?.access_token) {
+        const slug =
+          mfr.slug?.trim() ||
+          mfr.name
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '') ||
+          'unspecified';
+        const { data: savedRow, error } = await supabase
+          .from('catalogue_manufacturers')
+          .upsert(
+            {
+              slug,
+              name: mfr.name.trim(),
+              website_url: mfr.websiteUrl?.trim() || null,
+              logo_storage_path: mfr.logoStoragePath ?? null,
+              logo_url: mfr.logoUrl ?? null,
+              primary_categories: mfr.primaryCategories ?? [],
+              notes: mfr.notes?.trim() || '',
+              source: mfr.source || 'admin-entry',
+              is_active: mfr.isActive !== false,
+            },
+            { onConflict: 'slug' }
+          )
+          .select('*')
+          .single();
+
+        if (!error && savedRow) {
+          const saved: ManufacturerReference = {
+            id: String(savedRow.id),
+            slug: String(savedRow.slug),
+            name: String(savedRow.name),
+            websiteUrl: String(savedRow.website_url || ''),
+            logoStoragePath: typeof savedRow.logo_storage_path === 'string' ? savedRow.logo_storage_path : null,
+            logoUrl: typeof savedRow.logo_url === 'string' ? savedRow.logo_url : null,
+            primaryCategories: Array.isArray(savedRow.primary_categories)
+              ? (savedRow.primary_categories as CatalogueCategory[])
+              : [],
+            notes: String(savedRow.notes || ''),
+            source: (savedRow.source as ManufacturerReference['source']) || 'admin-entry',
+            isActive: savedRow.is_active !== false,
+          };
+          const existing = loadCatalogueManufacturers();
+          const idx = existing.findIndex((x) => x.slug === saved.slug);
+          const merged =
+            idx >= 0 ? existing.map((x, i) => (i === idx ? { ...x, ...saved } : x)) : [...existing, saved];
+          centralManufacturersCache = computeManufacturerCounts(loadCatalogueProducts(), merged);
+          saveLocalBrowserManufacturers(centralManufacturersCache);
+          notifyCatalogueListeners();
+          return { ok: true, manufacturers: centralManufacturersCache };
+        }
+      }
+    } catch {
+      // Fall through to Express API
+    }
+  }
+
   try {
     const headers = await buildAdminHeaders();
     const resp = await fetch('/api/catalogue/manufacturers', {
@@ -855,6 +1089,14 @@ export async function saveCentralManufacturer(
       headers,
       body: JSON.stringify(mfr),
     });
+    const ct = resp.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      return {
+        ok: false,
+        manufacturers: loadCatalogueManufacturers(),
+        error: 'Administrator Supabase session is required to modify manufacturers.',
+      };
+    }
     const json = (await resp.json()) as {
       ok?: boolean;
       manufacturer?: ManufacturerReference;
@@ -890,6 +1132,27 @@ export async function saveCentralManufacturer(
 export async function removeCentralManufacturer(
   slug: string
 ): Promise<{ ok: boolean; manufacturers: ManufacturerReference[]; error?: string }> {
+  if (supabase && isSupabaseConfigured) {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData?.session?.access_token) {
+        const { error } = await supabase
+          .from('catalogue_manufacturers')
+          .delete()
+          .eq('slug', slug);
+        if (!error) {
+          const next = loadCatalogueManufacturers().filter((m) => m.slug !== slug);
+          centralManufacturersCache = next;
+          saveLocalBrowserManufacturers(next);
+          notifyCatalogueListeners();
+          return { ok: true, manufacturers: next };
+        }
+      }
+    } catch {
+      // Fall through to Express API
+    }
+  }
+
   try {
     const headers = await buildAdminHeaders();
     const resp = await fetch(`/api/catalogue/manufacturers/${encodeURIComponent(slug)}`, {

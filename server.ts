@@ -14,9 +14,13 @@ import type { CatalogueCategory, ProductCatalogueItem } from './src/types/catalo
 import {
   deleteCentralManufacturer,
   deleteCentralProduct,
+  ensureCatalogueMigratedToSupabaseOnStartup,
+  getCatalogueMigrationStatus,
+  getCatalogueSupabaseDiagnostics,
   getCauveryImportStatus,
   getCentralCatalogueData,
   isServerSupabaseConfigured,
+  migrateLocalCatalogueToSupabase,
   requestPauseCauveryImport,
   resolveLocalCatalogueImagePath,
   runCauveryCatalogueImport,
@@ -24,6 +28,10 @@ import {
   upsertCentralManufacturer,
   upsertCentralProduct,
 } from './src/server/cauveryCatalogueImporter';
+import {
+  ensureCloudProjectStorageProvisioned,
+  getCloudProjectStorageStatus,
+} from './src/server/supabaseProjectProvisioner';
 
 const execFileAsync = promisify(execFile);
 
@@ -1068,6 +1076,40 @@ export function createApp() {
     }
   });
 
+  app.get('/api/catalogue/diagnostics', async (_req: Request, res: Response) => {
+    try {
+      const diagnostics = await getCatalogueSupabaseDiagnostics();
+      res.status(200).json({ ok: true, diagnostics });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to inspect catalogue diagnostics.',
+      });
+    }
+  });
+
+  app.get('/api/catalogue/migration-status', (_req: Request, res: Response) => {
+    res.status(200).json({ ok: true, migration: getCatalogueMigrationStatus() });
+  });
+
+  app.post('/api/catalogue/migrate-to-supabase', async (req: Request, res: Response) => {
+    const auth = await verifyAdminRequest(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    try {
+      const syncImagesFromSource = req.body?.syncImagesFromSource !== false;
+      const report = await migrateLocalCatalogueToSupabase({ syncImagesFromSource });
+      res.status(report.ok ? 200 : 500).json(report);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Catalogue migration to Supabase failed.',
+      });
+    }
+  });
+
   app.get('/api/catalogue/images/:filename', async (req: Request, res: Response) => {
     const filename = String(req.params.filename || '').trim();
     const resolvedPath = resolveLocalCatalogueImagePath(filename);
@@ -1294,6 +1336,38 @@ export function createApp() {
     res.status(200).json({ ok: true, status });
   });
 
+  // --------------------------------------------------------------------------
+  // AUTOMATIC CLOUD PROJECT STORAGE PROVISIONING & STATUS API
+  // --------------------------------------------------------------------------
+  app.get('/api/projects/cloud-status', async (_req: Request, res: Response) => {
+    try {
+      const status = await getCloudProjectStorageStatus();
+      res.status(200).json({ ok: true, status });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Unable to check cloud project storage status.',
+      });
+    }
+  });
+
+  app.post('/api/projects/provision', async (req: Request, res: Response) => {
+    const auth = await verifyAdminRequest(req);
+    if (!auth.ok) {
+      res.status(auth.status).json({ ok: false, error: auth.error });
+      return;
+    }
+    try {
+      const status = await ensureCloudProjectStorageProvisioned();
+      res.status(status.provisioned ? 200 : 202).json({ ok: status.provisioned, status });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Automatic cloud project provisioning failed.',
+      });
+    }
+  });
+
   app.use((err: unknown, _req: Request, res: Response, next: (err?: unknown) => void) => {
     if (err && typeof err === 'object' && 'type' in err && (err as { type?: string }).type === 'entity.too.large') {
       res.status(413).json({
@@ -1330,6 +1404,27 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Blue Space server running on http://0.0.0.0:${PORT}`);
+    void ensureCloudProjectStorageProvisioned()
+      .then((status) => {
+        if (status.provisioned) {
+          console.log('[Cloud Projects] Supabase tables, RLS policies, and project-assets bucket verified.');
+        } else if (status.missingEnvVars.length > 0) {
+          console.log(
+            `[Cloud Projects] Auto-provisioning waiting on env vars: ${status.missingEnvVars.join(', ')}`
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn('[Cloud Projects] Auto-provisioning check deferred:', err instanceof Error ? err.message : err);
+      });
+
+    void ensureCatalogueMigratedToSupabaseOnStartup()
+      .then((migration) => {
+        console.log(`[Catalogue Sync] Startup status: ${migration.state} — ${migration.reason ?? ''}`);
+      })
+      .catch((err) => {
+        console.warn('[Catalogue Sync] Startup migration check failed:', err instanceof Error ? err.message : err);
+      });
   });
 }
 

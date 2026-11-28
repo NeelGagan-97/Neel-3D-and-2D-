@@ -10,6 +10,7 @@ import {
 import { sanitizeSafeCatalogueImageUrl } from '../src/utils/urlSecurity';
 import {
   CATALOGUE_CATEGORIES,
+  hydrateCentralCatalogue,
   resolveProductWithVariant,
   saveCatalogueProducts,
   updateCatalogueProduct,
@@ -71,7 +72,7 @@ test('sanitizeSafeCatalogueImageUrl allows verified Blue Space hosted paths and 
   assert.equal(sanitizeSafeCatalogueImageUrl('data:image/svg+xml,<svg/>'), undefined);
 });
 
-test('Completed Cauvery Powers import has real products, manufacturers, hosted images on disk, and zero external image links', async () => {
+test('Completed Cauvery Powers import has real products, manufacturers, permanently hosted images, and zero external image links', async () => {
   const snapshot = await getCentralCatalogueData();
   const state = await getCauveryImportStatus();
 
@@ -111,7 +112,8 @@ test('Completed Cauvery Powers import has real products, manufacturers, hosted i
       totalVariants += prod.variants.length;
     }
 
-    // Zero external image links anywhere in product or variants
+    // Zero external image links anywhere in product or variants:
+    // Every image must be hosted in Blue Space Supabase Storage or local hosted cache.
     const allImageUrls: string[] = [];
     if (prod.imageUrl) allImageUrls.push(prod.imageUrl);
     if (prod.galleryImages) allImageUrls.push(...prod.galleryImages);
@@ -121,13 +123,20 @@ test('Completed Cauvery Powers import has real products, manufacturers, hosted i
       }
     }
     for (const imgUrl of allImageUrls) {
+      const isSupabaseStorage =
+        /^https:\/\/[a-z0-9-]+\.supabase\.co\/storage\/v1\/object\/public\/catalogue-images\//i.test(
+          imgUrl
+        );
+      const isLocalHosted = imgUrl.startsWith('/api/catalogue/images/');
       assert.ok(
-        imgUrl.startsWith('/api/catalogue/images/'),
+        isSupabaseStorage || isLocalHosted,
         `Found non-hosted external image URL "${imgUrl}" on product ${prod.id}`
       );
-      const filename = imgUrl.replace('/api/catalogue/images/', '');
-      const fullPath = path.join(imageDir, filename);
-      assert.ok(fs.existsSync(fullPath), `Hosted image file missing on disk: ${filename}`);
+      if (isLocalHosted) {
+        const filename = imgUrl.replace('/api/catalogue/images/', '');
+        const fullPath = path.join(imageDir, filename);
+        assert.ok(fs.existsSync(fullPath), `Hosted image file missing on disk: ${filename}`);
+      }
     }
     if (prod.imageUrl) productsWithHostedImage += 1;
   }
@@ -312,4 +321,63 @@ test('Variant selection, BOQ auto-population (spec, unit, price, discount, GST),
   assert.equal(swExcelRow[headerRow.indexOf('MRP (₹)')], 200);
   assert.equal(swExcelRow[headerRow.indexOf('Discount (%)')], 25);
   assert.equal(swExcelRow[headerRow.indexOf('Price/Unit (₹)')], 150);
+});
+
+test('hydrateCentralCatalogue gracefully ignores HTML SPA fallback from static hosts and allows subsequent hydration', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+
+  try {
+    // 1. Simulate Cloudflare Worker returning index.html for /api/catalogue/central
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) {
+        return new Response('<!doctype html><html><body>SPA</body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          storageBackend: 'supabase',
+          products: [
+            {
+              id: 'prod-sync-1',
+              category: 'Switches',
+              manufacturer: 'Legrand',
+              brand: 'Legrand',
+              productName: 'Legrand 10A Switch',
+              modelNumber: 'LG-10A',
+              specification: '10A 240V',
+              rating: '10A',
+              wattageW: 0,
+              cableSizeSqMm: null,
+              dimensions: '1M',
+              unit: 'Nos',
+              unitPrice: 95,
+              gstPercent: 18,
+              updatedAt: new Date().toISOString(),
+            },
+          ],
+          manufacturers: [],
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }
+      );
+    }) as typeof fetch;
+
+    const first = await hydrateCentralCatalogue(true);
+    assert.equal(first.storageBackend, 'local-store');
+
+    // Because first call did not lock an empty local-store state, a non-forced call still retries
+    const second = await hydrateCentralCatalogue(false);
+    assert.equal(second.storageBackend, 'supabase');
+    assert.ok(second.products.some((p) => p.id === 'prod-sync-1'));
+    assert.equal(fetchCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

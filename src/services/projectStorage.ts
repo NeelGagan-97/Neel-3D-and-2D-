@@ -5,8 +5,8 @@ import {
   migrateProjectFloorSchema,
 } from '../utils/buildingWiring';
 
-const STORAGE_KEY = 'ananya_space_designer_projects_v2';
-const LEGACY_STORAGE_KEY = 'ananya_space_designer_projects_v1';
+export const STORAGE_KEY = 'ananya_space_designer_projects_v2';
+export const LEGACY_STORAGE_KEY = 'ananya_space_designer_projects_v1';
 
 /**
  * Storage repository abstraction backed by localStorage today,

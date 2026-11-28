@@ -441,6 +441,80 @@ export interface ProjectData {
   customRoomBreakdown?: RoomBreakdownRow[];
   customBoqRows?: BoqRow[];
   updatedAt: string;
+  /** Optional cloud storage metadata (populated when synced with Supabase) */
+  cloudId?: string;
+  ownerUserId?: string;
+  cloudVersion?: number;
+  deletedAt?: string | null;
+  lastSyncedAt?: string | null;
+  syncStatus?: ProjectSyncStatus;
+  attachments?: ProjectAttachmentRecord[];
+}
+
+export type ProjectSyncStatus =
+  | 'synced'
+  | 'pending'
+  | 'syncing'
+  | 'conflict'
+  | 'offline'
+  | 'error'
+  | 'local-only';
+
+export type ProjectAttachmentKind =
+  | 'drawing'
+  | 'image'
+  | 'pdf'
+  | 'boq'
+  | 'dxf'
+  | 'backup'
+  | 'attachment';
+
+export interface ProjectAttachmentRecord {
+  id: string;
+  projectId: string;
+  ownerUserId: string;
+  kind: ProjectAttachmentKind;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  storageBucket: string;
+  storagePath: string;
+  sha256?: string | null;
+  deletedAt?: string | null;
+  createdAt: string;
+}
+
+export interface ProjectVersionRecord {
+  id: string;
+  projectId: string;
+  ownerUserId: string;
+  versionNumber: number;
+  changeSummary: string;
+  metadata: Record<string, unknown>;
+  createdBy?: string | null;
+  createdAt: string;
+  projectData?: ProjectData;
+}
+
+export interface ProjectConflictInfo {
+  clientProjectId: string;
+  cloudId: string;
+  projectName: string;
+  localVersion: number;
+  remoteVersion: number;
+  localUpdatedAt: string;
+  remoteUpdatedAt: string;
+  localProject: ProjectData;
+  remoteProject: ProjectData;
+}
+
+export interface LocalMigrationReport {
+  attempted: boolean;
+  migratedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  cleanedLegacyLocalStorage: boolean;
+  errors: string[];
 }
 
 export type SelectedEntity =
